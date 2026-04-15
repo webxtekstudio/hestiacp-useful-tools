@@ -202,7 +202,7 @@ patch_v_backup_user_notify() {
     grep -q "hestia-custom-notify-hook" "$script" 2>/dev/null && return 0
 
     local temp=$(mktemp /tmp/patch-notify.XXXXXX)
-    local line_num=$(grep -n 'cat $BACKUP/$user.log | $SENDMAIL -s "$subj" "$email" "$notify"' "$script" | cut -d: -f1 | head -1)
+    local line_num=$(grep -n '\$SENDMAIL -s "$subj" "$email" "$notify"' "$script" | cut -d: -f1 | head -1)
 
     if [ -n "$line_num" ]; then
         sed -n "1,$((line_num-1))p" "$script" > "$temp"
