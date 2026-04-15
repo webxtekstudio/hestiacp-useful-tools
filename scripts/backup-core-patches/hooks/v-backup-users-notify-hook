@@ -166,8 +166,7 @@ echo "Content-Type: text/plain; charset=UTF-8; name=\"backup.log\""
 echo "Content-Disposition: attachment; filename=\"backup.log\""
 echo ""
 if [ -f "$LOG_FILE" ]; then
-    # Attach only the last 2000 lines to prevent massive emails
-    tail -n 2000 "$LOG_FILE"
+    cat "$LOG_FILE"
 else
     echo "Log file not found at $LOG_FILE"
 fi
