@@ -9,6 +9,13 @@ source "${SCRIPT_DIR}/lib/backend/main.sh"
 source "${SCRIPT_DIR}/lib/frontend/main.sh"
 source "${SCRIPT_DIR}/lib/pentest/main.sh"
 
+# Single-instance guard (prevents concurrent runs from cron + manual)
+LOCK_FILE="/var/run/v-security-audit.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "[$(date)] : v-security-audit is already running. Exiting."
+    exit 1
+fi
 trap cleanup_on_exit EXIT INT TERM
 
 usage() {

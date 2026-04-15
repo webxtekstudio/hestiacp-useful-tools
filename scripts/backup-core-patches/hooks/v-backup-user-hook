@@ -55,7 +55,6 @@ fi
 
 # Apply permissions
 chmod 640 "$org_dir/$tarball" 2>/dev/null
-chown admin:admin "$org_dir/$tarball" 2>/dev/null
 [ -f "$org_dir/$log_file" ] && chmod 640 "$org_dir/$log_file" 2>/dev/null
 
 # Set ownership to Hestia defaults (hestiaweb avoids panel errors sometimes)

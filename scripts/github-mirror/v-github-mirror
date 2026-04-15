@@ -77,6 +77,7 @@ fi
 _send_fatal_email_mirror() {
     local exit_code="$1"
     local line="$2"
+    [ "$exit_code" -eq 0 ] 2>/dev/null && return 0
     [ -z "$ADMIN_EMAIL" ] && return 0
     local hostname
     hostname=$(hostname -f 2>/dev/null || echo "HestiaCP Server")
@@ -89,7 +90,7 @@ _send_fatal_email_mirror() {
         { echo "Subject: $subject"; echo; echo "$body"; } | /usr/sbin/sendmail "$ADMIN_EMAIL" 2>/dev/null
     fi
 }
-trap '_send_fatal_email_mirror "$?" "$LINENO"' INT TERM ABRT
+trap '_send_fatal_email_mirror "$?" "$LINENO"' EXIT INT TERM ABRT
 
 # Arrays to track status
 REPOS_SUCCESS=()
