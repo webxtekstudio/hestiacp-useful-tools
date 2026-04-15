@@ -139,11 +139,17 @@ patch_v_backup_user_db_repair() {
 
     if [ -n "$line_num" ]; then
         sed -n "1,$((line_num-1))p" "$script" > "$temp"
-        cat >> "$temp" << 'PATCH_EOF'
+		cat >> "$temp" << 'PATCH_EOF'
 			# hestia-custom-db-repair
 			if [ "$TYPE" = "mysql" ]; then
 				echo "$database (Auto-Check & Repair)"
-				mysqlrepair --check --auto-repair "$database" >> $BACKUP/$user.log 2>&1
+				if command -v mariadb-check >/dev/null 2>&1; then
+					mariadb-check --check --auto-repair "$database" >> $BACKUP/$user.log 2>&1
+				elif command -v mysqlcheck >/dev/null 2>&1; then
+					mysqlcheck --check --auto-repair "$database" >> $BACKUP/$user.log 2>&1
+				else
+					mysqlrepair --check --auto-repair "$database" >> $BACKUP/$user.log 2>&1
+				fi
 			fi
 PATCH_EOF
         sed -n "$line_num,\$p" "$script" >> "$temp"

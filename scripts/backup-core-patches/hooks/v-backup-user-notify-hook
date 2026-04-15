@@ -16,10 +16,14 @@ HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Ser
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
 
 # Check for errors in the log
-if grep -qE "Error:|Failed|failed" "$LOG_FILE"; then
+if grep -qE "Error:|Failed|failed|command not found" "$LOG_FILE"; then
     STATUS="FAILED"
     STATUS_COLOR="#F44336"
     STATUS_TEXT="[!] ERRORS DETECTED"
+elif grep -qEi "repairing|corrupt|warning" "$LOG_FILE"; then
+    STATUS="WARNING"
+    STATUS_COLOR="#FFB300"
+    STATUS_TEXT="[!] DB AUTO-REPAIRED"
 else
     STATUS="SUCCESS"
     STATUS_COLOR="#4CAF50"
