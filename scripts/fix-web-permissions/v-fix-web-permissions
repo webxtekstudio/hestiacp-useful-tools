@@ -25,7 +25,7 @@
 #   v-fix-web-permissions USER DOMAIN --dry   Dry-run (show changes without applying)
 #==========================================
 
-set -o pipefail
+set -uo pipefail
 
 HESTIA=${HESTIA:-/usr/local/hestia}
 if [ -f "$HESTIA/func/main.sh" ]; then
