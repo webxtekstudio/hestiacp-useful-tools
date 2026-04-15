@@ -143,24 +143,40 @@ HTML_BODY="<!DOCTYPE html>
 </body>
 </html>"
 
-TEMP_HTML="/tmp/backup_global_notify_$$.html"
-echo "$HTML_BODY" > "$TEMP_HTML"
+LOG_FILE="/usr/local/hestia/log/backup.log"
+BOUNDARY="--==_boundary_$(date +%Y%m%d%H%M%S)_==--"
+TEMP_MAIL="/tmp/backup_global_notify_$$.eml"
 
 SUBJ="Global Backup Report - $HOSTNAME - $GLOBAL_STATUS"
-SENDMAIL="/usr/local/hestia/web/inc/mail-wrapper.php"
 
-if [ -f "$SENDMAIL" ]; then
-    cat "$TEMP_HTML" | $SENDMAIL -s "$SUBJ" "$ADMIN_EMAIL" "yes" 2>/dev/null
+# Construct raw email with attachment
+(
+echo "To: $ADMIN_EMAIL"
+echo "Subject: $SUBJ"
+echo "MIME-Version: 1.0"
+echo "Content-Type: multipart/mixed; boundary=\"$BOUNDARY\""
+echo ""
+echo "--$BOUNDARY"
+echo "Content-Type: text/html; charset=UTF-8"
+echo ""
+echo "$HTML_BODY"
+echo ""
+echo "--$BOUNDARY"
+echo "Content-Type: text/plain; charset=UTF-8; name=\"backup.log\""
+echo "Content-Disposition: attachment; filename=\"backup.log\""
+echo ""
+if [ -f "$LOG_FILE" ]; then
+    # Attach only the last 2000 lines to prevent massive emails
+    tail -n 2000 "$LOG_FILE"
 else
-    # Fallback to direct sendmail
-    (
-        echo "Subject: $SUBJ"
-        echo "MIME-Version: 1.0"
-        echo "Content-Type: text/html; charset=UTF-8"
-        echo
-        cat "$TEMP_HTML"
-    ) | /usr/sbin/sendmail "$ADMIN_EMAIL" 2>/dev/null
+    echo "Log file not found at $LOG_FILE"
 fi
+echo ""
+echo "--$BOUNDARY--"
+) > "$TEMP_MAIL"
 
-rm -f "$TEMP_HTML" 2>/dev/null
+# Send via direct Exim/Sendmail to preserve MIME headers
+cat "$TEMP_MAIL" | /usr/sbin/sendmail -t 2>/dev/null
+
+rm -f "$TEMP_MAIL" 2>/dev/null
 exit 0
