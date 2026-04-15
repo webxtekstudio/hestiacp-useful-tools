@@ -1,0 +1,13 @@
+# Configuration for v-add-exim-limit
+# Place this file at /etc/hestiacp-exim-limit.conf
+
+#==========================================
+# LIMIT SETTINGS
+#==========================================
+# Maximum message size in Megabytes
+MAX_MESSAGE_SIZE_MB=10
+
+# Limit Scope:
+# TRUE  = Limit ONLY outgoing emails (authenticated users). Recommended to prevent IP bans.
+# FALSE = Limit BOTH incoming and outgoing emails. Saves disk space but may reject client emails.
+LIMIT_OUTGOING_ONLY="TRUE"
