@@ -4,7 +4,19 @@
 
 HESTIA="/usr/local/hestia"
 source $HESTIA/conf/hestia.conf 2>/dev/null
-ADMIN_EMAIL=$(grep "^CONTACT=" $HESTIA/conf/hestia.conf 2>/dev/null | cut -d"'" -f2)
+
+# Detect admin email: scan user configs for ROLE='admin', fallback to hestia.conf
+ADMIN_EMAIL=""
+for user_conf in "$HESTIA/data/users"/*/user.conf; do
+    [ -f "$user_conf" ] || continue
+    if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+        ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+        [ -n "$ADMIN_EMAIL" ] && break
+    fi
+done
+if [ -z "$ADMIN_EMAIL" ]; then
+    ADMIN_EMAIL=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
+fi
 
 [ -z "$ADMIN_EMAIL" ] && exit 0
 

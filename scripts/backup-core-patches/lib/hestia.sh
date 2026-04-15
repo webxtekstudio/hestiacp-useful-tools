@@ -142,7 +142,7 @@ patch_v_backup_user_db_repair() {
         cat >> "$temp" << 'PATCH_EOF'
 			# hestia-custom-db-repair
 			if [ "$TYPE" = "mysql" ]; then
-				msg "$database (Auto-Check & Repair)"
+				echo "$database (Auto-Check & Repair)"
 				mysqlrepair --check --auto-repair "$database" >> $BACKUP/$user.log 2>&1
 			fi
 PATCH_EOF
