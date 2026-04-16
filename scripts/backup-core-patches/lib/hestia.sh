@@ -257,6 +257,30 @@ PATCH_EOF
     return 1
 }
 
+# ── Phase 4: Patch Queued Removals (Silence 'rm' cron errors) ───────
+patch_cron_rm_silence() {
+    local scripts=(
+        "$HESTIA/bin/v-download-backup"
+        "$HESTIA/bin/v-dump-database"
+        "$HESTIA/bin/v-dump-site"
+    )
+    local patched=0
+    for script in "${scripts[@]}"; do
+        if [ -f "$script" ]; then
+            if ! grep -q 'echo "rm -f $BACKUP' "$script" 2>/dev/null; then
+                [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
+                sed -i 's|echo "rm \$BACKUP|echo "rm -f \$BACKUP|g' "$script"
+                patched=$((patched+1))
+            fi
+        fi
+    done
+    if [ "$patched" -gt 0 ]; then
+        _log "[$(date)] : Patched $patched scripts to silence queued 'rm' tasks (added -f)"
+        return 0
+    fi
+    return 1
+}
+
 # ── Entry point ──────────────────────────────────────────────────────
 apply_hestia_patches() {
     _log "[$(date)] : Applying Hestia patches..."
@@ -267,4 +291,5 @@ apply_hestia_patches() {
     patch_v_backup_user_notify
     patch_v_backup_users_interactive
     patch_v_backup_users_notify
+    patch_cron_rm_silence
 }
