@@ -67,7 +67,7 @@ YYYY/MM_MONTH/backup-users-YYYY-MM-DD_HH-MM-SS.log
 
 This is a global run log, so it sits in the month folder rather than beside one user's archive.
 
-### 5. Optional Smart Retention (`v-prune-backups`)
+### 5. Native Optional Smart Retention (`v-prune-backups`)
 
 HestiaCP classic `.tar` backups already support a simple per-package/per-user backup count (`BACKUPS`). HestiaCP also has Restic incremental backups with their own daily/weekly/monthly/yearly pruning.
 
@@ -80,12 +80,22 @@ KEEP_MONTHLY_FOR_MONTHS=12
 KEEP_YEARLY_FOR_YEARS=0
 ```
 
-It is installed disabled and dry-run by default:
+The installer patches `v-backup-users` with a native retention hook, the same way this module hooks notifications and global logs. It is still installed disabled and dry-run by default:
 
 ```bash
 v-prune-backups --dry-run
 v-prune-backups --apply
 ```
+
+To let the native nightly backup batch run retention automatically, review the dry-run output first and then enable:
+
+```bash
+RETENTION_ENABLED="TRUE"
+RETENTION_AUTO_RUN="TRUE"
+RETENTION_DRY_RUN="TRUE"
+```
+
+Switch `RETENTION_DRY_RUN` to `FALSE` only when the log output matches your policy.
 
 Supported backends today are `local`, `b2`, and `rclone`. The retention decision is calculated separately per user and per backend, so local copies and cloud copies do not affect each other. FTP/SFTP can still use Hestia's native count-based retention; provider-specific pruning adapters can be added later without changing the policy engine.
 
@@ -102,9 +112,9 @@ Configuration lives in:
 The `install.sh` script applies idempotent patches to these files:
 
 1. **`v-backup-user`** -> Runs database auto-repair, triggers folder organization, and replaces the basic notifier with the HTML notification hook.
-2. **`v-backup-users`** -> Adds interactive terminal output and triggers the global backup report on loop exit.
+2. **`v-backup-users`** -> Adds interactive terminal output, triggers the global backup report, and runs the optional retention hook on loop exit.
 3. **`backup.sh`** -> Updates Hestia's B2 upload, download, delete, and rotation paths.
 4. **`v-delete-user-backup`** -> Makes deletion follow organized backup symlinks safely.
-5. **`v-prune-backups`** -> Adds an optional dry-run-first retention command for classic `.tar` backups.
+5. **`v-prune-backups`** -> Adds the dry-run-first retention engine used by the native `v-backup-users` hook.
 
 > **Note on updates:** If a HestiaCP update overwrites core files, re-run `bash install.sh` from this repository to re-apply the patches.

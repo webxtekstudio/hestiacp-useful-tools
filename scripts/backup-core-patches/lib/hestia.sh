@@ -314,6 +314,39 @@ PATCH_EOF
 }
 
 # ── Phase 4: Patch Queued Removals (Silence 'rm' cron errors) ───────
+# Phase 3.1: Patch v-backup-users (Optional Retention Hook)
+patch_v_backup_users_retention() {
+    local script="$HESTIA/bin/v-backup-users"
+    [ ! -f "$script" ] && return 1
+    grep -q "hestia-custom-retention-hook" "$script" 2>/dev/null && return 0
+
+    [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
+
+    local temp=$(mktemp /tmp/patch-retention-hook.XXXXXX)
+    local line_num=$(grep -n '^exit' "$script" | tail -1 | cut -d: -f1)
+
+    if [ -n "$line_num" ]; then
+        sed -n "1,$((line_num-1))p" "$script" > "$temp"
+        cat >> "$temp" << 'PATCH_EOF'
+# hestia-custom-retention-hook
+if [ -f "/usr/local/hestia/bin/v-backup-users-retention-hook" ]; then
+    bash /usr/local/hestia/bin/v-backup-users-retention-hook || true
+fi
+
+PATCH_EOF
+        sed -n "$line_num,\$p" "$script" >> "$temp"
+
+        if grep -q "hestia-custom-retention-hook" "$temp" 2>/dev/null; then
+            mv "$temp" "$script" && chmod +x "$script"
+            _log "[$(date)] : Patched v-backup-users (Optional Retention Hook)"
+            return 0
+        fi
+    fi
+    rm -f "$temp" 2>/dev/null
+    return 1
+}
+
+# Phase 4: Patch Queued Removals (Silence 'rm' cron errors)
 patch_cron_rm_silence() {
     local scripts=(
         "$HESTIA/bin/v-download-backup"
@@ -347,5 +380,6 @@ apply_hestia_patches() {
     patch_v_backup_user_notify
     patch_v_backup_users_interactive
     patch_v_backup_users_notify
+    patch_v_backup_users_retention
     patch_cron_rm_silence
 }

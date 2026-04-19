@@ -5,6 +5,12 @@
 RETENTION_ENABLED="FALSE"
 RETENTION_DRY_RUN="TRUE"
 
+# Native integration:
+# When TRUE, the backup-core patch calls v-prune-backups automatically
+# at the end of v-backup-users. Keep FALSE until dry-run output is reviewed.
+RETENTION_AUTO_RUN="FALSE"
+RETENTION_LOG_FILE="/usr/local/hestia/log/backup-retention.log"
+
 # Backends to scan.
 # Supported today:
 # - local: /backup or another local/mounted path
