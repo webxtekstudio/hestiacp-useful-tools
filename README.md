@@ -60,6 +60,7 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - **Pillar 2: Database Auto-Repair:** Injects pre-flight `mysqlrepair --check --auto-repair` to gracefully fix corrupted indexes *before* `mysqldump`, eliminating the #1 cause of silent backup failures.
 - **Pillar 3: Interactive TTY Shell:** Automatically detects manual terminal sessions and streams live console logs via `tee`, while remaining perfectly silent for nocturnal cron jobs.
 - **Pillar 4: Enterprise HTML Notifications:** Replaces basic TXT messages with AWS-style Dark Mode Multipart HTML reports (inclusive of physical `.log` file attachments and Global Administration Batch summaries).
+- **Optional Smart Retention:** Adds `v-prune-backups`, a disabled-by-default, dry-run-first GFS retention command for classic `.tar` backups. Hestia's native `BACKUPS` count and Restic pruning still remain available; this is for people who want daily/weekly/monthly thinning across local, B2, or rclone storage.
 
 #### [GitHub Mirror (`v-github-mirror`)](scripts/github-mirror/)
 - A cron-based auto-pull script that securely mirrors private GitHub/GitLab repositories straight into a specified user's `private` directory (safely away from public web access).
@@ -192,4 +193,3 @@ bash scripts/system-report/install.sh
 ## ⚠️ Disclaimer
 
 These scripts are provided "as is". While used in production, review and test in your environment before deployment.
-
