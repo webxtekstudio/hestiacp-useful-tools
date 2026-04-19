@@ -14,7 +14,7 @@ Click on any module below to read its dedicated dummy-proof guide:
 A housekeeper script. It safely deletes old logs, temp files, and spam emails to free up disk space on your server.
 
 ### 2. [backup-core-patches](./backup-core-patches/)
-Upgrades the native HestiaCP backup engine. Automatically organizes your server backups into clean Yearly/Monthly folders (`YYYY/MM`), repairs corrupted databases before exporting them, and sends you modern Dark-Mode HTML emails instead of plain text.
+Upgrades the native HestiaCP backup engine. Automatically organizes your server backups into clean Yearly/Monthly folders (`YYYY/MM`), repairs corrupted databases before exporting them, sends modern Dark-Mode HTML emails instead of plain text, and includes an optional dry-run-first retention command (`v-prune-backups`) for classic `.tar` backups.
 
 ### 3. [exim-limit](./exim-limit/)
 A spam protector. Automatically blocks any outgoing emails larger than 10MB to prevent your server from being blacklisted by Google or Microsoft.
