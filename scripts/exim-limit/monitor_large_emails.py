@@ -8,9 +8,8 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
 # --- Configuration ---
-# IMPORTANT: Update these values before running the script!
-ADMIN_EMAIL = "webmaster@your-domain.com"      # The email where alerts will be sent
-SENDER_EMAIL = "exim-monitor@your-hostname"    # The "From" address for alerts
+CONFIG_FILE = "/etc/hestiacp-exim-limit.conf"
+HESTIA_DIR = "/usr/local/hestia"
 LOG_FILE = "/var/log/exim4/mainlog"
 STATE_FILE = "/root/.monitor_large_emails.state"
 THRESHOLD_SIZE_MB = 10
@@ -19,7 +18,67 @@ VERBOSE = False  # Set to True for debug output, False for silence (cron friendl
 # Regex to match the custom log line we added
 LOG_PATTERN = re.compile(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*Large message rejected: from (.*?) to (.*?) size (\d+)')
 
+def read_config_value(key):
+    if not os.path.exists(CONFIG_FILE):
+        return ""
+
+    pattern = re.compile(rf'^\s*{re.escape(key)}=(.*)\s*$')
+    with open(CONFIG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            match = pattern.match(line)
+            if not match:
+                continue
+            value = match.group(1).strip().strip('"').strip("'")
+            return value
+    return ""
+
+def read_hestia_conf_value(path, key):
+    if not os.path.exists(path):
+        return ""
+
+    pattern = re.compile(rf'^{re.escape(key)}=\'(.*)\'$')
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            match = pattern.match(line.strip())
+            if match:
+                return match.group(1)
+    return ""
+
+def get_hostname():
+    try:
+        hostname = subprocess.check_output(["hostname", "-f"], text=True, stderr=subprocess.DEVNULL).strip()
+        if hostname:
+            return hostname
+    except Exception:
+        pass
+    return os.uname().nodename
+
+def get_admin_email():
+    config_email = read_config_value("ADMIN_EMAIL")
+    if config_email:
+        return config_email
+
+    users_dir = os.path.join(HESTIA_DIR, "data", "users")
+    if os.path.isdir(users_dir):
+        for username in sorted(os.listdir(users_dir)):
+            user_conf = os.path.join(users_dir, username, "user.conf")
+            if read_hestia_conf_value(user_conf, "ROLE") == "admin":
+                contact = read_hestia_conf_value(user_conf, "CONTACT")
+                if contact:
+                    return contact
+
+    return read_hestia_conf_value(os.path.join(HESTIA_DIR, "conf", "hestia.conf"), "CONTACT")
+
+HOSTNAME = get_hostname()
+ADMIN_EMAIL = get_admin_email()
+SENDER_EMAIL = read_config_value("SENDER_EMAIL") or f"exim-monitor@{HOSTNAME}"
+
 def send_email(subject, html_body):
+    if not ADMIN_EMAIL:
+        if VERBOSE:
+            print("No admin email configured; skipping alert email", file=sys.stderr)
+        return
+
     msg = MIMEMultipart("alternative")
     msg["From"] = SENDER_EMAIL
     msg["To"] = ADMIN_EMAIL
@@ -41,7 +100,7 @@ def send_email(subject, html_body):
         print(f"Error sending email: {e}", file=sys.stderr)
 
 def get_html_template(title, intro, rows):
-    hostname = os.uname().nodename
+    hostname = HOSTNAME
     return f"""
     <html>
     <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">

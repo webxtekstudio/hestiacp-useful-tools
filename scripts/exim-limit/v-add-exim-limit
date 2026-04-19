@@ -12,13 +12,19 @@ source $HESTIA/conf/hestia.conf
 CONFIG_FILE="/etc/exim4/exim4.conf.template"
 BACKUP_FILE="$CONFIG_FILE.bak.$(date +%s)"
 
-# Get Admin Email
-if [ -f "$HESTIA/data/users/admin/user.conf" ]; then
-    ADMIN_EMAIL=$(grep "CONTACT" $HESTIA/data/users/admin/user.conf | cut -f 2 -d \')
-else
-    # Fallback if admin user doesn't exist or path is wrong
-    ADMIN_EMAIL="root"
+# Get admin email from Hestia users, then fall back to system contact/root.
+ADMIN_EMAIL=""
+for user_conf in "$HESTIA/data/users"/*/user.conf; do
+    [ -f "$user_conf" ] || continue
+    if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+        ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+        [ -n "$ADMIN_EMAIL" ] && break
+    fi
+done
+if [ -z "$ADMIN_EMAIL" ]; then
+    ADMIN_EMAIL=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
 fi
+[ -z "$ADMIN_EMAIL" ] && ADMIN_EMAIL="root"
 
 SENDMAIL="$HESTIA/web/inc/mail-wrapper.php"
 
@@ -56,13 +62,7 @@ log_wrapper "Copying monitor script..."
 cp "$(dirname "$0")/monitor_large_emails.py" /usr/local/bin/monitor_large_emails.py
 chmod +x /usr/local/bin/monitor_large_emails.py
 
-# Update Python script with correct email and hostname
-HOSTNAME=$(hostname)
-if [ -n "$ADMIN_EMAIL" ]; then
-    sed -i "s/ADMIN_EMAIL = .*/ADMIN_EMAIL = \"$ADMIN_EMAIL\"/" /usr/local/bin/monitor_large_emails.py
-    sed -i "s/SENDER_EMAIL = .*/SENDER_EMAIL = \"noreply@$HOSTNAME\"/" /usr/local/bin/monitor_large_emails.py
-    log_wrapper "Configured monitor script with Admin Email: $ADMIN_EMAIL"
-fi
+log_wrapper "Monitor notifications will use /etc/hestiacp-exim-limit.conf or the Hestia admin contact."
 
 # 2. Configuration
 # Default Settings

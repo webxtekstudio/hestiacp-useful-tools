@@ -9,6 +9,10 @@ set -o pipefail
 # Email notification (leave empty to auto-detect from admin user)
 ADMIN_EMAIL_OVERRIDE=""
 
+# Sender used for report emails (leave empty to use noreply@server-hostname)
+MAIL_FROM_ADDRESS=""
+MAIL_FROM_NAME="HestiaCP System Report"
+
 # Enable/disable checks (TRUE/FALSE)
 CHECK_SYSTEM_RESOURCES="TRUE"
 CHECK_HESTIACP_SERVICES="TRUE"
@@ -79,6 +83,16 @@ if [ -z "$ADMIN_EMAIL" ]; then
     ADMIN_EMAIL=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
 fi
 
+get_mail_from_address() {
+    local hostname_value="$1"
+    if [ -n "$MAIL_FROM_ADDRESS" ]; then
+        echo "$MAIL_FROM_ADDRESS"
+        return 0
+    fi
+
+    echo "noreply@$hostname_value"
+}
+
 # Email notification on unexpected fatal crash (trap)
 _send_fatal_email_sysreport() {
     local exit_code="$1"
@@ -89,12 +103,16 @@ _send_fatal_email_sysreport() {
     hostname=$(hostname -f 2>/dev/null || echo "HestiaCP Server")
     local subject="[FATAL] v-system-report crashed on $hostname"
     local body="Script v-system-report terminated unexpectedly.\nExit code: $exit_code at line $line."
-    local SENDMAIL="$HESTIA/web/inc/mail-wrapper.php"
-    if [ -f "$SENDMAIL" ]; then
-        echo "$body" | "$SENDMAIL" -s "$subject" "$ADMIN_EMAIL" 2>/dev/null
-    else
-        { echo "Subject: $subject"; echo; echo "$body"; } | /usr/sbin/sendmail "$ADMIN_EMAIL" 2>/dev/null
-    fi
+    local mail_from
+    mail_from=$(get_mail_from_address "$hostname")
+    {
+        echo "To: $ADMIN_EMAIL"
+        echo "From: ${MAIL_FROM_NAME:-HestiaCP System Report} <$mail_from>"
+        echo "Reply-To: $mail_from"
+        echo "Subject: $subject"
+        echo
+        echo "$body"
+    } | /usr/sbin/sendmail -f "$mail_from" -t 2>/dev/null
 }
 trap '_send_fatal_email_sysreport "$?" "$LINENO"' EXIT INT TERM ABRT
 
@@ -2058,6 +2076,9 @@ send_html_email() {
     
     local hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    local mail_from
+    local mail_from_name="${MAIL_FROM_NAME:-HestiaCP System Report}"
+    mail_from=$(get_mail_from_address "$hostname")
     
     local total_issues=$((high_issues + medium_issues + low_issues))
     
@@ -2168,6 +2189,12 @@ send_html_email() {
     if [ -f "$SENDMAIL" ] && [ -f "$LOG_FILE" ]; then
         if [ -f "$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php" ]; then
             local temp_php="/tmp/send_report_email_$$.php"
+            local php_subject
+            local php_mail_from
+            local php_mail_from_name
+            php_subject=$(echo "$subject" | sed "s/'/\\\'/g")
+            php_mail_from=$(echo "$mail_from" | sed "s/'/\\\'/g")
+            php_mail_from_name=$(echo "$mail_from_name" | sed "s/'/\\\'/g")
             cat > "$temp_php" << EOFPHP
 <?php
 require_once '$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php';
@@ -2180,9 +2207,10 @@ use PHPMailer\PHPMailer\Exception;
 \$mail = new PHPMailer(true);
 try {
     \$mail->isMail();
-    \$mail->setFrom('noreply@$hostname', 'HestiaCP System Report');
+    \$mail->setFrom('$php_mail_from', '$php_mail_from_name');
+    \$mail->Sender = '$php_mail_from';
     \$mail->addAddress('$admin_email');
-    \$mail->Subject = '$(echo "$subject" | sed "s/'/\\\'/g")';
+    \$mail->Subject = '$php_subject';
     \$mail->msgHTML(file_get_contents('$temp_html'));
     \$mail->AltBody = strip_tags(file_get_contents('$temp_html'));
     \$mail->addAttachment('$LOG_FILE', 'system_report.log');
@@ -2203,7 +2231,8 @@ EOFPHP
             (
                 echo "Subject: $subject"
                 echo "MIME-Version: 1.0"
-                echo "From: noreply@$hostname"
+                echo "From: $mail_from_name <$mail_from>"
+                echo "Reply-To: $mail_from"
                 echo "To: $admin_email"
                 echo "Content-Type: multipart/mixed; boundary=\"BOUNDARY123\""
                 echo
@@ -2221,15 +2250,18 @@ EOFPHP
                 base64 < "$LOG_FILE" 2>/dev/null || cat "$LOG_FILE"
                 echo
                 echo "--BOUNDARY123--"
-            ) | /usr/sbin/sendmail "$admin_email" 2>/dev/null
+            ) | /usr/sbin/sendmail -f "$mail_from" -t 2>/dev/null
         else
             (
+                echo "To: $admin_email"
+                echo "From: $mail_from_name <$mail_from>"
+                echo "Reply-To: $mail_from"
                 echo "Subject: $subject"
                 echo "MIME-Version: 1.0"
                 echo "Content-Type: text/html; charset=UTF-8"
                 echo
                 cat "$temp_html"
-            ) | /usr/sbin/sendmail "$admin_email" 2>/dev/null
+            ) | /usr/sbin/sendmail -f "$mail_from" -t 2>/dev/null
         fi
     fi
     

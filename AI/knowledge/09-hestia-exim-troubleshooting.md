@@ -42,7 +42,7 @@ Debian rotates Exim logs daily. `mainlog` is today, `mainlog.1` is usually yeste
 2.  **Summarize first:** If asking for a whole day, **DO NOT DUMP THE WHOLE LOG**. Count it or process it in chunks:
     ```bash
     # Count how many emails were sent/received across all files
-    sudo -n zgrep -c "olgafreitas" /var/log/exim4/mainlog*
+    sudo -n zgrep -c "username" /var/log/exim4/mainlog*
     ```
 3.  **Filter by exact date:**
     ```bash
@@ -134,4 +134,3 @@ Look for emails sent by `www-data` or the user ID, not an SMTP login:
 ```bash
 sudo -n grep "U=www-data" /var/log/exim4/mainlog | head
 ```
-

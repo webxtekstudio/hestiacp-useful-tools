@@ -11,3 +11,8 @@ MAX_MESSAGE_SIZE_MB=10
 # TRUE  = Limit ONLY outgoing emails (authenticated users). Recommended to prevent IP bans.
 # FALSE = Limit BOTH incoming and outgoing emails. Saves disk space but may reject client emails.
 LIMIT_OUTGOING_ONLY="TRUE"
+
+# Notification email settings used by monitor_large_emails.py.
+# Leave empty to auto-detect the Hestia admin contact and server hostname.
+ADMIN_EMAIL=""
+SENDER_EMAIL=""

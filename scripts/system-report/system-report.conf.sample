@@ -7,6 +7,10 @@
 # Email notification (leave empty to auto-detect from admin user)
 ADMIN_EMAIL_OVERRIDE=""
 
+# Sender used for report emails (leave empty to use noreply@server-hostname)
+MAIL_FROM_ADDRESS=""
+MAIL_FROM_NAME="HestiaCP System Report"
+
 # Send email report (TRUE/FALSE)
 SEND_EMAIL_REPORT="TRUE"
 

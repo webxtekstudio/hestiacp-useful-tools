@@ -18,11 +18,39 @@ if [ -z "$ADMIN_EMAIL" ]; then
     ADMIN_EMAIL=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
 fi
 
-[ -z "$ADMIN_EMAIL" ] && exit 0
-
 HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
 TODAY=$(date +"%Y-%m-%d")
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+MAIL_FROM="${MAIL_FROM:-root@$HOSTNAME}"
+MAIL_FROM_NAME="${MAIL_FROM_NAME:-HestiaCP Backup}"
+LOG_FILE="/usr/local/hestia/log/backup.log"
+
+upload_global_log_to_b2() {
+    [ -f "$LOG_FILE" ] || return 0
+    [ -f "$HESTIA/conf/b2.backup.conf" ] || return 0
+    command -v b2 >/dev/null 2>&1 || return 0
+
+    # shellcheck disable=SC1091
+    source "$HESTIA/conf/b2.backup.conf" 2>/dev/null || return 0
+    [ -n "$BUCKET" ] || return 0
+    [ -n "$B2_KEYID" ] || return 0
+    [ -n "$B2_KEY" ] || return 0
+
+    b2 clear-account >/dev/null 2>&1 || true
+    b2 authorize-account "$B2_KEYID" "$B2_KEY" >/dev/null 2>&1 || return 0
+
+    local b2_year
+    local b2_month
+    local b2_log_name
+    local b2_log_path
+    b2_year=$(date +%Y)
+    b2_month=$(date +%m_%B | tr '[:lower:]' '[:upper:]')
+    b2_log_name="backup-users-$(date +%Y-%m-%d_%H-%M-%S).log"
+    b2_log_path="${b2_year}/${b2_month}/${b2_log_name}"
+
+    echo "$(date +"%Y-%m-%d %H:%M:%S") Upload global backup log to B2: ${b2_log_path}" >> "$LOG_FILE"
+    b2 upload-file "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1 || true
+}
 
 TOTAL_SIZE=0
 TOTAL_TIME=0
@@ -143,7 +171,10 @@ HTML_BODY="<!DOCTYPE html>
 </body>
 </html>"
 
-LOG_FILE="/usr/local/hestia/log/backup.log"
+upload_global_log_to_b2
+
+[ -z "$ADMIN_EMAIL" ] && exit 0
+
 BOUNDARY="--==_boundary_$(date +%Y%m%d%H%M%S)_==--"
 TEMP_MAIL="/tmp/backup_global_notify_$$.eml"
 
@@ -152,6 +183,8 @@ SUBJ="Global Backup Report - $HOSTNAME - $GLOBAL_STATUS"
 # Construct raw email with attachment
 (
 echo "To: $ADMIN_EMAIL"
+echo "From: $MAIL_FROM_NAME <$MAIL_FROM>"
+echo "Reply-To: $MAIL_FROM"
 echo "Subject: $SUBJ"
 echo "MIME-Version: 1.0"
 echo "Content-Type: multipart/mixed; boundary=\"$BOUNDARY\""
@@ -175,7 +208,7 @@ echo "--$BOUNDARY--"
 ) > "$TEMP_MAIL"
 
 # Send via direct Exim/Sendmail to preserve MIME headers
-cat "$TEMP_MAIL" | /usr/sbin/sendmail -t 2>/dev/null
+cat "$TEMP_MAIL" | /usr/sbin/sendmail -f "$MAIL_FROM" -t 2>/dev/null
 
 rm -f "$TEMP_MAIL" 2>/dev/null
 exit 0

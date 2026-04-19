@@ -14,6 +14,8 @@ LOG_FILE="$5"
 
 HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+MAIL_FROM="${MAIL_FROM:-root@$HOSTNAME}"
+MAIL_FROM_NAME="${MAIL_FROM_NAME:-HestiaCP Backup}"
 
 # Check for errors in the log
 if grep -qE "Error:|Failed|failed|command not found" "$LOG_FILE"; then
@@ -92,6 +94,8 @@ echo "$(date +"%Y-%m-%d %H:%M:%S") Notification sent to $ADMIN_EMAIL via Custom 
 # Construct raw email
 (
 echo "To: $ADMIN_EMAIL"
+echo "From: $MAIL_FROM_NAME <$MAIL_FROM>"
+echo "Reply-To: $MAIL_FROM"
 echo "Subject: $SUBJ"
 echo "MIME-Version: 1.0"
 echo "Content-Type: multipart/mixed; boundary=\"$BOUNDARY\""
@@ -111,7 +115,7 @@ echo "--$BOUNDARY--"
 ) > "$TEMP_MAIL"
 
 # Send via direct Exim/Sendmail to preserve MIME headers
-cat "$TEMP_MAIL" | /usr/sbin/sendmail -t 2>/dev/null
+cat "$TEMP_MAIL" | /usr/sbin/sendmail -f "$MAIL_FROM" -t 2>/dev/null
 
 rm -f "$TEMP_MAIL" 2>/dev/null
 exit 0

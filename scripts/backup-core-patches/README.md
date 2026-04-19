@@ -48,6 +48,7 @@ Our patch introduces `tty` detection. If you manually run `v-backup-users` via S
 We replace the archaic plain-text Hestia notifications with modern, beautiful AWS-grade Multipart MIME HTML emails:
 * **Individual Accounts (`v-backup-user admin yes`):** Sends a dark-mode status panel to the account owner along with the system `.log` file securely embedded as a physical MIME attachment. The `yes` switch forcibly triggers this HTML notification block even on success.
 * **Global Master Report:** A hook intercepts the end of the `v-backup-users` master cron loop and fires a compiled, summarized Multi-User Server Report directly to the System Admin, displaying total sizes and statuses for all accounts packaged that night.
+* **Monthly Cloud Logs:** When Backblaze B2 is configured, the global `v-backup-users` execution log is uploaded to the month folder as `YYYY/MM_MONTH/backup-users-YYYY-MM-DD_HH-MM-SS.log`, making it easy to audit a full nightly run without searching per-user folders.
 
 ---
 

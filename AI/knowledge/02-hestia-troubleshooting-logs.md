@@ -116,7 +116,7 @@ sudo -n grep "error" /var/log/nginx/error.log | awk -F'] ' '{print $2}' | sort |
 1.  **Count matches first:** Use `zgrep -c` or `wc -l`.
     ```bash
     # Count how many emails were sent/received by this address across all logs
-    sudo -n zgrep -c "olgafreitas@koolfitness.pt" /var/log/exim4/mainlog*
+    sudo -n zgrep -c "user@example.com" /var/log/exim4/mainlog*
     ```
 2.  **Filter by time blocks (Batching):** If you need to read the contents of a busy day, chunk it by hours.
     ```bash
@@ -126,7 +126,6 @@ sudo -n grep "error" /var/log/nginx/error.log | awk -F'] ' '{print $2}' | sort |
 3.  **Use `head` or `tail` for previews:**
     ```bash
     # Look at the first 50 results to understand the pattern before dumping everything
-    sudo -n zgrep "olgafreitas@koolfitness.pt" /var/log/exim4/mainlog.1 | head -n 50
+    sudo -n zgrep "user@example.com" /var/log/exim4/mainlog.1 | head -n 50
     ```
-
 
