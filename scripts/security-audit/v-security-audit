@@ -2,12 +2,17 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LIB_DIR="${V_SECURITY_AUDIT_LIB_DIR:-$SCRIPT_DIR/v-security-audit.d}"
 
-source "${SCRIPT_DIR}/lib/core.sh"
-source "${SCRIPT_DIR}/lib/system/main.sh"
-source "${SCRIPT_DIR}/lib/backend/main.sh"
-source "${SCRIPT_DIR}/lib/frontend/main.sh"
-source "${SCRIPT_DIR}/lib/pentest/main.sh"
+if [ ! -f "$LIB_DIR/core.sh" ] && [ -f "$SCRIPT_DIR/lib/core.sh" ]; then
+    LIB_DIR="$SCRIPT_DIR/lib"
+fi
+
+source "${LIB_DIR}/core.sh"
+source "${LIB_DIR}/system/main.sh"
+source "${LIB_DIR}/backend/main.sh"
+source "${LIB_DIR}/frontend/main.sh"
+source "${LIB_DIR}/pentest/main.sh"
 
 # Single-instance guard (prevents concurrent runs from cron + manual)
 LOCK_FILE="/var/run/v-security-audit.lock"

@@ -28,7 +28,5 @@ if [ ! -f "/etc/hestiacp-github-mirror.settings" ]; then
     chmod 600 "/etc/hestiacp-github-mirror.settings"
     echo "  -> [OK] Installed settings: /etc/hestiacp-github-mirror.settings"
 else
-    # Allow overwrite for settings since they usually don't contain passwords
-    cp "$SCRIPT_DIR/github-mirror.settings.sample" "/etc/hestiacp-github-mirror.settings"
-    echo "  -> [OK] Updated settings: /etc/hestiacp-github-mirror.settings"
+    echo "  -> [INFO] Settings exist (skipped): /etc/hestiacp-github-mirror.settings"
 fi

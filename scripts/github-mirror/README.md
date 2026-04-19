@@ -5,7 +5,7 @@
 ---
 
 ## 🚀 1. How to Install (The Easy Way)
-Instead of copying files manually, use our automated installer which handles permissions and `cron` jobs automatically:
+Instead of copying files manually, use the module installer to place the script and default configs. To add the recommended sync schedule, run the repository root installer with `--setup-crons`.
 ```bash
 cd /root/hestiacp-useful-tools/scripts/github-mirror
 bash install.sh

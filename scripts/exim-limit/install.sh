@@ -13,6 +13,12 @@ cp "$SCRIPT_DIR/v-add-exim-limit" "$target_bin"
 chmod +x "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
+target_monitor="$HESTIA_BIN/monitor_large_emails.py"
+[ -f "$target_monitor" ] && cp "$target_monitor" "${target_monitor}.bak.$(date +%Y%m%d-%H%M%S)"
+cp "$SCRIPT_DIR/monitor_large_emails.py" "$target_monitor"
+chmod +x "$target_monitor"
+echo "  -> [OK] Installed monitor helper: $target_monitor"
+
 # Config
 if [ ! -f "/etc/hestiacp-exim-limit.conf" ]; then
     cp "$SCRIPT_DIR/exim-limit.conf.sample" "/etc/hestiacp-exim-limit.conf"

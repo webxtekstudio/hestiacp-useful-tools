@@ -13,19 +13,18 @@
 > The other layers (`--system` and `--backend`) are 100% read-only and safe to use at any time!
 
 ## 🚀 2. How to Install (The Easy Way)
-Instead of copying files manually, use our automated installer which handles symlinks automatically:
+Instead of copying files manually, use the module installer to place the script and its library modules:
 ```bash
 cd /root/hestiacp-useful-tools/scripts/security-audit
 bash install.sh
 ```
 
-# 3. Weekly cron (Silent Malware & Security Hunter)
-# 0 7 * * 0 /usr/local/hestia/bin/v-security-audit --system --backend --quiet --email >> /var/log/hestia/security-audit/weekly.log 2>&1
+To add the recommended weekly schedule, run the repository root installer with `--setup-crons`.
 
 ## 📂 3. File Paths (Where is everything?)
 If you want to look at the files, here is exactly where the installer places them:
 * **The Executable Script:** `/usr/local/hestia/bin/v-security-audit`
-* **The Vulnerability Database:** `/usr/local/hestia/bin/lib/` (Requires 32 separate definition modules).
+* **The Vulnerability Database:** `/usr/local/hestia/bin/v-security-audit.d/` (installed beside the executable).
 
 ## ⚙️ 4. How to Run Scans (The Dummy-Proof Way)
 There is no configuration file. You just run it via the command line when you want to audit your server.

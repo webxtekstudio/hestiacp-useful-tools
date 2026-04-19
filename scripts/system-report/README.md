@@ -5,7 +5,7 @@
 ---
 
 ## 🚀 1. How to Install (The Easy Way)
-Instead of copying files manually, use our automated installer which handles permissions and `cron` jobs automatically:
+Instead of copying files manually, use the module installer to place the script and default config. To add the recommended schedule, run the repository root installer with `--setup-crons`.
 ```bash
 cd /root/hestiacp-useful-tools/scripts/system-report
 bash install.sh
@@ -22,7 +22,7 @@ By default, the script will check EVERYTHING (CPU, RAM, MySQL, Exim, PHP). If yo
 1. Open `/etc/hestiacp-system-report.conf` in your editor (`nano /etc/hestiacp-system-report.conf`).
 2. Turn off the variable you want. For example, to stop checking MySQL errors, change `CHECK_MYSQL="TRUE"` to `CHECK_MYSQL="FALSE"`.
 3. Save the file.
-4. The system reporter automatically reads this file the next time it runs its morning cron job.
+4. The system reporter automatically reads this file the next time it runs.
 
 ## ⛔ 4. Crucial Rules (What NOT to do)
 * **DO NOT** edit the `.sh` executable file directly. Your changes will be wiped on the next update! Always edit the `.conf` file in `/etc/`.

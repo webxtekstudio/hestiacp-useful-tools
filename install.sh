@@ -250,7 +250,7 @@ if ! echo "$backup_system" | grep -qE "b2|sftp|ftp|rclone" && [ -t 0 ]; then
     echo "---"
     echo ""
     echo "Do you want to set up automatic cron schedules?"
-    echo "(Backups every Sunday 2AM, cleanup, reports, etc.)"
+    echo "(cleanup, reports, security audit, GitHub mirror, etc.)"
     echo ""
     read -rp "Set up crons? [Y/n]: " setup_crons_answer
     setup_crons_answer=${setup_crons_answer:-Y}
@@ -332,7 +332,7 @@ echo ""
 echo " Next steps:"
 echo "   1. Test backup via Server interface or:  v-backup-user admin"
 if [ "$SETUP_CRONS" != true ]; then
-    echo "   3. Setup crons:  bash install.sh --setup-crons"
+    echo "   2. Setup optional tool crons:  bash install.sh --setup-crons"
 fi
 echo ""
 echo "========================================"

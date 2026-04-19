@@ -5,15 +5,22 @@
 ---
 
 ## 🚀 1. How to Install (The Easy Way)
-Instead of copying files manually, use our automated installer which handles permissions and `cron` jobs automatically:
+Instead of copying files manually, use the module installer to place the script, monitor helper, and default config:
 ```bash
 cd /root/hestiacp-useful-tools/scripts/exim-limit
 bash install.sh
 ```
 
+Then apply the Exim patch and install the monitor cron:
+
+```bash
+v-add-exim-limit
+```
+
 ## 📂 2. File Paths (Where is everything?)
 If you want to look at the files, here is exactly where the installer places them:
 * **The Executable Script:** `/usr/local/hestia/bin/v-add-exim-limit`
+* **The Monitor Helper:** `/usr/local/hestia/bin/monitor_large_emails.py` (copied to `/usr/local/bin/monitor_large_emails.py` when `v-add-exim-limit` is applied)
 * **The Configuration File:** `/etc/hestiacp-exim-limit.conf`
 
 ## ⚙️ 3. How to Configure
@@ -38,10 +45,9 @@ This tool injects a custom ACL rule into `/etc/exim4/exim4.conf.template` at the
 It sends a custom 552 User-Friendly Message directly to the email client (Outlook/Apple Mail) saying exactly: *"Message size exceeds 10MB limit. Please use WeTransfer or Google Drive."*
 
 ### Python Monitoring Daemon (Included)
-The installer also sets up a python listener (`monitor_large_emails.py`) hooked into root's cron. It aggressively tails `/var/log/exim4/mainlog` looking for the exact custom 552 rejection string. When it detects an active block, it triggers an instant administrative email alert telling you which user tried to send the giant file.
+When `v-add-exim-limit` is applied, it also sets up a python listener (`monitor_large_emails.py`) hooked into root's cron. It aggressively tails `/var/log/exim4/mainlog` looking for the exact custom 552 rejection string. When it detects an active block, it triggers an instant administrative email alert telling you which user tried to send the giant file.
 
 **Testing the Monitor:**
 You can test the exact email delivery by running:
-`/usr/local/hestia/bin/monitor_large_emails.py --test`
+`/usr/local/bin/monitor_large_emails.py --test`
 This will send a test alert directly to your `ADMIN_EMAIL` bypassing the log validation.
-
