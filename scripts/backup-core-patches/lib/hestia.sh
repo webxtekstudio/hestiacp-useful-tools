@@ -11,9 +11,14 @@
 patch_b2_functions() {
     local script="$HESTIA/func/backup.sh"
     [ ! -f "$script" ] && return 1
-    grep -q "hestia-custom-b2-v3" "$script" 2>/dev/null && return 0
+    grep -q "hestia-custom-b2-v4-retention" "$script" 2>/dev/null && return 0
 
     [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
+
+    if grep -q "hestia-custom-b2-v3" "$script" 2>/dev/null; then
+        patch_b2_retention
+        return $?
+    fi
 
     # --- PATCH b2_backup: organized upload path ---
     # Find the upload echo line and replace the function body
@@ -55,7 +60,58 @@ patch_b2_functions() {
         _log "[$(date)] : Patched b2_delete() → finds in organized paths"
     fi
 
+    patch_b2_retention
     return 0
+}
+
+patch_b2_retention() {
+    local script="$HESTIA/func/backup.sh"
+    [ ! -f "$script" ] && return 1
+    grep -q "hestia-custom-b2-v4-retention" "$script" 2>/dev/null && return 0
+
+    local start_line
+    local end_line
+    local temp
+    start_line=$(grep -n 'backup_list=$(b2 ls --long $BUCKET $user' "$script" | head -1 | cut -d: -f1)
+    [ -z "$start_line" ] && return 1
+
+    end_line=$(awk -v start="$start_line" 'NR > start && /^$/ { print NR; exit }' "$script")
+    [ -z "$end_line" ] && return 1
+
+    temp=$(mktemp /tmp/patch-b2-retention.XXXXXX)
+    sed -n "1,$((start_line-1))p" "$script" > "$temp"
+    cat >> "$temp" << 'PATCH_EOF'
+	# hestia-custom-b2-v4-retention: rotate organized cloud backups per user
+	backup_list=$(b2 ls "$BUCKET" --recursive --long 2>/dev/null | awk -v user="$user" '
+		$NF ~ ("(^|/)" user "/" user "\\.[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\\.tar$") {
+			archive = $NF
+			sub(/^.*\//, "", archive)
+			print archive "|" $1 "|" $NF
+		}
+	' | sort -t'|' -k1,1)
+	backups_count=$(echo "$backup_list" | sed '/^$/d' | wc -l)
+	if [ "$backups_count" -gt "$BACKUPS" ]; then
+		backups_rm_number=$((backups_count - BACKUPS))
+		echo "$backup_list" | head -n "$backups_rm_number" | while IFS='|' read -r backup_archive backup_id backup_file_name; do
+			[ -z "$backup_id" ] && continue
+			if b2 delete-file-version "$backup_id" > /dev/null 2>&1; then
+				echo -e "$(date "+%F %T") Rotated b2 backup: $backup_file_name"
+			else
+				echo -e "$(date "+%F %T") Failed to rotate b2 backup: $backup_file_name"
+			fi
+		done
+	fi
+PATCH_EOF
+    sed -n "$((end_line+1)),\$p" "$script" >> "$temp"
+
+    if grep -q "hestia-custom-b2-v4-retention" "$temp" 2>/dev/null; then
+        mv "$temp" "$script" && chmod +x "$script"
+        _log "[$(date)] : Patched b2_backup() -> organized retention"
+        return 0
+    fi
+
+    rm -f "$temp" 2>/dev/null
+    return 1
 }
 
 # ── Patch v-backup-user (Local Organization Hook) ───────────────────

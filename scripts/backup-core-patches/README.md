@@ -35,6 +35,8 @@ Instead of dumping all backups into a massive, flat `/backup/` folder, our nativ
 
 **UI Transparency:** Our system handles HestiaCP's UI logic by creating hidden **symlinks** in the root `/backup/` directory pointing to the real organized files. You can still comfortably Download, Restore, and Delete backups directly from the Web Interface without modifying Hestia's PHP.
 
+**Cloud Retention:** B2 rotation searches both organized paths (`YYYY/MM_MONTH/user/user.DATE.tar`) and legacy paths (`user/user.DATE.tar`) by archive timestamp, keeping the newest backups per user. B2 keys need delete permission for cloud retention; read/write-only keys can still upload backups and logs, leaving cleanup to B2 lifecycle rules.
+
 ### 2. Pre-Flight Database Auto-Repair
 Corrupted database tables (like a crashed `wp_options`) are the #1 cause of silent backup failures. 
 Our patch injects a surgical pre-flight check right before the `mysqldump` begins using the official `mysqlrepair --check --auto-repair` utility. 
