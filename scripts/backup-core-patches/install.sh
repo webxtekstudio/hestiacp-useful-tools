@@ -29,9 +29,11 @@ ln -sf "$SCRIPT_DIR/hooks/v-backup-users-notify-hook" "$HESTIA_BIN/v-backup-user
 chmod +x "$HESTIA_BIN/v-backup-users-notify-hook"
 echo "  -> Installed HTML notification hooks"
 
-# 2.2 Install optional retention command
+# 2.2 Install optional retention command and native v-backup-users hook
 ln -sf "$SCRIPT_DIR/bin/v-prune-backups" "$HESTIA_BIN/v-prune-backups"
 chmod +x "$SCRIPT_DIR/bin/v-prune-backups"
+ln -sf "$SCRIPT_DIR/hooks/v-backup-users-retention-hook" "$HESTIA_BIN/v-backup-users-retention-hook"
+chmod +x "$SCRIPT_DIR/hooks/v-backup-users-retention-hook"
 if [ ! -f "$RETENTION_CONF" ]; then
     cp "$SCRIPT_DIR/config/backup-retention.conf.sample" "$RETENTION_CONF"
     chmod 644 "$RETENTION_CONF"
@@ -39,7 +41,7 @@ if [ ! -f "$RETENTION_CONF" ]; then
 else
     echo "  -> Retention config already exists (skipped): $RETENTION_CONF"
 fi
-echo "  -> Installed optional retention command: v-prune-backups"
+echo "  -> Installed optional native retention hook: v-prune-backups"
 
 # 3. Apply core Hestia patches (B2 paths, symlink delete, v-backup-user post-hook)
 if [ -f "$LIB_DIR/hestia.sh" ]; then
