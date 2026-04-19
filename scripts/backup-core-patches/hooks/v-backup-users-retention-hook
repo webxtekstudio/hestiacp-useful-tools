@@ -2,8 +2,9 @@
 # HestiaCP Backup Retention Hook
 # Runs optional classic .tar retention after the native v-backup-users loop.
 
-HESTIA="/usr/local/hestia"
-CONFIG_FILE="/etc/hestiacp-backup-retention.conf"
+HESTIA="${HESTIA:-/usr/local/hestia}"
+BIN="${BIN:-$HESTIA/bin}"
+CONFIG_FILE="${CONFIG_FILE:-/etc/hestiacp-backup-retention.conf}"
 RETENTION_ENABLED="FALSE"
 RETENTION_AUTO_RUN="FALSE"
 RETENTION_DRY_RUN="TRUE"
@@ -33,7 +34,7 @@ mkdir -p "$(dirname "$RETENTION_LOG_FILE")"
 {
     echo "================================"
     echo "$(date "+%F %T") Starting backup retention ($mode)"
-    /usr/local/hestia/bin/v-prune-backups "$mode"
+    "$BIN/v-prune-backups" "$mode"
     rc=$?
     echo "$(date "+%F %T") Finished backup retention (exit: $rc)"
     echo ""
