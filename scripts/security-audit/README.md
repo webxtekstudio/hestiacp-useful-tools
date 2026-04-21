@@ -63,6 +63,7 @@ Audits the server infrastructure as root.
 | Category | Checks |
 |---|---|
 | OS & Keys | Outdated Kernel, Failed SSH logins, Firewalls, Root Cron Job Hijack validation |
+| Fail2Ban | SSH jail, Recidive jail, WordPress jail presence, WordPress filter wp-login.php coverage |
 | Kernel | ASLR, SYN cookies, source routing, core dumps, CVE Profiling (Dirty COW / Dirty Pipe) |
 
 ### Layer 2: `--backend` (Per-Domain File-Level Scan)

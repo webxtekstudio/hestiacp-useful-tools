@@ -84,7 +84,7 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 
 #### [Security Audit (`v-security-audit`)](scripts/security-audit/)
 - A highly modular, zero-dependency auditing tool inspired by Lynis, built natively for HestiaCP's architecture. It grades the server's security from A to F and exports JSON/HTML reports across 4 distinct layers:
-- **System Layer:** Validates kernel CVEs, SSH hardening, and Fail2Ban bounds.
+- **System Layer:** Validates kernel CVEs, SSH hardening, Fail2Ban bounds, and WordPress Fail2Ban filter coverage (ensures both `xmlrpc.php` and `wp-login.php` attacks are caught).
 - **Backend Layer:** Scans `public_html/` via YARA rules for deep PHP Malware heuristics, base64 WebShells, and Auto-Symlink Escapes.
 - **Frontend Layer:** Checks TLS ciphers, HSTS, and Security Headers.
 - **Pentest Layer:** An aggressive offensive layer that simulates real-world OWASP Top 10 attacks (SQLi, XSS, Brute-Force floods) against your own domains to test firewall resiliency.
