@@ -28,6 +28,34 @@ check_firewall() {
         result_warn "S15" "Recidive jail is not active (recommend enabling)"
     fi
 
+    # S15b: WordPress Fail2Ban jail — must cover both xmlrpc.php AND wp-login.php
+    local wp_jail
+    wp_jail=$(fail2ban-client status wordpress-xmlrpc 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        local wp_banned
+        wp_banned=$(echo "$wp_jail" | grep "Currently banned" | awk '{print $NF}')
+        result_pass "S15b" "WordPress jail is active (${wp_banned} currently banned)"
+
+        # Check that the filter covers wp-login.php, not just xmlrpc.php
+        local wp_filter="/etc/fail2ban/filter.d/wordpress-xmlrpc.conf"
+        if [ -f "$wp_filter" ]; then
+            if grep -q 'wp-login' "$wp_filter" 2>/dev/null; then
+                result_pass "S15c" "WordPress filter covers wp-login.php brute-force"
+            else
+                result_fail "S15c" "WordPress filter does NOT cover wp-login.php (only xmlrpc.php) — brute-force attacks on wp-login will go unblocked"
+            fi
+        else
+            result_warn "S15c" "WordPress filter file not found at ${wp_filter}"
+        fi
+    else
+        # Check if any WordPress sites exist (look for wp-login in Apache logs)
+        if find /var/log/apache2/domains/ -name '*.log' -exec grep -ql 'wp-login' {} + 2>/dev/null; then
+            result_fail "S15b" "WordPress jail is NOT active but WordPress sites are being attacked"
+        else
+            result_pass "S15b" "WordPress jail is not active (no WordPress sites detected)"
+        fi
+    fi
+
     if [ -f /usr/local/hestia/conf/hestia.conf ]; then
         local fw
         fw=$(grep "^FIREWALL=" /usr/local/hestia/conf/hestia.conf 2>/dev/null | cut -d"'" -f2)
