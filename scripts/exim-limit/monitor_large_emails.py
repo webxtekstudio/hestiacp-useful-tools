@@ -12,7 +12,7 @@ CONFIG_FILE = "/etc/hestiacp-exim-limit.conf"
 HESTIA_DIR = "/usr/local/hestia"
 LOG_FILE = "/var/log/exim4/mainlog"
 STATE_FILE = "/root/.monitor_large_emails.state"
-THRESHOLD_SIZE_MB = 10
+THRESHOLD_SIZE_MB = 50
 VERBOSE = False  # Set to True for debug output, False for silence (cron friendly)
 
 # Regex to match the custom log line we added
@@ -142,7 +142,7 @@ def send_alert(alerts, is_test=False):
         intro = "This is a test email to validate the notification system. No action is required."
         subject = "[TEST] Large Email Block Alert"
     else:
-        title = "🚫 Blocked Emails (>10MB)"
+        title = "🚫 Blocked Emails (>50MB)"
         intro = "The system detected and blocked the following attempts to send oversized emails:"
         subject = f"[ALERT] {len(alerts)} Large Emails Blocked"
 

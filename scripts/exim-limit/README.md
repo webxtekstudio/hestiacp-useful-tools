@@ -24,7 +24,7 @@ If you want to look at the files, here is exactly where the installer places the
 * **The Configuration File:** `/etc/hestiacp-exim-limit.conf`
 
 ## ⚙️ 3. How to Configure
-By default, the script will block outgoing emails larger than 10MB, but will allow your users to receive large incoming emails perfectly.
+By default, the script will block outgoing emails larger than 50MB, but will allow your users to receive large incoming emails perfectly.
 
 1. Open `/etc/hestiacp-exim-limit.conf` in your editor (`nano /etc/hestiacp-exim-limit.conf`).
 2. Change the variables you want. For example, if you want to block BOTH incoming and outgoing emails to save disk space, change `LIMIT_OUTGOING_ONLY="TRUE"` to `LIMIT_OUTGOING_ONLY="FALSE"`.
@@ -42,7 +42,7 @@ By default, the script will block outgoing emails larger than 10MB, but will all
 
 ### How it works
 This tool injects a custom ACL rule into `/etc/exim4/exim4.conf.template` at the `acl_check_message` block.
-It sends a custom 552 User-Friendly Message directly to the email client (Outlook/Apple Mail) saying exactly: *"Message size exceeds 10MB limit. Please use WeTransfer or Google Drive."*
+It sends a custom 552 User-Friendly Message directly to the email client (Outlook/Apple Mail) saying exactly: *"Message size exceeds 50MB limit. Please use WeTransfer or Google Drive."*
 
 ### Python Monitoring Daemon (Included)
 When `v-add-exim-limit` is applied, it also sets up a python listener (`monitor_large_emails.py`) hooked into root's cron. It aggressively tails `/var/log/exim4/mainlog` looking for the exact custom 552 rejection string. When it detects an active block, it triggers an instant administrative email alert telling you which user tried to send the giant file.
