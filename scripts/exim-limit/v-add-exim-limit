@@ -1,6 +1,6 @@
 #!/bin/bash
 # HestiaCP Exim Limit Installer - SAFE VERSION
-# Blocks emails >50MB and notifies admin
+# Blocks emails >25MB and notifies admin
 
 # Initialize HestiaCP environment
 source /etc/profile
@@ -84,15 +84,15 @@ if ! grep -q "acl_check_data:" "$CONFIG_FILE"; then
 fi
 
 # 4. Apply Patch with Backup & Rollback
-if grep -q "Message size exceeds the limit of 50MB" "$CONFIG_FILE"; then
+if grep -q "Message size exceeds the limit of 25MB" "$CONFIG_FILE"; then
     # Patch exists, checking if it matches the desired configuration
     HAS_AUTH_LIMIT=$(grep -c "authenticated *= *" "$CONFIG_FILE")
     
     if [ "$LIMIT_OUTGOING_ONLY" == "TRUE" ]; then
         if [ "$HAS_AUTH_LIMIT" -eq 0 ]; then
             log_wrapper "Updating patch: Adding 'authenticated = *' to limit ONLY outgoing mails..."
-            sed -i '/condition      = ${if >{$message_size}{50M}}/a \         authenticated  = *' "$CONFIG_FILE"
-            sed -i 's/# Deny messages larger than 50MB with custom error message/# Deny messages larger than 50MB with custom error message (ONLY for authenticated users)/' "$CONFIG_FILE"
+            sed -i '/condition      = ${if >{$message_size}{25M}}/a \         authenticated  = *' "$CONFIG_FILE"
+            sed -i 's/# Deny messages larger than 25MB with custom error message/# Deny messages larger than 25MB with custom error message (ONLY for authenticated users)/' "$CONFIG_FILE"
             UPDATE_NEEDED=1
         else
             log_wrapper "Configuration correct: Limiting ONLY outgoing mails."
@@ -137,9 +137,9 @@ else
         AUTH_LINE="\n         authenticated  = *"
     fi
 
-    sed -i "s/acl_check_data:/acl_check_data:\n  # Warn admin about large message before rejecting\n  warn   condition      = \${if >{\$message_size}{50M}}${AUTH_LINE}\n         log_message    = Large message rejected: from \$sender_address to \$recipients size \$message_size\n         continue       =\n\n  # Deny messages larger than 50MB with custom error message (ONLY for authenticated users)\n  deny   message        = Message size exceeds the limit of 50MB. Please use Google Drive, WeTransfer, Dropbox, OneDrive or similar services to share large files.\n         condition      = \${if >{\$message_size}{50M}}${AUTH_LINE}\n/" "$CONFIG_FILE"
+    sed -i "s/acl_check_data:/acl_check_data:\n  # Warn admin about large message before rejecting\n  warn   condition      = \${if >{\$message_size}{25M}}${AUTH_LINE}\n         log_message    = Large message rejected: from \$sender_address to \$recipients size \$message_size\n         continue       =\n\n  # Deny messages larger than 25MB with custom error message (ONLY for authenticated users)\n  deny   message        = Message size exceeds the limit of 25MB. Please use Google Drive, WeTransfer, Dropbox, OneDrive or similar services to share large files.\n         condition      = \${if >{\$message_size}{25M}}${AUTH_LINE}\n/" "$CONFIG_FILE"
     
-    sed -i 's/^message_size_limit = 50M/# message_size_limit = 50M/' "$CONFIG_FILE"
+    sed -i 's/^message_size_limit = 25M/# message_size_limit = 25M/' "$CONFIG_FILE"
 
     log_wrapper "Verifying configuration..."
     if ! update-exim4.conf; then
