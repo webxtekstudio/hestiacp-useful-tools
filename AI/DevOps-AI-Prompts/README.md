@@ -1,23 +1,67 @@
-# DevOps AI Prompts & Integration
+# DevOps AI Prompts — P1 (Monitor) & P2 (Agent)
 
-This folder contains the core intelligence for orchestrating **DevOps AI Agents**, specifically focused on proactively managing and troubleshooting HestiaCP servers.
+This folder contains two System Prompts that together form a complete **autonomous HestiaCP infrastructure management system**. They are the public, platform-agnostic equivalents of a private multi-agent pipeline — designed to work with **any AI platform or model**.
 
-Instead of locking our logic to a specific low-code platform, we designed these System Prompts and knowledge bases to be **completely platform-agnostic**. This means you can import these models and plug them into your preferred AI engine:
-*   **n8n** (Automation Pipelines)
-*   **Dify** / **Flowise** / **LangFlow** (Low-Code LLM Builders)
-*   **Node.js / Python** (Your own custom Multi-Agent System / Swarm)
+## The Two Prompts
 
-## Recommended Agent Architecture
+### 📡 P1 — System Monitor (`System-Monitor-Prompt.md`)
 
-To maintain the highest level of security and DevOps precision, we recommend separating the workload into two independent modules or agents (Orchestrator/Sentinel Pattern):
+**Role:** Passive, scheduled health monitor.
 
-*   **1. System Monitor (Passive Statistical Audit)**
-    An Agent or Pipeline that performs periodic systemic audits based on your scheduled telemetry (CRON jobs outputting RAM, CPU, Disk, Exim, Hestia status). It determines the infrastructure's health and decides whether active operations are required. This prompt is ideal for ingesting structured data and firing summarized alerts to Telegram, Slack, or Discord if the state becomes **"ALERT"**.
+Works by receiving pre-collected SSH diagnostic data from 3 automated rounds and writing a structured health report. No human interaction required.
 
-*   **2. DevOps Agent (Active Resolution via SSH)**
-    The reactive brain and actual executor of the system. This agent acts conversationally and on-demand, serving as an interactive remote hands tool. Based on its identity (`DevOps-Agent-Prompt.md`) combined with the technical notes found in `/knowledge`, it has full planning autonomy. It requires support for `ReAct` (Reasoning & Action) loops and the injection of a Root SSH connection tool (`run_ssh_command`).
+| Round | What it collects |
+|---|---|
+| **Round 1** | System inventory, resources (CPU, RAM, disk, swap, services, DB) |
+| **Round 2** | Mail queue, PHP-FPM pools, Nginx config, backup status |
+| **Round 3** | Security audit: SSL expiry, Fail2Ban, attack vectors, open ports, PHP mods, failed logins |
 
-## How to Use
-The Markdown files in the `/knowledge` directory should ideally be provided to the Active Agent (DevOps Agent) in a RAG (Retrieval-Augmented Generation) format. Alternatively, they can be statically injected into the Context Window if the model's token limit allows (modern models like `gpt-4o`, `claude-3.5-sonnet`, or `gemini-1.5-pro` handle this perfectly).
+**Output:** A Markdown health report with `STATUS: HEALTHY` or `STATUS: ALERT` + severity.
 
-Before deploying to your production environment, remember to edit the placeholder tags (like bracketed domains and `<IP>` tags) inside the Prompts to reflect your actual domains and infrastructure realities!
+**Typical use:** Run via cron (e.g., 2× per day). Collect SSH data with a shell script, feed it to an LLM with this prompt, send the report to Telegram/WhatsApp/Slack.
+
+---
+
+### 🤖 P2 — DevOps Agent (`DevOps-Agent-Prompt.md`)
+
+**Role:** Active, interactive infrastructure controller.
+
+An on-demand agent with root SSH access that can diagnose and fix issues in real time via a `run_ssh_command` tool in a ReAct loop.
+
+**Typical use:** Wire this to a Telegram/WhatsApp/Discord bot or a chat interface. The user sends a request ("the site is down", "check the mail queue") and the agent investigates, acts, and reports back.
+
+---
+
+## Platform-Agnostic Design
+
+These prompts run on any LLM or platform:
+
+| Platform | How to use |
+|---|---|
+| **n8n** | HTTP node for SSH collection → LLM node with the prompt |
+| **Dify / Flowise / LangFlow** | System prompt injection + SSH tool |
+| **Node.js / Python** | Feed prompt to any AI SDK + implement `run_ssh_command` as a function tool |
+| **Claude / GPT / Gemini** | Paste the prompt directly as the system prompt |
+
+---
+
+## Required Tools
+
+Both agents need one tool wired up in your platform:
+
+```
+run_ssh_command(command: string) → string
+```
+
+This executes a bash command on the server as root via SSH and returns the output. P1 uses it for deep-dive investigation when anomalies are found. P2 uses it for all active operations.
+
+---
+
+## Setup
+
+1. **Collect SSH data** for P1 using a shell script that runs all 3 rounds and passes the output as context to the LLM.
+2. **Wire `run_ssh_command`** as a function tool in your platform for both agents.
+3. **Link the `/knowledge` files** to P2 via RAG or static context injection.
+4. **Customize** the placeholder values in the prompts (`[YOUR_AGENT_NAME]`, `[YOUR_TARGET_LANGUAGE]`).
+
+> **Note:** Do NOT hardcode server IPs, credentials, or domain names into the prompts. Pass them via environment variables or your platform's secret store.
