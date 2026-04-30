@@ -86,7 +86,7 @@ This list reflects the verified binaries in `/usr/local/hestia/bin/`.
 - `v-backup-user-config`: Backup only configuration.
 - `v-backup-user-restic`: Backup via Restic.
 - `v-backup-users`: Backup multiple users.
-- `v-backup-users-custom`: **CUSTOM:** Enhanced backup script.
+- `v-backup-users-custom`: Legacy wrapper from older installs. Do not assume it exists on this server.
 - `v-backup-users-restic`: Backup all users via Restic.
 
 ### C

@@ -18,7 +18,8 @@ This reference document maps the verified system paths for HestiaCP running on D
 | **Install Scripts** | `/usr/local/hestia/install/` | Installation and upgrade scripts |
 | **Panel Logs** | `/var/log/hestia/system.log` | Panel action audit log |
 | **Panel Nginx Logs** | `/var/log/hestia/nginx-error.log` | Panel web server errors (Port 8083) |
-| **Backup Logs** | `/var/log/hestia/backup.log` | Backup history log |
+| **Backup Logs** | `/var/log/hestia/backup.log` | Panel/system backup history log |
+| **Backup Batch Log** | `/usr/local/hestia/log/backup.log` | Global backup batch log used by backup-core-patches hooks |
 
 ## 2. Email System (Exim4, Dovecot, ClamAV)
 | Component | Path | Description |
@@ -117,12 +118,22 @@ This reference document maps the verified system paths for HestiaCP running on D
 | **System Report** | `/usr/local/hestia/bin/v-system-report` | System diagnosis script |
 | **Report Config** | `/etc/hestiacp-system-report.conf` | Report configuration |
 | **Report Logs** | `/var/log/v-system-report/` | Execution logs |
-| **Backup Base** | `/backup` | Default backup location |
-| **Backup Script** | `/usr/local/hestia/bin/v-backup-users-custom` | Custom backup script |
-| **Backup Config** | `/etc/hestiacp-backup-custom.conf` | Backup configuration |
+| **Backup Base** | `/backup` | Local backup root; archives may be organized into `YYYY/MM_MONTH/USER/` with root symlinks |
+| **Backup Script** | `/usr/local/hestia/bin/v-backup-users` | Native Hestia backup batch; may be patched by backup-core-patches |
+| **Backup Hook** | `/usr/local/hestia/bin/v-backup-user-hook` | Organizes local backups after native runs |
+| **Backup Notify Hook** | `/usr/local/hestia/bin/v-backup-users-notify-hook` | Sends global backup summary and uploads batch log when remote B2 is configured |
+| **Backup Retention** | `/usr/local/hestia/bin/v-prune-backups` | Optional classic backup retention command |
+| **Backup Retention Config** | `/etc/hestiacp-backup-retention.conf` | Retention policy for classic backups |
+| **Remote Backup Config** | `/usr/local/hestia/conf/b2.backup.conf` | Native Hestia B2 remote backup configuration when B2 is enabled |
 | **GitHub Mirror** | `/usr/local/hestia/bin/v-github-mirror` | Git sync script |
 | **GitHub Config** | `/etc/hestiacp-github-mirror.conf` | Git mirror configuration |
 | **GitHub Log** | `/var/log/hestia/github-mirror.log` | Execution logs |
+| **Security Audit** | `/usr/local/hestia/bin/v-security-audit` | Security scanning suite (4 layers) |
+| **Audit Logs** | `/var/log/hestia/security-audit/` | Audit execution logs |
+| **Fix Permissions** | `/usr/local/hestia/bin/v-fix-web-permissions` | CMS-aware permission fixer |
+| **Fix Perms Log** | `/var/log/hestia/fix-permissions/` | Permission change logs |
+| **Exim Limit** | `/usr/local/hestia/bin/v-exim-limit` | Email rate limiting |
+| **Sync Backups** | `/usr/local/hestia/bin/v-sync-backups` | Backup synchronization |
 
 ## 10. Network & System Base
 | Component | Path | Description |

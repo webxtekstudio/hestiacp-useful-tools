@@ -10,8 +10,8 @@ Pastas principais da Maildir localizadas diretamente dentro da conta:
 - `new/` (Emails acabados de chegar, ainda não lidos)
 - `cur/` (Emails já processados/lidos pelo cliente)
 
-**Exemplo:** Se o painel Hestia tem o utilizador `admin`, o domínio `example.com` e a conta de email `info`, o caminho é:
-`/home/admin/mail/example.com/info/`
+**Exemplo:** Se o painel Hestia tem o utilizador `admin`, o domínio `koolfitness.pt` e a conta de email `geral`, o caminho é:
+`/home/admin/mail/koolfitness.pt/geral/`
 
 ## 2. Ler "Subjects" e "From" (Remetentes)
 O ficheiro `/var/log/exim4/mainlog` **NÃO GUARDA** os "Subjects" (assuntos) por defeito no HestiaCP. Nunca tentes encontrar Subjects no `mainlog`.
@@ -22,8 +22,8 @@ Também não deves usar o `exim -Mvh` para emails antigos porque o Exim apaga-os
 **Para extrair Subjects e Froms APENAS de HOJE (usando `find` com `-mtime -1` ou `-mmin -1440`):**
 ```bash
 # Lembra-te: Os emails vão parar ao 'cur' muito rapidamente se o IMAP estiver ligado! Procura sempre nos dois!
-sudo find /home/*/mail/example.com/info/new /home/*/mail/example.com/info/cur -type f -mmin -1440 -exec grep -H -i "^Subject:" {} + 2>/dev/null
-sudo find /home/*/mail/example.com/info/new /home/*/mail/example.com/info/cur -type f -mmin -1440 -exec grep -H -i "^From:" {} + 2>/dev/null
+sudo find /home/*/mail/koolfitness.pt/geral/new /home/*/mail/koolfitness.pt/geral/cur -type f -mmin -1440 -exec grep -H -i "^Subject:" {} + 2>/dev/null
+sudo find /home/*/mail/koolfitness.pt/geral/new /home/*/mail/koolfitness.pt/geral/cur -type f -mmin -1440 -exec grep -H -i "^From:" {} + 2>/dev/null
 ```
 
 ## 3. Contar Emails Reais Recebidos Hoje
@@ -34,7 +34,7 @@ Para contar APENAS os emails que efetivamente entraram e foram entregues na caix
 
 **Exemplo:**
 ```bash
-sudo grep "^2026-04-09" /var/log/exim4/mainlog | grep "=> info <info@example.com>" | wc -l
+sudo grep "^2026-04-09" /var/log/exim4/mainlog | grep "=> geral <geral@koolfitness.pt>" | wc -l
 ```
 
 ## 4. O que NUNCA deves fazer:
