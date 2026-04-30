@@ -8,14 +8,15 @@ Instead of being locked into a single platform, this architecture is **platform-
 
 ### 1. The Core Blueprints (`/DevOps-AI-Prompts`)
 **Goal:** Define the exact identities, constraints, and operational logic for your autonomous agents.
-- **How it works:** We highly recommend a two-agent "Orchestrator and Sentinel" structure. One agent acts as a passive system monitor checking CRON-injected server telemetry, while the other acts as an active, interactive DevOps responder running CLI commands via SSH.
+- **How it works:** We recommend a two-agent structure. One agent acts as a **passive system monitor** that collects server telemetry in 3 rounds via SSH and feeds it to an LLM for analysis. The other acts as an **active DevOps responder** that can run CLI commands interactively via SSH.
+- **Data collection rounds:** Round 1 (system inventory + resources), Round 2 (services, PHP, backup), Round 3 (security audit: SSL, Fail2Ban, attack vectors, ports, logins, PHP mods). Each round is collected separately to avoid truncation.
 - **Go to:** [`/DevOps-AI-Prompts/`](DevOps-AI-Prompts/) to find the modular System Prompts for both agents.
 
 ### 2. The Brain Boost (`/knowledge`)
 **Goal:** Empower your Agents to be true HestiaCP specialists, not just generic Linux terminals.
-- **How it works:** This is a comprehensive collection of Markdown files containing undocumented HestiaCP CLI tricks, advanced PHP-FPM tuning, Exim mailserver troubleshooting routines, and strict database configurations.
-- **Where to use it:** You must upload these files into your AI's "Knowledge Base" (Vector DB) and link them to your DevOps Agent using standard RAG (Retrieval-Augmented Generation) so it can pull documentation during troubleshooting.
-- **Go to:** [`/knowledge/`](knowledge/) to explore the training material.
+- **How it works:** A comprehensive collection of 16 Markdown files covering HestiaCP CLI reference, PHP-FPM tuning, Exim/Dovecot troubleshooting, backup architecture (including `backup-core-patches` and remote B2/rclone backends), Fail2Ban, security auditing, and custom tools.
+- **Where to use it:** Upload these files into your AI's "Knowledge Base" (Vector DB) and link them to your DevOps Agent using standard RAG (Retrieval-Augmented Generation) so it can pull documentation during troubleshooting.
+- **Go to:** [`/knowledge/`](knowledge/) to explore the 16 reference files.
 
 ---
 
