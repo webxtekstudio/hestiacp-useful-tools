@@ -31,6 +31,9 @@ Sends you a beautiful HTML email report every morning showing your Server RAM, C
 ### 7. [github-mirror](./github-mirror/)
 Automates the cloning and syncing of your private GitHub repositories down to your server folders.
 
+### 8. [logrotate-optimize](./logrotate-optimize/)
+Upgrades Apache & Nginx log rotation from weekly to daily (14 days compressed). Prevents single domain logs from growing to 100MB+ during ad campaigns or brute-force attacks.
+
 ---
 
 ## 🚀 How to Install Everything (The Easy Way)

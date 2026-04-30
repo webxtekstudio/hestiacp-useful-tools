@@ -89,6 +89,10 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - **Frontend Layer:** Checks TLS ciphers, HSTS, and Security Headers.
 - **Pentest Layer:** An aggressive offensive layer that simulates real-world OWASP Top 10 attacks (SQLi, XSS, Brute-Force floods) against your own domains to test firewall resiliency.
 
+#### [Logrotate Optimizer (`v-optimize-logrotate`)](scripts/logrotate-optimize/)
+- Upgrades Apache & Nginx log rotation from the HestiaCP default (`weekly rotate 4`) to `daily rotate 14` — preventing domain logs from growing to 100MB+ during ad campaigns (Facebook/Instagram UTM params inflate each log line to ~630 bytes) or sustained brute-force attacks.
+- Safe and persistent across HestiaCP updates. Backs up original configs and validates before applying.
+
 ---
 
 ## 🚀 Installation (Step by Step)
