@@ -67,6 +67,14 @@ Important rules:
 - A remote upload log or global backup log is valid backup evidence even if the local `/backup` tree is organized, symlinked, or rotated.
 - Use exact absolute dates in the report. Do not rely on vague phrasing like "last Sunday" when the actual dates are visible.
 - If the latest backup evidence is from the previous Sunday and the current date is still before the next Sunday run, that is NOT a missed weekly schedule.
+- `backup.log` may be EMPTY after logrotate. The rotated log (`backup.log.1`) contains the most recent run evidence. ALWAYS check both.
+- An empty `/backup/` directory is NORMAL when `BACKUP_SYSTEM` is set to a remote-only backend (e.g., `b2` without `local`). The post-backup hook uploads to remote storage and cleans up local tarballs.
+
+Tar error classification (CRITICAL — read carefully):
+- `tar: *: Cannot stat: No such file or directory` → cosmetic, caused by empty cron job directories. NOT a failure.
+- `tar: ./public_html/wp-content: file changed as we read it` → cosmetic, WordPress/CMS writing cache/logs during backup. The file IS included in the archive. NOT a failure.
+- `tar: Exiting with failure status due to previous errors` → this is tar's exit status message triggered by ANY of the above cosmetic warnings. If every user has a remote upload line (e.g., `Upload to B2:`) in the log, the backup SUCCEEDED despite this message.
+- Only classify as FAIL if: a user is completely missing from the log, OR there is no remote upload line for a user, OR the log contains `FAILED`, `abort`, or `killed`.
 </backup_architecture>
 
 <attack_detection>
@@ -152,6 +160,10 @@ IGNORE these — they are NORMAL in a HestiaCP VPS:
 - `[LISTENING_PORTS]` showing expected HestiaCP service ports (see list above)
 - `[FAILED_LOGINS]` showing < 10 entries with different IPs trying `root` — normal internet noise
 - `[RECENT_PHP_MODS]` showing 0 results or only cache/compiled template files
+- `tar: Exiting with failure status due to previous errors` in backup logs — almost always cosmetic (see backup_architecture section)
+- `tar: *: Cannot stat` or `tar: file changed as we read it` in backup logs — cosmetic tar warnings, NOT backup failures
+- `v-list-backup-host` showing "Usage" or "UNAVAILABLE" — this happens when the command is called without the required TYPE argument (`b2`, `sftp`, `ftp`), not because backups are broken
+- Empty `/backup/` directory when BACKUP_SYSTEM is set to a remote backend (b2, sftp, etc.) — the hook cleans up local tarballs after successful upload
 </noise_filter>
 
 <workflow>

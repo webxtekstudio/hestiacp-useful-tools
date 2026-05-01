@@ -19,8 +19,8 @@ This means you must verify the live machine before concluding how backups are st
 | **Native Batch Command** | `/usr/local/hestia/bin/v-backup-users` |
 | **Single User Backup** | `/usr/local/hestia/bin/v-backup-user` |
 | **Restore Command** | `/usr/local/hestia/bin/v-restore-user` |
-| **Backup Host Listing** | `/usr/local/hestia/bin/v-list-backup-host` |
-| **Local Root** | `/backup` |
+| **Backup Host Listing** | `/usr/local/hestia/bin/v-list-backup-host TYPE` (TYPE = `b2`, `sftp`, `ftp`) |
+| **Local Root** | `/backup` (may be empty when using remote-only backends — this is normal) |
 | **Panel/System Backup Log** | `/var/log/hestia/backup.log` |
 | **Global Batch Log** | `/usr/local/hestia/log/backup.log` |
 | **Organization Hook** | `/usr/local/hestia/bin/v-backup-user-hook` |
@@ -50,11 +50,15 @@ When the user asks whether backups are healthy, run this set first:
 ```bash
 sudo -n date -u +"%Y-%m-%d %H:%M UTC"
 sudo -n grep -nEi "backup|v-backup" /var/spool/cron/crontabs/hestiaweb
-sudo -n /usr/local/hestia/bin/v-list-backup-host
+sudo -n /usr/local/hestia/bin/v-list-backup-host b2 2>/dev/null || sudo -n /usr/local/hestia/bin/v-list-backup-host sftp 2>/dev/null || echo "No remote host configured"
 sudo -n ls -l /usr/local/hestia/bin/v-backup-user-hook /usr/local/hestia/bin/v-backup-users-notify-hook /usr/local/hestia/bin/v-prune-backups 2>/dev/null
 sudo -n tail -n 60 /usr/local/hestia/log/backup.log 2>/dev/null
+# If backup.log is empty (after logrotate), check the rotated log for recent evidence:
+sudo -n grep -E "SUMMARY|Upload to B2|Upload global|Size:|Runtime:" /usr/local/hestia/log/backup.log.1 2>/dev/null | tail -30
 sudo -n tail -n 60 /var/log/hestia/backup.log 2>/dev/null
 ```
+
+> **Note:** `v-list-backup-host` requires the TYPE argument (`b2`, `sftp`, `ftp`). Without it, the command returns "Usage..." which is NOT an error — it means the argument was missing.
 
 Interpretation rules:
 - use exact absolute dates in the answer
@@ -79,8 +83,11 @@ sudo -n /usr/local/hestia/bin/v-backup-user admin
 ### List remote backup host
 
 ```bash
-sudo -n /usr/local/hestia/bin/v-list-backup-host
+sudo -n /usr/local/hestia/bin/v-list-backup-host b2
+# or: v-list-backup-host sftp / v-list-backup-host ftp
 ```
+
+> **Note:** The TYPE argument is required. Without it, the command shows a usage message, not an error.
 
 ## 6. Restore
 
@@ -104,8 +111,29 @@ sudo -n /usr/local/hestia/bin/v-restore-user admin admin.tar no no no yes no no 
 
 ```bash
 sudo -n tail -n 80 /usr/local/hestia/log/backup.log 2>/dev/null
+# If empty after logrotate, check the rotated log:
+sudo -n grep -E "SUMMARY|Upload to B2|Upload global|Size:|Runtime:|Error|FAIL" /usr/local/hestia/log/backup.log.1 2>/dev/null | tail -40
 sudo -n tail -n 80 /var/log/hestia/backup.log 2>/dev/null
 ```
+
+### Tar error classification
+
+These tar messages appear frequently in backup logs and are almost always **cosmetic**:
+
+| Message | Meaning | Action |
+|---|---|---|
+| `tar: *: Cannot stat: No such file or directory` | Empty cron job directory — tar tries to glob `*` and finds nothing | Ignore |
+| `tar: ./public_html/wp-content: file changed as we read it` | WordPress/CMS writing cache/logs during backup — file IS included | Ignore |
+| `tar: Exiting with failure status due to previous errors` | Exit status triggered by any of the above warnings | Ignore if `Upload to B2:` line exists for that user |
+
+Only classify as a **real failure** if:
+- A user is completely missing from the backup log
+- There is no `Upload to B2:` (or equivalent remote upload) line for a user
+- The log contains `FAILED`, `abort`, or `killed`
+
+### Empty `/backup/` directory
+
+When `BACKUP_SYSTEM` is set to a remote-only backend (e.g., `b2` without `local`), the post-backup hook uploads the tarball and then cleans up the local copy. The `/backup/` directory being empty is **normal and expected** — it does NOT mean backups have failed.
 
 ### Check whether the batch is stuck
 
