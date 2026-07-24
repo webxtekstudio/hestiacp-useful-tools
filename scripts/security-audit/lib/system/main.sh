@@ -20,6 +20,8 @@ run_system_checks() {
     check_critical_updates
     check_ssh_hardening
     check_firewall
+    check_f2b_iptables_sync
+    check_wp_xmlrpc_blocks
     check_hestia_panel
     check_services
     check_database

@@ -93,4 +93,85 @@ check_firewall() {
 }
 
 
+check_f2b_iptables_sync() {
+    section "SYSTEM" "Fail2Ban ↔ iptables Sync"
+
+    # Maps jail names to their Hestia iptables chain names
+    local jails="wordpress-xmlrpc:WEB dovecot-iptables:MAIL ssh-iptables:SSH exim-iptables:MAIL"
+    local total_desync=0
+
+    for jail_chain in $jails; do
+        local jail="${jail_chain%%:*}"
+        local chain="fail2ban-${jail_chain##*:}"
+
+        local f2b_count
+        f2b_count=$(fail2ban-client status "$jail" 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
+        if [ -z "$f2b_count" ]; then continue; fi
+
+        local ipt_count
+        ipt_count=$(iptables -L "$chain" -n 2>/dev/null | grep -cE 'REJECT|DROP')
+
+        # Allow small variance (shared chains like MAIL serve multiple jails)
+        local diff=$(( f2b_count - ipt_count ))
+        if [ $diff -lt 0 ]; then diff=$(( -diff )); fi
+
+        if [ "$f2b_count" -gt 0 ] && [ "$ipt_count" -eq 0 ]; then
+            result_fail "S18" "DESYNC: ${jail} has ${f2b_count} bans but ${chain} has 0 iptables rules — bans are NOT blocking traffic"
+            total_desync=$((total_desync + 1))
+        elif [ "$diff" -gt $(( f2b_count / 5 + 1 )) ]; then
+            result_warn "S18" "DRIFT: ${jail} has ${f2b_count} bans vs ${ipt_count} iptables rules in ${chain} (>20% difference)"
+            total_desync=$((total_desync + 1))
+        fi
+    done
+
+    if [ $total_desync -eq 0 ]; then
+        result_pass "S18" "Fail2Ban bans are in sync with iptables rules"
+    fi
+}
+
+
+check_wp_xmlrpc_blocks() {
+    section "SYSTEM" "WordPress xmlrpc.php Protection"
+
+    local wp_sites
+    wp_sites=$(find /home/*/web/*/public_html -maxdepth 1 -name "wp-config.php" -type f 2>/dev/null)
+
+    if [ -z "$wp_sites" ]; then
+        result_pass "S19" "No WordPress sites detected"
+        return
+    fi
+
+    local total=0
+    local unprotected=0
+    local unprotected_list=""
+
+    while IFS= read -r wp; do
+        local domain user conf_dir
+        domain=$(echo "$wp" | grep -oP '/web/\K[^/]+')
+        user=$(echo "$wp" | grep -oP '/home/\K[^/]+')
+        conf_dir="/home/${user}/conf/web/${domain}"
+
+        total=$((total + 1))
+
+        # Check for xmlrpc block: either _xmlrpc file or _security file containing xmlrpc
+        local has_block=false
+        if [ -f "${conf_dir}/nginx.ssl.conf_xmlrpc" ] || [ -f "${conf_dir}/nginx.conf_xmlrpc" ]; then
+            has_block=true
+        elif [ -f "${conf_dir}/nginx.ssl.conf_security" ] && grep -q 'xmlrpc' "${conf_dir}/nginx.ssl.conf_security" 2>/dev/null; then
+            has_block=true
+        fi
+
+        if ! $has_block; then
+            unprotected=$((unprotected + 1))
+            unprotected_list="${unprotected_list} ${domain}"
+        fi
+    done <<< "$wp_sites"
+
+    if [ $unprotected -gt 0 ]; then
+        result_fail "S19" "${unprotected}/${total} WordPress site(s) missing xmlrpc.php nginx block:${unprotected_list}"
+    else
+        result_pass "S19" "All ${total} WordPress site(s) have xmlrpc.php blocked in nginx"
+    fi
+}
+
 
