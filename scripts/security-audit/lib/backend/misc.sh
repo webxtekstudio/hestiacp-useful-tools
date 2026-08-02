@@ -63,6 +63,19 @@ check_wordpress() {
             result_fail "B64" "PHP execution NOT blocked in wp-content/uploads [${domain}]"
         fi
     fi
+
+    local mu_hardening="${docroot}/wp-content/mu-plugins/0-security-hardening.php"
+    if [ -f "$mu_hardening" ]; then
+        result_pass "B65" "WordPress REST API security hardening MU-plugin present [${domain}]"
+    fi
+
+    if command -v wp >/dev/null 2>&1; then
+        local suspicious_admins
+        suspicious_admins=$(wp user list --path="$docroot" --role=administrator --fields=user_login,user_email --allow-root 2>/dev/null | grep -iE "@nx\.invalid|@wp2shell|wp2shell|locatesuid23|wordpress-svc\.internal" || true)
+        if [ -n "$suspicious_admins" ]; then
+            result_fail "B66" "Suspicious administrator account(s) detected [${domain}]"
+        fi
+    fi
 }
 
 

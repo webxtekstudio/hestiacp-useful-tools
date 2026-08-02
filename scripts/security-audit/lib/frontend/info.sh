@@ -89,6 +89,16 @@ check_info_disclosure() {
     else
         result_pass "F27" "WordPress user enumeration is blocked [${domain}]"
     fi
+
+    local batch_api
+    batch_api=$(curl -s -m 5 "${url}/wp-json/batch/v1" 2>/dev/null)
+    if echo "$batch_api" | grep -qi "rest_no_route"; then
+        result_pass "F28" "WordPress REST API /batch/v1 endpoint disabled or not routed [${domain}]"
+    elif echo "$batch_api" | grep -qiE '"code"|"endpoints"'; then
+        result_info "F28" "WordPress REST API /batch/v1 active (ensure WP core & plugins are kept updated) [${domain}]"
+    else
+        result_pass "F28" "WordPress REST API /batch/v1 endpoint is restricted [${domain}]"
+    fi
 }
 
 
