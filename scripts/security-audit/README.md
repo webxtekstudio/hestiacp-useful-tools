@@ -74,14 +74,14 @@ Scans the filesystem inside each domain's `public_html/`.
 |---|---|
 | File Exposure | `.env`, `.git/`, SQL dumps, config backups, debug files, private keys |
 | PHP Malware | `eval(base64_decode())`, webshell signatures, YARA rules, Auto-Symlink Escapes |
-| CMS Hardening | WordPress (wp-config perms, upload execution), Laravel (APP_DEBUG, APP_KEY) |
+| CMS Hardening | WordPress (wp-config perms, upload execution, REST API MU-plugin presence, rogue admin account audit), Laravel (APP_DEBUG, APP_KEY) |
 
 ### Layer 3: `--frontend` (External HTTP/HTTPS Scan)
 Simulates an external attacker probing the website limits.
 | Category | Checks |
 |---|---|
 | TLS/Headers | HTTP/2, OCSP stapling, X-Frame-Options, CSP, Strict-Transport-Security |
-| Info Leak | xmlrpc.php, REST API user enum, ?author enumeration, open redirects |
+| Info Leak | xmlrpc.php, REST API user enum, REST API batch endpoint (/batch/v1) status, ?author enumeration, open redirects |
 
 ### Layer 4: `--pentest` (Offensive Self-Attack)
 Actively attempts exploitation using curl, openssl, dig, and nc.
