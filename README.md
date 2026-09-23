@@ -93,6 +93,12 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - Upgrades Apache & Nginx log rotation from the HestiaCP default (`weekly rotate 4`) to `daily rotate 14` — preventing domain logs from growing to 100MB+ during ad campaigns (Facebook/Instagram UTM params inflate each log line to ~630 bytes) or sustained brute-force attacks.
 - Safe and persistent across HestiaCP updates. Backs up original configs and validates before applying.
 
+#### [Fail2Ban Email Optimizer (`v-optimize-fail2ban`)](scripts/fail2ban-optimize/)
+- Balances email jail thresholds (`dovecot-iptables` and `exim-iptables`) from HestiaCP's strict defaults (7-day ban on 3 attempts) to balanced production values: `maxretry = 5`, `findtime = 600s`, `bantime = 7200s` (2 hours).
+- Solves the common issue where legitimate clients or shared webmail fetchers (Gmail POP3 Mail Fetcher, Outlook mobile) get locked out for an entire week due to accidental credential typos or background retries.
+- Deploys to `/etc/fail2ban/jail.d/99-hestiacp-email-hardening.local` to ensure highest precedence over `/etc/fail2ban/jail.local`, surviving all HestiaCP package upgrades without modifying core files.
+- Provides CLI diagnostic tools: `v-optimize-fail2ban --status`, `--dry-run`, and `--unban <IP>`, plus 1-command standalone installation via `bash install.sh --fail2ban`.
+
 ---
 
 ## 🚀 Installation (Step by Step)

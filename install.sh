@@ -19,9 +19,18 @@ SETUP_CRONS=false
 for arg in "$@"; do
     case "$arg" in
         --setup-crons) SETUP_CRONS=true ;;
+        --fail2ban)
+            if [ "$EUID" -ne 0 ]; then
+                echo "ERROR: Please run as root (or use sudo)"
+                exit 1
+            fi
+            bash "$SRC_DIR/scripts/fail2ban-optimize/install.sh"
+            exit 0
+            ;;
         --help|-h)
-            echo "Usage: $0 [--setup-crons]"
+            echo "Usage: $0 [--setup-crons|--fail2ban]"
             echo "  --setup-crons   Create/update /etc/cron.d/hestiacp-custom with recommended schedules"
+            echo "  --fail2ban      Install and apply only the Fail2Ban email optimizer"
             exit 0
             ;;
     esac
