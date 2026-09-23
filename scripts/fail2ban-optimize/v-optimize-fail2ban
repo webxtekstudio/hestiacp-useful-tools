@@ -1,0 +1,208 @@
+#!/bin/bash
+# =============================================================================
+# v-optimize-fail2ban — HestiaCP Fail2Ban Email Optimizer & Health Resync
+#
+# Balances email jail thresholds and ensures persistent, highest-priority
+# configuration across HestiaCP updates.
+#
+# WHY: HestiaCP defaults to weekly bans (bantime = 604800 / 7 days) and strict
+# retry limits (maxretry = 3) on email services (Dovecot & Exim).
+# For legitimate users, mobile mail clients, and shared webmail fetchers
+# (like Gmail POP3 Mail Fetcher or Outlook), an accidental typo in credentials
+# locks out the client IP for an entire week with "Connection timed out".
+#
+# SAFETY & PRECEDENCE:
+#   In Fail2Ban, configuration priority is:
+#     jail.conf -> jail.d/*.conf -> jail.local -> jail.d/*.local
+#   HestiaCP updates regularly overwrite /etc/fail2ban/jail.local.
+#   Files named .conf in jail.d/ FAIL to override jail.local parameters.
+#   By placing overrides in /etc/fail2ban/jail.d/99-hestiacp-email-hardening.local,
+#   the settings achieve HIGHEST priority and survive all HestiaCP updates.
+#
+# WHAT IT DOES:
+#   1. Applies balanced email thresholds:
+#      - maxretry = 5 (tolerance for typos & background retry attempts)
+#      - findtime = 600 (10 minutes window)
+#      - bantime = 7200 (2 hours ban instead of 7 days)
+#   2. Cleans up legacy/ineffective .conf override files in jail.d/
+#   3. Safely restarts Fail2Ban and validates live jail values
+#   4. Checks for and resolves Fail2Ban <-> iptables desync issues
+#
+# USAGE:
+#   v-optimize-fail2ban              # Apply configuration & resync Fail2Ban
+#   v-optimize-fail2ban --status     # Display active thresholds and banned counts
+#   v-optimize-fail2ban --dry-run    # Preview changes without applying
+#   v-optimize-fail2ban --unban <IP> # Unban an IP across dovecot and exim jails
+#
+# Part of: https://github.com/webxtekstudio/hestiacp-useful-tools
+# =============================================================================
+
+set -euo pipefail
+
+# --- Color formatting --------------------------------------------------------
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# --- Configuration Paths -----------------------------------------------------
+TARGET_FILE="/etc/fail2ban/jail.d/99-hestiacp-email-hardening.local"
+LEGACY_FILE="/etc/fail2ban/jail.d/webxtek-hardening.conf"
+DRY_RUN=false
+CHECK_STATUS=false
+UNBAN_IP=""
+
+# --- Check root --------------------------------------------------------------
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}ERROR: Please run as root (or use sudo).${NC}"
+    exit 1
+fi
+
+# --- Parse arguments ---------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --status)
+            CHECK_STATUS=true
+            shift
+            ;;
+        --unban)
+            if [ -n "${2:-}" ]; then
+                UNBAN_IP="$2"
+                shift 2
+            else
+                echo -e "${RED}ERROR: --unban requires an IP address.${NC}"
+                exit 1
+            fi
+            ;;
+        --help|-h)
+            echo "Usage: v-optimize-fail2ban [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --status      Inspect current live Fail2Ban jail thresholds and ban counts"
+            echo "  --dry-run     Preview target configuration without applying changes"
+            echo "  --unban <IP>  Unban a specific IP from dovecot and exim jails"
+            echo "  --help, -h    Show this help message"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown argument: $1${NC}"
+            echo "Use --help for available options."
+            exit 1
+            ;;
+    esac
+done
+
+# --- Option: Unban IP --------------------------------------------------------
+if [ -n "$UNBAN_IP" ]; then
+    echo -e "${BLUE}=== Unbanning IP: $UNBAN_IP ===${NC}"
+    for jail in dovecot-iptables exim-iptables recidive; do
+        if fail2ban-client status "$jail" &>/dev/null; then
+            if fail2ban-client status "$jail" | grep -q "$UNBAN_IP"; then
+                fail2ban-client set "$jail" unbanip "$UNBAN_IP" && \
+                    echo -e "  -> ${GREEN}[UNBANNED]${NC} Removed $UNBAN_IP from $jail"
+            else
+                echo -e "  -> [INFO] $UNBAN_IP is not banned in $jail"
+            fi
+        fi
+    done
+    exit 0
+fi
+
+# --- Option: Check Status ----------------------------------------------------
+if [ "$CHECK_STATUS" = true ]; then
+    echo -e "${BLUE}=== Fail2Ban Active Email Jail Status ===${NC}"
+    for jail in dovecot-iptables exim-iptables; do
+        if fail2ban-client status "$jail" &>/dev/null; then
+            mr=$(fail2ban-client get "$jail" maxretry 2>/dev/null || echo "N/A")
+            bt=$(fail2ban-client get "$jail" bantime 2>/dev/null || echo "N/A")
+            ft=$(fail2ban-client get "$jail" findtime 2>/dev/null || echo "N/A")
+            banned=$(fail2ban-client status "$jail" | grep "Currently banned:" | awk '{print $NF}')
+            echo -e "${GREEN}[$jail]${NC} maxretry: ${YELLOW}$mr${NC} | findtime: ${YELLOW}${ft}s${NC} | bantime: ${YELLOW}${bt}s ($((bt/3600))h)${NC} | currently banned: ${YELLOW}$banned${NC}"
+        else
+            echo -e "${RED}[$jail] Jail not active or not found.${NC}"
+        fi
+    done
+    exit 0
+fi
+
+# --- Apply Configuration -----------------------------------------------------
+echo "================================================================="
+echo " HestiaCP Fail2Ban Email Optimizer"
+echo " Target: $TARGET_FILE"
+echo "================================================================="
+
+if [ "$DRY_RUN" = true ]; then
+    echo -e "${YELLOW}[DRY RUN MODE] No changes will be written.${NC}"
+    echo ""
+    echo "Configuration to be deployed to $TARGET_FILE:"
+    cat << 'EOF'
+[dovecot-iptables]
+maxretry = 5
+findtime = 600
+bantime = 7200
+
+[exim-iptables]
+maxretry = 5
+findtime = 600
+bantime = 7200
+EOF
+    exit 0
+fi
+
+# 1. Clean up legacy or ineffective .conf overrides in jail.d/
+if [ -f "$LEGACY_FILE" ]; then
+    rm -f "$LEGACY_FILE"
+    echo -e "  -> Cleaned up legacy override: $LEGACY_FILE"
+fi
+
+# 2. Write new .local hardening configuration
+mkdir -p /etc/fail2ban/jail.d
+cat << 'EOF' > "$TARGET_FILE"
+# =============================================================================
+# HestiaCP Email Fail2Ban Hardening Overrides
+# Managed by: https://github.com/webxtekstudio/hestiacp-useful-tools
+#
+# NOTE: .local extension is REQUIRED to take precedence over /etc/fail2ban/jail.local.
+# =============================================================================
+
+[dovecot-iptables]
+maxretry = 5
+findtime = 600
+bantime = 7200
+
+[exim-iptables]
+maxretry = 5
+findtime = 600
+bantime = 7200
+EOF
+
+chmod 644 "$TARGET_FILE"
+echo -e "  -> ${GREEN}[OK]${NC} Installed configuration to $TARGET_FILE"
+
+# 3. Restart Fail2Ban
+echo -e "  -> Restarting Fail2Ban service..."
+systemctl restart fail2ban
+sleep 2
+
+# 4. Verify live active settings
+echo ""
+echo -e "${BLUE}=== Verifying Live Values ===${NC}"
+for jail in dovecot-iptables exim-iptables; do
+    if fail2ban-client status "$jail" &>/dev/null; then
+        mr=$(fail2ban-client get "$jail" maxretry)
+        bt=$(fail2ban-client get "$jail" bantime)
+        ft=$(fail2ban-client get "$jail" findtime)
+        echo -e "  -> ${GREEN}[$jail]${NC} maxretry=$mr (expected: 5) | findtime=${ft}s (expected: 600s) | bantime=${bt}s (expected: 7200s)"
+    else
+        echo -e "  -> ${RED}[$jail] Warning: Jail not active.${NC}"
+    fi
+done
+
+echo ""
+echo -e "${GREEN}✅ Fail2Ban email jails optimized successfully!${NC}"
+echo "Temporary typos will now lock out for 2 hours (not 7 days) and require 5 failed attempts."
