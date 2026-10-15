@@ -15,12 +15,18 @@ check_php_hardening() {
     local dangerous_funcs="exec,passthru,shell_exec,system,proc_open,popen"
 
     for pool_dir in $pool_dirs; do
+        local php_ini
+        php_ini="$(dirname "$pool_dir")/php.ini"
         for pool_file in "${pool_dir}"/*.conf; do
             [ -f "$pool_file" ] || continue
-            total_pools=$((total_pools + 1))
 
             local pool_name
             pool_name=$(basename "$pool_file" .conf)
+            if [ "$pool_name" = "dummy" ] || [ "$pool_name" = "www" ]; then
+                continue
+            fi
+
+            total_pools=$((total_pools + 1))
 
             if ! grep -qE "^[^;]*open_basedir" "$pool_file" 2>/dev/null; then
                 openbasedir_missing=$((openbasedir_missing + 1))
@@ -28,6 +34,9 @@ check_php_hardening() {
 
             local df_line
             df_line=$(grep -E "^[^;]*disable_functions" "$pool_file" 2>/dev/null | head -1)
+            if [ -z "$df_line" ] && [ -f "$php_ini" ]; then
+                df_line=$(grep -E "^[^;]*disable_functions" "$php_ini" 2>/dev/null | head -1)
+            fi
             if [ -z "$df_line" ]; then
                 disable_functions_weak=$((disable_functions_weak + 1))
             else

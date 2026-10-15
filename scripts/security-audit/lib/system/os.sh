@@ -92,7 +92,7 @@ check_suid_capabilities() {
     local dangerous_suid="find|nmap|tar|awk|sed|bash|sh|php|python|perl|ruby|cp|mv|vim|nano"
     
     local suid_files
-    suid_files=$(find /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin -type f -perm -4000 2>/dev/null | grep -iE "($dangerous_suid)$")
+    suid_files=$(find /usr/bin /usr/sbin /bin /sbin /usr/local/bin /usr/local/sbin -type f -perm -4000 2>/dev/null | grep -iE "/($dangerous_suid)$")
     
     if [ -n "$suid_files" ]; then
         local count

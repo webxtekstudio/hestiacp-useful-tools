@@ -615,7 +615,7 @@ file_age_days() {
 parse_sshd_config() {
     local key="$1"
     local val
-    val=$(grep -iE "^\s*${key}\s+" /etc/ssh/sshd_config 2>/dev/null | tail -1 | awk '{print $2}')
+    val=$(grep -ihE "^\s*${key}\s+" /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null | head -1 | awk '{print $2}')
     echo "${val:-__unset__}"
 }
 

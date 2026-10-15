@@ -57,21 +57,22 @@ check_firewall() {
     fi
 
     if [ -f /usr/local/hestia/conf/hestia.conf ]; then
-        local fw
+        local fw fw_sys
         fw=$(grep "^FIREWALL=" /usr/local/hestia/conf/hestia.conf 2>/dev/null | cut -d"'" -f2)
-        if [ "$fw" = "yes" ]; then
-            result_pass "S16" "HestiaCP firewall is enabled"
+        fw_sys=$(grep "^FIREWALL_SYSTEM=" /usr/local/hestia/conf/hestia.conf 2>/dev/null | cut -d"'" -f2)
+        if [ "$fw" = "yes" ] || { [ -n "$fw_sys" ] && [ "$fw_sys" != "no" ]; }; then
+            result_pass "S16" "HestiaCP firewall is enabled (${fw_sys:-iptables})"
         else
             result_fail "S16" "HestiaCP firewall is DISABLED"
         fi
     fi
 
     local listen_ports
-    listen_ports=$(ss -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | sed 's/.*://' | sort -un)
+    listen_ports=$(ss -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | grep -vE '^(127\.|\[\:\:1\])' | sed 's/.*://' | sort -un)
     if [ -z "$listen_ports" ]; then
-        listen_ports=$(netstat -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | sed 's/.*://' | sort -un)
+        listen_ports=$(netstat -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | grep -vE '^(127\.|\:\:1)' | sed 's/.*://' | sort -un)
     fi
-    local known_ports="22 25 53 80 110 143 443 465 587 993 995 3306 8083"
+    local known_ports="22 25 53 80 110 143 443 465 587 993 995 3306 8080 8081 8083 8084 8443"
     local unknown_ports=""
     for p in $listen_ports; do
         local is_known=false
