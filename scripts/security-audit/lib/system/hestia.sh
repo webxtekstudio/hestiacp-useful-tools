@@ -70,7 +70,7 @@ check_hestia_panel() {
     fi
 
     local session_timeout
-    session_timeout=$(grep "^SESSION_TIMEOUT=" "$hestia_conf" 2>/dev/null | cut -d"'" -f2)
+    session_timeout=$(grep -E "^(INACTIVE_)?SESSION_TIMEOUT=" "$hestia_conf" 2>/dev/null | head -1 | cut -d"'" -f2)
     if [ -n "$session_timeout" ] && [ "$session_timeout" != "0" ]; then
         result_pass "S25" "Panel session timeout: ${session_timeout} minutes"
     else
