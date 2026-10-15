@@ -29,9 +29,9 @@ check_services() {
     fi
 
     local root_php
-    root_php=$(ps aux 2>/dev/null | grep -E "^root.*php" | grep -vE "grep|php-fpm: master process" | wc -l)
+    root_php=$(ps aux 2>/dev/null | awk '$1=="root" && $11 ~ /(^|\/)php([0-9.]*)?$/ {count++} END {print count+0}')
     local root_node
-    root_node=$(ps aux 2>/dev/null | grep -E "^root.*node" | grep -v grep | wc -l)
+    root_node=$(ps aux 2>/dev/null | awk '$1=="root" && $11 ~ /(^|\/)node(js)?$/ {count++} END {print count+0}')
     if [ "$root_php" -gt 0 ] || [ "$root_node" -gt 0 ]; then
         result_warn "S30" "Found processes running as root: PHP(${root_php}) Node(${root_node})"
     else
