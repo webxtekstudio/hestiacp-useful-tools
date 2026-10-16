@@ -59,12 +59,12 @@ sudo -n /usr/local/hestia/bin/v-add-letsencrypt-domain admin example.com www.exa
 sudo -n /usr/local/hestia/bin/v-add-letsencrypt-domain admin example.com "" "yes"
 ```
 
-### D. Disable Let's Encrypt on Web Only (Keeping Mail Let's Encrypt Active)
-When a domain's website is hosted externally (e.g., Cloudflare Workers/Pages) while email remains on HestiaCP:
-- Keep `mail.[DOMAIN]` (and `webmail.[DOMAIN]` if webmail is enabled) as DNS-only (`A` record pointing to the HestiaCP IP, Cloudflare proxy OFF / grey cloud) so Mail Let's Encrypt renews automatically.
-- Disable Let's Encrypt **only** on the Web domain (omit the 3rd `"yes"` argument so `mail.conf` is untouched):
+### D. Disable SSL on Web Only (When Website Runs on Cloudflare Workers/Pages & Mail Stays on HestiaCP)
+When a domain's website is hosted externally (e.g., attached to a Cloudflare Worker custom domain) while email remains on HestiaCP:
+- Keep `mail.[DOMAIN]` as DNS-only (`A` record pointing to the HestiaCP IP, Cloudflare proxy OFF / grey cloud) so Mail Let's Encrypt renews automatically.
+- Disable SSL **only** on the unused Web domain in HestiaCP (leaving the Mail domain's Let's Encrypt 100% active):
 ```bash
-sudo -n /usr/local/hestia/bin/v-delete-letsencrypt-domain USER example.com
+sudo -n /usr/local/hestia/bin/v-delete-web-domain-ssl USER example.com
 ```
 
 ### E. Apply SSL to HestiaCP Panel
@@ -74,12 +74,12 @@ sudo -n /usr/local/hestia/bin/v-add-letsencrypt-host
 ```
 
 ## 5. Troubleshooting
-**Symptoms:** `Let's Encrypt validation status 400`, `LETSENCRYPT_FAIL_COUNT` increasing in `web.conf` or `mail.conf`.
+**Symptoms:** `Let's Encrypt validation status 400`, `LETSENCRYPT_FAIL_COUNT` increasing in `web.conf` or `mail.conf` (Note: HestiaCP stops auto-retrying once `LETSENCRYPT_FAIL_COUNT` exceeds `30`).
 
 1. **Check DNS & Cloudflare Proxy:**
-   - For **Web LE**: `example.com` and `www.example.com` must resolve to the server or pass `/.well-known/acme-challenge/` through to HestiaCP (if a Cloudflare Worker intercepts all routes without passing `.well-known`, Web LE on HestiaCP will fail).
-   - For **Mail LE**: Both `mail.example.com` AND `webmail.example.com` (unless webmail is disabled via `v-delete-mail-domain-webmail USER example.com`) must exist in DNS and point to the HestiaCP IP without Cloudflare HTTP proxy redirecting ACME challenges.
-   - For **Subdomain Mail Domains** (e.g., `sub.example.com` added as a Mail Domain): HestiaCP requests `mail.sub.example.com` and `webmail.sub.example.com`. Either create those DNS `A` records, disable webmail/LE on the unused mail subdomain, or use `/etc/hestiacp/hooks/le_post.sh` (which HestiaCP invokes natively after every renewal and never overwrites during updates).
+   - For **Web LE**: `example.com` and `www.example.com` must resolve to the server or pass `/.well-known/acme-challenge/` through to HestiaCP (if a Cloudflare Worker intercepts all routes, disable Web SSL on HestiaCP via `v-delete-web-domain-ssl` while keeping Mail SSL active).
+   - For **Mail LE**: Check `WEBMAIL_ALIAS` in `/usr/local/hestia/conf/hestia.conf` (default is `mail` or `webmail`). Both `mail.example.com` and `$WEBMAIL_ALIAS.example.com` must exist in DNS (`A`/`CNAME` pointing to the HestiaCP IP with Cloudflare proxy **OFF / DNS only**).
+   - For **Subdomain Mail Domains** (e.g., `sub.example.com` added as a Mail Domain): HestiaCP requests `mail.sub.example.com` (and `webmail.sub.example.com` if `WEBMAIL_ALIAS='webmail'`). Ensure `mail.sub.example.com` has a DNS-only `A` record in Cloudflare, then run `v-add-letsencrypt-domain USER sub.example.com '' yes` (which automatically resets `LETSENCRYPT_FAIL_COUNT='0'`).
 2. **Check LE Logs:**
    ```bash
    sudo -n tail -n 50 /var/log/hestia/LE-admin-example.com.log
