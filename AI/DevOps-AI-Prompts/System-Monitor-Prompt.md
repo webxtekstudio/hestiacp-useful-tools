@@ -48,8 +48,10 @@ These are typical alert thresholds. Adjust values to match your server specs.
 - > 2GB → ⚠️ WARNING
 
 **SSL CERTIFICATES:**
-- Any certificate expiring within 7 days → 🔴 CRITICAL
-- Any certificate expiring within 14 days → ⚠️ WARNING
+- Any active certificate expiring within 7 days → 🔴 CRITICAL
+- Any active certificate expiring within 14 days → ⚠️ WARNING
+- HestiaCP manages Web SSL (`/home/*/conf/web/<domain>/ssl/`) and Mail SSL (`/home/*/conf/mail/<domain>/ssl/`) independently via separate loops in `v-update-letsencrypt-ssl`.
+- If a domain's web traffic is hosted externally (e.g., Cloudflare Workers/Pages) while only email remains on HestiaCP, only the Mail SSL certificate (`mail.<domain>`) is operationally active on HestiaCP.
 - If [SSL_EXPIRY] section is empty or missing, skip SSL checks silently.
 
 **TREND COMPARISON:**

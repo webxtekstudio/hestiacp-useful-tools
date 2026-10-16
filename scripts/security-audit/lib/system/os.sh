@@ -78,9 +78,14 @@ check_critical_updates() {
     local pending
     pending=$(apt list --upgradable 2>/dev/null | grep -iE "$critical_pkgs" || true)
     if [ -n "$pending" ]; then
-        local count
+        local count sec_count
         count=$(echo "$pending" | wc -l)
-        result_fail "S05" "${count} critical package(s) have updates pending"
+        sec_count=$(echo "$pending" | grep -ic "security" || true)
+        if [ "$sec_count" -gt 0 ]; then
+            result_fail "S05" "${sec_count} critical security package update(s) pending (${count} total)"
+        else
+            result_warn "S05" "${count} routine package update(s) pending (non-security)"
+        fi
     else
         result_pass "S05" "No critical package updates pending"
     fi
