@@ -1,43 +1,43 @@
-# Forense de Emails (Exim4 e Dovecot) no HestiaCP
+# Email Forensics (Exim4 & Dovecot) in HestiaCP
 
-Para responder a perguntas como "quantos emails recebeu", "quais foram os subjects", e "quem enviou", o Agente DEVE usar as seguintes regras rigorosas, pois as configurações padrão de Linux não se aplicam ao HestiaCP.
+To answer questions such as "how many emails were received", "what were the subjects", and "who sent them", AI agents MUST follow these rules, as default Linux mail paths do not apply to HestiaCP.
 
-## 1. Onde os emails estão fisicamente guardados?
-HestiaCP NÃO usa `/var/vmail/`. Todos os emails entregues estão organizados por utilizador do painel, domínio, e conta de correio, no seguinte caminho:
-`/home/<Utilizador_Hestia>/mail/<Dominio>/<Conta>/`
+## 1. Where Are Emails Physically Stored?
+HestiaCP does **NOT** use `/var/vmail/`. All delivered emails are organized by HestiaCP user, domain, and mail account under:
+`/home/<Hestia_User>/mail/<Domain>/<Account>/`
 
-Pastas principais da Maildir localizadas diretamente dentro da conta:
-- `new/` (Emails acabados de chegar, ainda não lidos)
-- `cur/` (Emails já processados/lidos pelo cliente)
+Primary Maildir directories inside each account:
+- `new/` (Newly arrived, unread emails)
+- `cur/` (Emails already processed/read by an IMAP client)
 
-**Exemplo:** Se o painel Hestia tem o utilizador `admin`, o domínio `koolfitness.pt` e a conta de email `geral`, o caminho é:
-`/home/admin/mail/koolfitness.pt/geral/`
+**Example:** If the HestiaCP user is `admin`, the domain is `example.com`, and the email account is `info`, the path is:
+`/home/admin/mail/example.com/info/`
 
-## 2. Ler "Subjects" e "From" (Remetentes)
-O ficheiro `/var/log/exim4/mainlog` **NÃO GUARDA** os "Subjects" (assuntos) por defeito no HestiaCP. Nunca tentes encontrar Subjects no `mainlog`.
-Também não deves usar o `exim -Mvh` para emails antigos porque o Exim apaga-os da *queue* (`/var/spool/exim4/`) assim que são entregues.
+## 2. Reading "Subject" and "From" Headers
+By default in HestiaCP, `/var/log/exim4/mainlog` does **NOT** log email `Subject` headers. Never search for `Subject` inside `mainlog`.
+Also do not use `exim -Mvh` for delivered emails because Exim removes messages from the spool queue (`/var/spool/exim4/`) as soon as they are delivered.
 
-**A ÚNICA forma fidedigna** de ler quem enviou e o assunto de emails recentes é fazer `find` nas diretoria `new` e `cur` cruzando com um `grep`, pois o telemóvel/outlook do cliente pode já ter movido o ficheiro do `new` para o `cur`.
+**The ONLY reliable way** to inspect sender and subject lines of recent delivered emails is to search both `new` and `cur` directories using `find` + `grep` (since mobile/desktop IMAP clients move messages from `new` to `cur` immediately):
 
-**Para extrair Subjects e Froms APENAS de HOJE (usando `find` com `-mtime -1` ou `-mmin -1440`):**
 ```bash
-# Lembra-te: Os emails vão parar ao 'cur' muito rapidamente se o IMAP estiver ligado! Procura sempre nos dois!
-sudo find /home/*/mail/koolfitness.pt/geral/new /home/*/mail/koolfitness.pt/geral/cur -type f -mmin -1440 -exec grep -H -i "^Subject:" {} + 2>/dev/null
-sudo find /home/*/mail/koolfitness.pt/geral/new /home/*/mail/koolfitness.pt/geral/cur -type f -mmin -1440 -exec grep -H -i "^From:" {} + 2>/dev/null
+# Always search both 'new' and 'cur' for messages from the last 24 hours (-mmin -1440):
+sudo find /home/*/mail/example.com/info/new /home/*/mail/example.com/info/cur -type f -mmin -1440 -exec grep -H -i "^Subject:" {} + 2>/dev/null
+sudo find /home/*/mail/example.com/info/new /home/*/mail/example.com/info/cur -type f -mmin -1440 -exec grep -H -i "^From:" {} + 2>/dev/null
 ```
 
-## 3. Contar Emails Reais Recebidos Hoje
-Para contar APENAS os emails que efetivamente entraram e foram entregues na caixa local hoje (para evitar contar tentativas falhadas ou bounces da queue principal):
-1. Vai ao `mainlog`
-2. Filtra pela data (ex: `2026-04-09`)
-3. Filtra pelo símbolo de entrega local em caixa de correio `=> <conta>@<dominio>`
+## 3. Counting Delivered Incoming Emails Today
+To count ONLY emails that were actually delivered to a local mailbox on a specific date (excluding rejected spam, bounces, or queue retries):
+1. Query `/var/log/exim4/mainlog`
+2. Filter by date prefix (e.g., `2026-04-09`)
+3. Filter by local mailbox delivery token `=> <account>@<domain>`
 
-**Exemplo:**
+**Example:**
 ```bash
-sudo grep "^2026-04-09" /var/log/exim4/mainlog | grep "=> geral <geral@koolfitness.pt>" | wc -l
+sudo grep "^2026-04-09" /var/log/exim4/mainlog | grep "=> info <info@example.com>" | wc -l
 ```
 
-## 4. O que NUNCA deves fazer:
-- NUNCA procurars em `/var/vmail/`.
-- NUNCA deduzir subjects do `/var/log/exim4/mainlog`. Se o utilizador pedir Subjects, corre LOGO os comandos `grep` na `Maildir` física de `/home/`.
-- NUNCA tentar adivinhar nomes de ficheiros de spool do exim que o comando `exim -Mvh` não consegue encontrar.
+## 4. What NEVER to Do
+- **NEVER** look inside `/var/vmail/`.
+- **NEVER** guess or fabricate email subjects from `/var/log/exim4/mainlog`. Always run `grep` against the physical Maildir under `/home/`.
+- **NEVER** guess Exim spool IDs that `exim -Mvh` cannot find.
+
