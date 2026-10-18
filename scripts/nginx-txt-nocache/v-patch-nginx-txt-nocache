@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+import glob
+import subprocess
+
+patterns = [
+    "/usr/local/hestia/data/templates/web/nginx/*.tpl",
+    "/usr/local/hestia/data/templates/web/nginx/*.stpl",
+    "/usr/local/hestia/data/templates/web/nginx/php-fpm/*.tpl",
+    "/usr/local/hestia/data/templates/web/nginx/php-fpm/*.stpl",
+    "/home/*/conf/web/*/nginx*.conf",
+]
+changed = 0
+for pat in patterns:
+    for f in glob.glob(pat):
+        try:
+            raw = open(f, "r", encoding="utf-8", errors="ignore").read()
+            if "|txt|" in raw:
+                open(f, "w", encoding="utf-8", newline="\n").write(raw.replace("|txt|", "|"))
+                changed += 1
+        except Exception:
+            pass
+if changed > 0:
+    subprocess.run(["systemctl", "reload", "nginx"], check=False)
