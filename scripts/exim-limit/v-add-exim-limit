@@ -126,16 +126,21 @@ else
     UPDATE_NEEDED=1
 fi
 
-# 5. Apply / Update Anti-Spoofing Rule (+local_domains From: header check)
+# 5. Apply / Update Anti-Spoofing Rule (+local_domains From: header & bracketed-IP HELO check)
 HAS_ANTISPOOF=$(grep -c "\[hestia-exim-antispoof-start\]" "$CONFIG_FILE")
+HAS_BRACKET_HELO=$(grep -c "sg{\$sender_helo_name}" "$CONFIG_FILE")
 
 if [ "$BLOCK_HEADER_FROM_SPOOF" == "TRUE" ]; then
+    if [ "$HAS_ANTISPOOF" -gt 0 ] && [ "$HAS_BRACKET_HELO" -eq 0 ]; then
+        sed -i '/# \[hestia-exim-antispoof-start\]/,/# \[hestia-exim-antispoof-end\]/d' "$CONFIG_FILE"
+        HAS_ANTISPOOF=0
+    fi
     if [ "$HAS_ANTISPOOF" -eq 0 ]; then
-        log_wrapper "Applying From: header anti-spoofing rule for +local_domains..."
-        sed -i '/acl_check_data:/a \  # [hestia-exim-antispoof-start]\n  # Deny unauthenticated external senders spoofing local domains in the From: header\n  deny   message        = smtp auth required (forged From header for local domain)\n         !authenticated = *\n         hosts          = !+relay_from_hosts : !+whitelist\n         condition      = ${if match_domain{${lc:${domain:$h_from:}}}{+local_domains}{yes}{no}}\n  # [hestia-exim-antispoof-end]\n' "$CONFIG_FILE"
+        log_wrapper "Applying From: header anti-spoofing and bracketed-IP HELO rule..."
+        sed -i '/acl_check_data:/a \  # [hestia-exim-antispoof-start]\n  # Deny unauthenticated external senders spoofing local domains in the From: header\n  deny   message        = smtp auth required (forged From header for local domain)\n         !authenticated = *\n         hosts          = !+relay_from_hosts : !+whitelist\n         condition      = ${if match_domain{${lc:${domain:$h_from:}}}{+local_domains}{yes}{no}}\n\n  # Deny unauthenticated external bots using bracketed IP literals as HELO (e.g. [10.88.0.4])\n  deny   message        = Access denied - Invalid HELO IP literal (See RFC5321 4.1.1.1)\n         !authenticated = *\n         hosts          = !+relay_from_hosts : !+whitelist\n         condition      = ${if isip{${sg{$sender_helo_name}{\\N^\\[|\\]$\\N}{}}}{yes}{no}}\n  # [hestia-exim-antispoof-end]\n' "$CONFIG_FILE"
         UPDATE_NEEDED=1
     else
-        log_wrapper "Configuration correct: From: header anti-spoofing rule is active."
+        log_wrapper "Configuration correct: From: header and HELO anti-spoofing rules are active."
     fi
 else
     if [ "$HAS_ANTISPOOF" -gt 0 ]; then
