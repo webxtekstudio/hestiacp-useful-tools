@@ -24,10 +24,12 @@ If you want to look at the files, here is exactly where the installer places the
 * **The Configuration File:** `/etc/hestiacp-exim-limit.conf`
 
 ## ⚙️ 3. How to Configure
-By default, the script will block outgoing emails larger than 25MB, but will allow your users to receive large incoming emails perfectly.
+By default, the script will:
+- Block outgoing emails larger than 25MB (while allowing users to receive large incoming emails).
+- Block unauthenticated external senders that forge any local HestiaCP domain (`+local_domains`) in the visual `From:` header (`BLOCK_HEADER_FROM_SPOOF="TRUE"`), closing the loophole where attackers use an empty `Return-Path: <>` bounce envelope to bypass HestiaCP's default `acl_check_rcpt` `sender_domains` check.
 
 1. Open `/etc/hestiacp-exim-limit.conf` in your editor (`nano /etc/hestiacp-exim-limit.conf`).
-2. Change the variables you want. For example, if you want to block BOTH incoming and outgoing emails to save disk space, change `LIMIT_OUTGOING_ONLY="TRUE"` to `LIMIT_OUTGOING_ONLY="FALSE"`.
+2. Change the variables you want. For example, if you want to block BOTH incoming and outgoing large emails to save disk space, change `LIMIT_OUTGOING_ONLY="TRUE"` to `LIMIT_OUTGOING_ONLY="FALSE"`, or set `BLOCK_HEADER_FROM_SPOOF="FALSE"` to disable header `From:` anti-spoofing.
 3. Save the file.
 4. **IMPORTANT:** Unlike other tools, Exim requires you to reload the rules manually. After editing the config file, you must run: `v-add-exim-limit` to apply the changes!
 
@@ -41,8 +43,9 @@ By default, the script will block outgoing emails larger than 25MB, but will all
 ## 🔬 Advanced Architecture Notes (Geeks Only)
 
 ### How it works
-This tool injects a custom ACL rule into `/etc/exim4/exim4.conf.template` at the `acl_check_message` block.
-It sends a custom 552 User-Friendly Message directly to the email client (Outlook/Apple Mail) saying exactly: *"Message size exceeds 25MB limit. Please use WeTransfer or Google Drive."*
+This tool injects custom ACL rules into `/etc/exim4/exim4.conf.template` inside the `acl_check_data` block:
+1. **Large Attachment Guard:** Sends a custom 550 User-Friendly Message directly to the email client (Outlook/Apple Mail) when an authenticated user exceeds 25MB.
+2. **Dynamic `From:` Header Anti-Spoofing (`+local_domains`):** HestiaCP's default `acl_check_rcpt` only checks `sender_domains = +local_domains` on the SMTP envelope (`MAIL FROM`). Attackers bypass this using `MAIL FROM:<>` (null bounce sender) while forging `From: user@yourdomain.com` in the `DATA` headers. This rule dynamically checks `${lc:${domain:$h_from:}}` against `+local_domains` (`dsearch;/etc/exim4/domains/`), automatically protecting all existing and future HestiaCP domains without manual lists.
 
 ### Python Monitoring Daemon (Included)
 When `v-add-exim-limit` is applied, it also sets up a python listener (`monitor_large_emails.py`) hooked into root's cron. It aggressively tails `/var/log/exim4/mainlog` looking for the exact custom 552 rejection string. When it detects an active block, it triggers an instant administrative email alert telling you which user tried to send the giant file.

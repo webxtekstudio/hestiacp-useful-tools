@@ -66,10 +66,9 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - A cron-based auto-pull script that securely mirrors private GitHub/GitLab repositories straight into a specified user's `private` directory (safely away from public web access).
 - Automatically fixes the ownership permissions intrinsically so Hestia isn't locked out of `public_html`. Perfect for keeping static source code synced for local backups.
 
-#### [Exim Limit Monitor (`v-add-exim-limit`)](scripts/exim-limit/)
-- Blocks outgoing emails larger than 10MB to protect IP reputation.
-- Sends rejection messages to users with alternatives.
-- Notifies the admin on every block event.
+#### [Exim Limit & Anti-Spoof Monitor (`v-add-exim-limit`)](scripts/exim-limit/)
+- Blocks outgoing emails larger than 25MB to protect IP reputation, with user-friendly rejection messages and admin alerts.
+- Dynamically blocks unauthenticated external senders forging any local HestiaCP domain (`+local_domains`) in the visual `From:` header (closing the `Return-Path: <>` null-sender spoofing loophole across all current and future domains).
 
 #### [System Health Report (`v-system-report`)](scripts/system-report/)
 - Checks CPU, RAM, Disk, and Load averages.

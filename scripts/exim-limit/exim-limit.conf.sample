@@ -12,6 +12,14 @@ MAX_MESSAGE_SIZE_MB=25
 # FALSE = Limit BOTH incoming and outgoing emails. Saves disk space but may reject client emails.
 LIMIT_OUTGOING_ONLY="TRUE"
 
+#==========================================
+# ANTI-SPOOFING SETTINGS
+#==========================================
+# Block unauthenticated external senders forging any local HestiaCP domain (+local_domains)
+# in the visual From: header ($h_from:) when bypassing envelope MAIL FROM checks
+# (for example, using an empty Return-Path: <> bounce sender).
+BLOCK_HEADER_FROM_SPOOF="TRUE"
+
 # Notification email settings used by monitor_large_emails.py.
 # Leave empty to auto-detect the Hestia admin contact and server hostname.
 ADMIN_EMAIL=""
