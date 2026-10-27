@@ -67,6 +67,7 @@ log_wrapper "Monitor notifications will use /etc/hestiacp-exim-limit.conf or the
 # 2. Configuration
 # Default Settings
 LIMIT_OUTGOING_ONLY="TRUE"
+BLOCK_HEADER_FROM_SPOOF="TRUE"
 
 # Load external configuration if exists
 if [ -f "/etc/hestiacp-exim-limit.conf" ]; then
@@ -84,6 +85,9 @@ if ! grep -q "acl_check_data:" "$CONFIG_FILE"; then
 fi
 
 # 4. Apply Patch with Backup & Rollback
+UPDATE_NEEDED=0
+cp "$CONFIG_FILE" "$BACKUP_FILE"
+
 if grep -q "Message size exceeds the limit of 25MB" "$CONFIG_FILE"; then
     # Patch exists, checking if it matches the desired configuration
     HAS_AUTH_LIMIT=$(grep -c "authenticated *= *" "$CONFIG_FILE")
@@ -101,36 +105,15 @@ if grep -q "Message size exceeds the limit of 25MB" "$CONFIG_FILE"; then
         # LIMIT_OUTGOING_ONLY = FALSE (Limit ALL)
         if [ "$HAS_AUTH_LIMIT" -gt 0 ]; then
             log_wrapper "Updating patch: Removing 'authenticated = *' to limit ALL mails (incoming & outgoing)..."
-            sed -i '/authenticated  = */d' "$CONFIG_FILE"
+            sed -i '/authenticated  = \*/d' "$CONFIG_FILE"
             UPDATE_NEEDED=1
         else
             log_wrapper "Configuration correct: Limiting ALL mails."
         fi
     fi
-
-    if [ "$UPDATE_NEEDED" == "1" ]; then
-        log_wrapper "Verifying updated configuration..."
-        if ! update-exim4.conf; then
-             # Attempt to rollback the sed changes is tricky here without a backup of the patched state
-             # Since this is an in-place update of an existing patch, a full restore might revert other changes.
-             # User intervention is safer here.
-             handle_error "Update failed. Please check config manually."
-        fi
-        
-        # Double check with Exim binary
-        if ! /usr/sbin/exim4 -bV > /dev/null 2>&1; then
-             handle_error "CRITICAL ERROR: Exim configuration check failed after update. Please check $CONFIG_FILE manually."
-        fi
-
-        service exim4 restart
-        log_wrapper "Update applied successfully!"
-    fi
 else
-    # New Installation
-    log_wrapper "Backing up config to $BACKUP_FILE..."
-    cp "$CONFIG_FILE" "$BACKUP_FILE"
-
-    log_wrapper "Applying patch..."
+    # New Installation of 25MB Limit
+    log_wrapper "Applying 25MB attachment limit patch..."
     
     AUTH_LINE=""
     if [ "$LIMIT_OUTGOING_ONLY" == "TRUE" ]; then
@@ -140,27 +123,51 @@ else
     sed -i "s/acl_check_data:/acl_check_data:\n  # Warn admin about large message before rejecting\n  warn   condition      = \${if >{\$message_size}{25M}}${AUTH_LINE}\n         log_message    = Large message rejected: from \$sender_address to \$recipients size \$message_size\n         continue       =\n\n  # Deny messages larger than 25MB with custom error message (ONLY for authenticated users)\n  deny   message        = Message size exceeds the limit of 25MB. Please use Google Drive, WeTransfer, Dropbox, OneDrive or similar services to share large files.\n         condition      = \${if >{\$message_size}{25M}}${AUTH_LINE}\n/" "$CONFIG_FILE"
     
     sed -i 's/^message_size_limit = 25M/# message_size_limit = 25M/' "$CONFIG_FILE"
+    UPDATE_NEEDED=1
+fi
 
-    log_wrapper "Verifying configuration..."
+# 5. Apply / Update Anti-Spoofing Rule (+local_domains From: header check)
+HAS_ANTISPOOF=$(grep -c "\[hestia-exim-antispoof-start\]" "$CONFIG_FILE")
+
+if [ "$BLOCK_HEADER_FROM_SPOOF" == "TRUE" ]; then
+    if [ "$HAS_ANTISPOOF" -eq 0 ]; then
+        log_wrapper "Applying From: header anti-spoofing rule for +local_domains..."
+        sed -i '/acl_check_data:/a \  # [hestia-exim-antispoof-start]\n  # Deny unauthenticated external senders spoofing local domains in the From: header\n  deny   message        = smtp auth required (forged From header for local domain)\n         !authenticated = *\n         hosts          = !+relay_from_hosts : !+whitelist\n         condition      = ${if match_domain{${lc:${domain:$h_from:}}}{+local_domains}{yes}{no}}\n  # [hestia-exim-antispoof-end]\n' "$CONFIG_FILE"
+        UPDATE_NEEDED=1
+    else
+        log_wrapper "Configuration correct: From: header anti-spoofing rule is active."
+    fi
+else
+    if [ "$HAS_ANTISPOOF" -gt 0 ]; then
+        log_wrapper "Removing From: header anti-spoofing rule (BLOCK_HEADER_FROM_SPOOF=FALSE)..."
+        sed -i '/# \[hestia-exim-antispoof-start\]/,/# \[hestia-exim-antispoof-end\]/d' "$CONFIG_FILE"
+        UPDATE_NEEDED=1
+    else
+        log_wrapper "Configuration correct: From: header anti-spoofing rule is disabled."
+    fi
+fi
+
+if [ "$UPDATE_NEEDED" == "1" ]; then
+    log_wrapper "Backed up config to $BACKUP_FILE. Verifying configuration..."
     if ! update-exim4.conf; then
         echo "CRITICAL ERROR: update-exim4.conf failed. Restoring backup..."
         cp "$BACKUP_FILE" "$CONFIG_FILE"
-        echo "Rollback completed. Exim configuration restored to previous state."
+        update-exim4.conf
         handle_error "update-exim4.conf failed. Backup restored."
     fi
 
-    # Check config validity with Exim binary
     if ! /usr/sbin/exim4 -bV > /dev/null 2>&1; then
         echo "CRITICAL ERROR: Exim configuration check failed. Restoring backup..."
         cp "$BACKUP_FILE" "$CONFIG_FILE"
         update-exim4.conf
-        echo "Rollback completed. Exim configuration restored to previous state."
         handle_error "Exim configuration check failed. Backup restored."
     fi
 
     log_wrapper "Configuration valid. Restarting Exim..."
     service exim4 restart
     log_wrapper "Patch applied successfully!"
+else
+    rm -f "$BACKUP_FILE"
 fi
 
 # 4. Setup Cron Job
