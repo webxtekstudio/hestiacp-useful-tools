@@ -18,7 +18,7 @@ check_mail() {
             result_pass "S35" "Exim relay is restricted"
         fi
 
-        if grep -qE "match_domain.*\\\$h_from:.*local_domains" /etc/exim4/exim4.conf.template 2>/dev/null; then
+        if grep -qE "(match_domain.*\\\$h_from:|addresses:\\\$h_from:.*match_domain).*local_domains" /etc/exim4/exim4.conf.template 2>/dev/null; then
             result_pass "S66" "Exim blocks unauthenticated From: header spoofing for +local_domains"
         else
             result_warn "S66" "Exim only checks envelope sender_domains (vulnerable to Return-Path: <> From: header spoofing)"
