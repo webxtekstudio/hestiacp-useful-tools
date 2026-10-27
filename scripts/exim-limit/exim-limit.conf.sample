@@ -17,7 +17,9 @@ LIMIT_OUTGOING_ONLY="TRUE"
 #==========================================
 # Block unauthenticated external senders forging any local HestiaCP domain (+local_domains)
 # in the visual From: header ($h_from:) when bypassing envelope MAIL FROM checks
-# (for example, using an empty Return-Path: <> bounce sender).
+# (for example, using an empty Return-Path: <> bounce sender or multi-address From: header).
+# Note: To allow legitimate third-party relays (SendGrid, SES, Mailgun) to deliver mail using
+# a local From: domain to local mailboxes, add their IPs/CIDRs to /etc/exim4/white-blocks.conf.
 BLOCK_HEADER_FROM_SPOOF="TRUE"
 
 # Notification email settings used by monitor_large_emails.py.
