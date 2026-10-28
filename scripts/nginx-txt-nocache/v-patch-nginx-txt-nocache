@@ -1,23 +1,73 @@
 #!/usr/bin/env python3
 import glob
+import os
+import re
 import subprocess
 
-patterns = [
+pipe_patterns = [
     "/usr/local/hestia/data/templates/web/nginx/*.tpl",
     "/usr/local/hestia/data/templates/web/nginx/*.stpl",
     "/usr/local/hestia/data/templates/web/nginx/php-fpm/*.tpl",
     "/usr/local/hestia/data/templates/web/nginx/php-fpm/*.stpl",
     "/home/*/conf/web/*/nginx*.conf",
 ]
-changed = 0
-for pat in patterns:
+
+proxy_ext_patterns = [
+    "/usr/local/hestia/data/users/*/web.conf",
+    "/usr/local/hestia/bin/v-add-web-domain",
+    "/usr/local/hestia/bin/v-add-web-domain-proxy",
+    "/usr/local/hestia/bin/v-change-web-domain-proxy-tpl",
+    "/usr/local/hestia/web/templates/pages/edit_web.php",
+]
+
+PROXY_EXT_RE = re.compile(r"((?:PROXY_EXT|default_extensions)\s*=\s*['\"])([^'\"]+)(['\"])")
+
+
+def remove_txt_from_csv(match: re.Match) -> str:
+    prefix, ext_list, suffix = match.groups()
+    updated_list = re.sub(r"(^|,)\s*txt\s*(?=,|$)", "", ext_list)
+    updated_list = re.sub(r"^,\s*|,\s*$", "", updated_list)
+    return f"{prefix}{updated_list}{suffix}"
+
+
+nginx_changed = 0
+other_changed = 0
+
+for pat in pipe_patterns:
     for f in glob.glob(pat):
         try:
-            raw = open(f, "r", encoding="utf-8", errors="ignore").read()
+            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                raw = fh.read()
             if "|txt|" in raw:
-                open(f, "w", encoding="utf-8", newline="\n").write(raw.replace("|txt|", "|"))
-                changed += 1
+                updated = raw.replace("|txt|", "|")
+                with open(f, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(updated)
+                if f.startswith("/home/"):
+                    nginx_changed += 1
+                else:
+                    other_changed += 1
         except Exception:
             pass
-if changed > 0:
-    subprocess.run(["systemctl", "reload", "nginx"], check=False)
+
+for pat in proxy_ext_patterns:
+    for f in glob.glob(pat):
+        if not os.path.isfile(f):
+            continue
+        try:
+            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                raw = fh.read()
+            updated = PROXY_EXT_RE.sub(remove_txt_from_csv, raw)
+            if f.endswith("edit_web.php") and ", txt," in updated:
+                updated = updated.replace(", txt,", ",")
+            if updated != raw:
+                with open(f, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(updated)
+                other_changed += 1
+        except Exception:
+            pass
+
+if nginx_changed > 0:
+    check = subprocess.run(["nginx", "-t"], capture_output=True)
+    if check.returncode == 0:
+        subprocess.run(["systemctl", "reload", "nginx"], check=False)
+
