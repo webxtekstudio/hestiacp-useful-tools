@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import html
 import re
 import sys
 import os
@@ -100,7 +101,7 @@ def send_email(subject, html_body):
         print(f"Error sending email: {e}", file=sys.stderr)
 
 def get_html_template(title, intro, rows):
-    hostname = HOSTNAME
+    hostname = html.escape(str(HOSTNAME))
     return f"""
     <html>
     <body style="font-family: Arial, sans-serif; color: #333; line-height: 1.6;">
@@ -151,13 +152,17 @@ def send_alert(alerts, is_test=False):
         try:
             size_mb = f"{int(alert['size']) / 1024 / 1024:.2f} MB"
         except:
-            size_mb = f"{alert['size']} bytes"
-            
+            size_mb = f"{html.escape(str(alert.get('size', '')))} bytes"
+
+        date_val = html.escape(str(alert.get('date', '')))
+        sender_val = html.escape(str(alert.get('sender', alert.get('user', ''))))
+        recipient_val = html.escape(str(alert.get('recipient', alert.get('email', alert.get('path', '')))))
+
         html_rows += f"""
         <tr>
-            <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9em;">{alert['date']}</td>
-            <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9em;">{alert['sender']}</td>
-            <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9em;">{alert['recipient']}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9em;">{date_val}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9em;">{sender_val}</td>
+            <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9em;">{recipient_val}</td>
             <td style="padding: 8px; border-bottom: 1px solid #eee; font-size: 0.9em; color: #d9534f; font-weight: bold;">{size_mb}</td>
         </tr>
         """

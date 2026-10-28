@@ -45,7 +45,7 @@ patch_b2_functions() {
     if [ -n "$download_line" ]; then
         sed -i "${download_line}i\\
 \\t# hestia-custom-b2-v3-download: search organized paths\\
-\\t_b2_remote=\$(b2 ls \$BUCKET --recursive 2>/dev/null | grep \"\$1\" | head -1)\\
+\\t_b2_remote=\$(b2 ls \$BUCKET --recursive 2>/dev/null | grep -E \"(^|/)\${user}\\.[0-9]{4}-[0-9]{2}-[0-9]{2}_\" | grep -F \"/\$1\" | head -1)\\
 \\tif [ -n \"\$_b2_remote\" ]; then\\
 \\t\\tb2 download-file-by-name \$BUCKET \$_b2_remote \$1 > /dev/null 2>\&1\\
 \\t\\tif [ \"\$?\" -eq 0 ]; then return 0; fi\\
@@ -56,7 +56,7 @@ patch_b2_functions() {
     # --- PATCH b2_delete: find in organized paths ---
     local delete_line=$(grep -n 'b2 delete-file-version $1/$2' "$script" | head -1 | cut -d: -f1)
     if [ -n "$delete_line" ]; then
-        sed -i "${delete_line}s|b2 delete-file-version \$1/\$2|# hestia-custom-b2-v3-delete: find in organized paths\n\t_del_ids=\$(b2 ls \"\$BUCKET\" --recursive --long 2>/dev/null \| grep \"\$2\" \| awk '{print \$1}')\n\tfor _did in \$_del_ids; do b2 delete-file-version \"\$_did\" >/dev/null 2>\&1; done\n\t# fallback: b2 delete-file-version \$1/\$2|" "$script"
+        sed -i "${delete_line}s|b2 delete-file-version \$1/\$2|# hestia-custom-b2-v3-delete: find in organized paths\n\t_del_ids=\$(b2 ls \"\$BUCKET\" --recursive --long 2>/dev/null \| grep -E \"(^|/)\${user}\\.[0-9]{4}-[0-9]{2}-[0-9]{2}_\" \| grep -F \"/\$2\" \| awk '{print \$1}')\n\tfor _did in \$_del_ids; do b2 delete-file-version \"\$_did\" >/dev/null 2>\&1; done\n\t# fallback: b2 delete-file-version \$1/\$2|" "$script"
         _log "[$(date)] : Patched b2_delete() → finds in organized paths"
     fi
 

@@ -383,30 +383,44 @@ send_email_report() {
     # Try using PHPMailer from HestiaCP directly to ensure DKIM/formatting is perfect
     if [ -f "$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php" ]; then
         local temp_php="/tmp/send_sec_audit_email_$$.php"
-        cat > "$temp_php" << EOFPHP
+        cat > "$temp_php" << 'EOFPHP'
 <?php
-require_once '$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php';
-require_once '$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/SMTP.php';
-require_once '$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/Exception.php';
+$hestia = getenv('HESTIA') ?: '/usr/local/hestia';
+require_once $hestia . '/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php';
+require_once $hestia . '/web/inc/vendor/phpmailer/phpmailer/src/SMTP.php';
+require_once $hestia . '/web/inc/vendor/phpmailer/phpmailer/src/Exception.php';
 
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
-\$mail = new PHPMailer(true);
+$hostname = (string) getenv('AUDIT_HOSTNAME');
+$targetEmail = (string) getenv('AUDIT_TARGET_EMAIL');
+$subject = (string) getenv('AUDIT_SUBJECT');
+$tempHtml = (string) getenv('AUDIT_TEMP_HTML');
+$logFile = (string) getenv('AUDIT_LOG_FILE');
+
+$mail = new PHPMailer(true);
 try {
-    \$mail->isMail();
-    \$mail->setFrom('noreply@$hostname', 'HestiaCP Security Audit');
-    \$mail->addAddress('$target_email');
-    \$mail->Subject = '$(echo "$subject" | sed "s/'/\\\'/g")';
-    \$mail->msgHTML(file_get_contents('$temp_html'));
-    \$mail->AltBody = strip_tags(file_get_contents('$temp_html'));
-    if (file_exists('$LOG_FILE')) {
-        \$mail->addAttachment('$LOG_FILE', 'security_audit.log');
+    $mail->isMail();
+    $mail->setFrom('noreply@' . $hostname, 'HestiaCP Security Audit');
+    $mail->addAddress($targetEmail);
+    $mail->Subject = $subject;
+    $htmlContent = file_get_contents($tempHtml);
+    $mail->msgHTML($htmlContent);
+    $mail->AltBody = strip_tags($htmlContent);
+    if ($logFile !== '' && file_exists($logFile)) {
+        $mail->addAttachment($logFile, 'security_audit.log');
     }
-    \$mail->send();
-} catch (Exception \$e) {}
+    $mail->send();
+} catch (Exception $e) {}
 ?>
 EOFPHP
+        HESTIA="$HESTIA" \
+        AUDIT_HOSTNAME="$hostname" \
+        AUDIT_TARGET_EMAIL="$target_email" \
+        AUDIT_SUBJECT="$subject" \
+        AUDIT_TEMP_HTML="$temp_html" \
+        AUDIT_LOG_FILE="$LOG_FILE" \
         php "$temp_php" 2>/dev/null
         rm -f "$temp_php" 2>/dev/null
     elif [ -f "$SENDMAIL" ]; then

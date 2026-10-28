@@ -159,7 +159,7 @@ harden_file() {
     local fpath="$1"
     local target_perm="$2"
     local label="$3"
-    [ ! -f "$fpath" ] && return
+    [ ! -f "$fpath" ] || [ -L "$fpath" ] && return
     local current=$(stat -c '%a' "$fpath" 2>/dev/null)
     if is_more_permissive_than "$current" "$target_perm"; then
         if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
@@ -177,7 +177,7 @@ harden_dir() {
     local dpath="$1"
     local target_perm="$2"
     local label="$3"
-    [ ! -d "$dpath" ] && return
+    [ ! -d "$dpath" ] || [ -L "$dpath" ] && return
     local current=$(stat -c '%a' "$dpath" 2>/dev/null)
     if is_more_permissive_than "$current" "$target_perm"; then
         if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
@@ -194,7 +194,7 @@ harden_dir() {
 harden_executable() {
     local fpath="$1"
     local label="$2"
-    [ ! -f "$fpath" ] && return
+    [ ! -f "$fpath" ] || [ -L "$fpath" ] && return
     local current=$(stat -c '%a' "$fpath" 2>/dev/null)
     if [ "$current" != "755" ]; then
         if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
@@ -213,11 +213,11 @@ restore_writable() {
     local label="$2"
     local user="$3"
     local dir_perm="${4:-755}"
-    [ ! -d "$target" ] && return
+    [ ! -d "$target" ] || [ -L "$target" ] && return
     if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
-        chown -R "$user:$user" "$target" 2>/dev/null
-        find "$target" -type d -exec chmod "$dir_perm" {} + 2>/dev/null
-        find "$target" -type f -perm /022 -exec chmod 664 {} + 2>/dev/null
+        chown -RP -h "$user:$user" "$target" 2>/dev/null
+        find -P "$target" -not -type l -type d -exec chmod "$dir_perm" {} + 2>/dev/null
+        find -P "$target" -not -type l -type f -perm /022 -exec chmod 664 {} + 2>/dev/null
         log_fix "$label writable restored ($dir_perm dirs, owner $user:$user)"
     elif [ "$DRY_RUN" = true ]; then
         log_dry "Would restore $label writable dir"
@@ -268,8 +268,8 @@ fix_domain() {
         return 1
     fi
 
-    if [ ! -d "$pubhtml" ]; then
-        log_warn "$domain: public_html not found"
+    if [ ! -d "$pubhtml" ] || [ -L "$pubhtml" ]; then
+        log_warn "$domain: public_html not found or is a symlink"
         return 1
     fi
 
@@ -324,7 +324,7 @@ fix_domain() {
         elif [ "$DRY_RUN" = true ]; then
             log_dry "Would fix ownership: $current_owner → $expected_owner"
         else
-            chown -R "$user:$user" "$pubhtml" 2>/dev/null
+            chown -RP -h "$user:$user" "$pubhtml" 2>/dev/null
             if [ $? -eq 0 ]; then
                 log_fix "Ownership: $current_owner → $expected_owner"
                 changes=$((changes + 1))
@@ -338,14 +338,14 @@ fix_domain() {
 
     local EXCLUDE_DIRS="-not -path '*/cgi-bin/*' -not -path '*/.well-known/*'"
 
-    local bad_dirs=$(eval "find '$pubhtml' -type d -perm /002 $EXCLUDE_DIRS 2>/dev/null" | wc -l)
+    local bad_dirs=$(eval "find -P '$pubhtml' -not -type l -type d -perm /002 $EXCLUDE_DIRS 2>/dev/null" | wc -l)
     if [ "$bad_dirs" -gt 0 ]; then
         if [ "$AUDIT_ONLY" = true ]; then
             log_warn "Directories with world-write bit: $bad_dirs"
         elif [ "$DRY_RUN" = true ]; then
             log_dry "Would fix $bad_dirs world-writable directories → $DIR_PERM"
         else
-            eval "find '$pubhtml' -type d -perm /002 $EXCLUDE_DIRS -exec chmod '$DIR_PERM' {} + 2>/dev/null"
+            eval "find -P '$pubhtml' -not -type l -type d -perm /002 $EXCLUDE_DIRS -exec chmod '$DIR_PERM' {} + 2>/dev/null"
             log_fix "Directories: $bad_dirs world-writable fixed → $DIR_PERM"
             changes=$((changes + 1))
         fi
@@ -354,14 +354,14 @@ fix_domain() {
     fi
 
     local EXCLUDE_FILES="! -name 'wp-config.php' ! -name '.htaccess' ! -name '.env' ! -name 'artisan' ! -name '*.cgi' ! -name '*.pl' ! -name '*.sh'"
-    local overperm_files=$(eval "find '$pubhtml' -type f -perm /022 $EXCLUDE_FILES $EXCLUDE_DIRS 2>/dev/null" | wc -l)
+    local overperm_files=$(eval "find -P '$pubhtml' -not -type l -type f -perm /022 $EXCLUDE_FILES $EXCLUDE_DIRS 2>/dev/null" | wc -l)
     if [ "$overperm_files" -gt 0 ]; then
         if [ "$AUDIT_ONLY" = true ]; then
             log_warn "Files with group/world write bit: $overperm_files"
         elif [ "$DRY_RUN" = true ]; then
             log_dry "Would fix $overperm_files over-permissive files → $FILE_PERM"
         else
-            eval "find '$pubhtml' -type f -perm /022 $EXCLUDE_FILES $EXCLUDE_DIRS -exec chmod '$FILE_PERM' {} + 2>/dev/null"
+            eval "find -P '$pubhtml' -not -type l -type f -perm /022 $EXCLUDE_FILES $EXCLUDE_DIRS -exec chmod '$FILE_PERM' {} + 2>/dev/null"
             log_fix "Files: $overperm_files over-permissive fixed → $FILE_PERM"
             changes=$((changes + 1))
         fi
