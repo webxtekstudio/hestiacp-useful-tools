@@ -547,7 +547,7 @@ if [ "$CLEAN_MYSQL_LOGS" = "TRUE" ] || [ "$CLEAN_MYSQL_LOGS" = "true" ]; then
 fi
 
 run_task "vsftpd logs" \
-    "find /var/log -maxdepth 1 -name 'vsftpd*' -o -name 'xferlog*' -type f -mtime +${SERVICE_LOGS_RETENTION_DAYS} -delete 2>/dev/null; true" \
+    "find /var/log -maxdepth 1 \( -name 'vsftpd*' -o -name 'xferlog*' \) -type f -mtime +${SERVICE_LOGS_RETENTION_DAYS} -delete 2>/dev/null; true" \
     "$CLEAN_VSFTPD_LOGS"
 
 run_task "APT logs" \
@@ -611,9 +611,9 @@ TASKS_SUCCESS+=("Large system logs")
 if [ "$CLEAN_CORE_DUMPS" = "TRUE" ] || [ "$CLEAN_CORE_DUMPS" = "true" ]; then
     echo -n "[$(date)] : Core dumps (>${CORE_DUMPS_RETENTION_DAYS}d)... "
     core_count=0
-    for core_dir in /var/crash /var/tmp /tmp /usr/src; do
+    for core_dir in /var/crash /var/tmp /tmp; do
         if [ -d "$core_dir" ]; then
-            count=$(find "$core_dir" \( -name "core" -o -name "core.*" \) -type f -mtime +${CORE_DUMPS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
+            count=$(find "$core_dir" -regextype posix-extended \( -name "core" -o -regex '.*/core\.[0-9]+$' \) -type f -mtime +${CORE_DUMPS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
             core_count=$((core_count + count))
         fi
     done
@@ -624,10 +624,20 @@ fi
 if [ "$CLEAN_LOCK_FILES" = "TRUE" ] || [ "$CLEAN_LOCK_FILES" = "true" ]; then
     echo -n "[$(date)] : Old lock files (>${LOCK_FILES_RETENTION_DAYS}d)... "
     lock_count=0
-    for lock_dir in /var/lock /var/run /tmp /var/tmp; do
+    # Only target stale lock files in /tmp and /var/tmp
+    for lock_dir in /tmp /var/tmp; do
         if [ -d "$lock_dir" ]; then
-            count=$(find "$lock_dir" -name "*.lock" -type f -mtime +${LOCK_FILES_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
-            lock_count=$((lock_count + count))
+            while IFS= read -r -d '' lock_file; do
+                if command -v fuser >/dev/null 2>&1 && fuser "$lock_file" >/dev/null 2>&1; then
+                    continue
+                fi
+                if command -v lsof >/dev/null 2>&1 && lsof "$lock_file" >/dev/null 2>&1; then
+                    continue
+                fi
+                if rm -f "$lock_file" 2>/dev/null; then
+                    lock_count=$((lock_count + 1))
+                fi
+            done < <(find "$lock_dir" -name "*.lock" -type f -mmin +1440 -mtime +${LOCK_FILES_RETENTION_DAYS} -print0 2>/dev/null)
         fi
     done
     echo "OK ($lock_count deleted)"

@@ -303,12 +303,13 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
     if [ "$retention_mode" == "overwrite" ]; then
         # === OVERWRITE MODE ===
         if [ -d "$BASE_DEST_PATH/.git" ]; then
-            cd "$BASE_DEST_PATH"
-            if git fetch origin "$branch" && git reset --hard "origin/$branch" >> "$LOG_FILE" 2>&1; then
+            chown -RP -h "$user:$user" "$BASE_DEST_PATH"
+            if runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null fetch origin "$branch" >> "$LOG_FILE" 2>&1 && \
+               runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null reset --hard "origin/$branch" >> "$LOG_FILE" 2>&1; then
                 log "SUCCESS: Updated $repo."
-                chown -R "$user:$user" "$BASE_DEST_PATH"
-                last_commit=$(git log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
-                short_hash=$(git log -1 --format="%h")
+                chown -RP -h "$user:$user" "$BASE_DEST_PATH"
+                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
+                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --format="%h")
                 REPOS_SUCCESS+=("$user/$repo (Updated: $last_commit - $short_hash)")
             else
                 error_msg="Failed to update $repo"
@@ -317,12 +318,11 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
             fi
         else
             log "Cloning $repo into $BASE_DEST_PATH..."
-            if git clone -b "$branch" "$repo" "$BASE_DEST_PATH" >> "$LOG_FILE" 2>&1; then
+            if runuser -u "$user" -- git -c core.hooksPath=/dev/null clone -b "$branch" "$repo" "$BASE_DEST_PATH" >> "$LOG_FILE" 2>&1; then
                 log "SUCCESS: Cloned $repo."
-                chown -R "$user:$user" "$BASE_DEST_PATH"
-                cd "$BASE_DEST_PATH"
-                last_commit=$(git log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
-                short_hash=$(git log -1 --format="%h")
+                chown -RP -h "$user:$user" "$BASE_DEST_PATH"
+                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
+                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --format="%h")
                 REPOS_SUCCESS+=("$user/$repo (Cloned: $last_commit - $short_hash)")
             else
                 error_msg="Failed to clone $repo"
@@ -337,10 +337,10 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
         VERSION_DIR="${BASE_DEST_PATH}_${TIMESTAMP}"
         
         log "Cloning new version into $VERSION_DIR..."
-        if git clone -b "$branch" --depth 1 "$repo" "$VERSION_DIR" >> "$LOG_FILE" 2>&1; then
+        if runuser -u "$user" -- git -c core.hooksPath=/dev/null clone -b "$branch" --depth 1 "$repo" "$VERSION_DIR" >> "$LOG_FILE" 2>&1; then
             log "SUCCESS: Cloned version $TIMESTAMP."
             rm -rf "$VERSION_DIR/.git"
-            chown -R "$user:$user" "$VERSION_DIR"
+            chown -RP -h "$user:$user" "$VERSION_DIR"
             REPOS_SUCCESS+=("$user/$repo (Backup)")
             
             # --- Retention Cleanup Logic ---

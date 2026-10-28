@@ -2189,38 +2189,48 @@ send_html_email() {
     if [ -f "$SENDMAIL" ] && [ -f "$LOG_FILE" ]; then
         if [ -f "$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php" ]; then
             local temp_php="/tmp/send_report_email_$$.php"
-            local php_subject
-            local php_mail_from
-            local php_mail_from_name
-            php_subject=$(echo "$subject" | sed "s/'/\\\'/g")
-            php_mail_from=$(echo "$mail_from" | sed "s/'/\\\'/g")
-            php_mail_from_name=$(echo "$mail_from_name" | sed "s/'/\\\'/g")
-            cat > "$temp_php" << EOFPHP
+            cat > "$temp_php" << 'EOFPHP'
 <?php
-require_once '$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php';
-require_once '$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/SMTP.php';
-require_once '$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/Exception.php';
+$hestia = getenv('HESTIA') ?: '/usr/local/hestia';
+require_once $hestia . '/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php';
+require_once $hestia . '/web/inc/vendor/phpmailer/phpmailer/src/SMTP.php';
+require_once $hestia . '/web/inc/vendor/phpmailer/phpmailer/src/Exception.php';
 
 use PHPMailer\PHPMailer\PHPMailer;
 use PHPMailer\PHPMailer\Exception;
 
-\$mail = new PHPMailer(true);
+$mailFrom = (string) getenv('REPORT_MAIL_FROM');
+$mailFromName = (string) getenv('REPORT_MAIL_FROM_NAME');
+$adminEmail = (string) getenv('REPORT_ADMIN_EMAIL');
+$subject = (string) getenv('REPORT_SUBJECT');
+$tempHtml = (string) getenv('REPORT_TEMP_HTML');
+$logFile = (string) getenv('REPORT_LOG_FILE');
+
+$mail = new PHPMailer(true);
 try {
-    \$mail->isMail();
-    \$mail->setFrom('$php_mail_from', '$php_mail_from_name');
-    \$mail->Sender = '$php_mail_from';
-    \$mail->addAddress('$admin_email');
-    \$mail->Subject = '$php_subject';
-    \$mail->msgHTML(file_get_contents('$temp_html'));
-    \$mail->AltBody = strip_tags(file_get_contents('$temp_html'));
-    \$mail->addAttachment('$LOG_FILE', 'system_report.log');
-    \$mail->send();
+    $mail->isMail();
+    $mail->setFrom($mailFrom, $mailFromName);
+    $mail->Sender = $mailFrom;
+    $mail->addAddress($adminEmail);
+    $mail->Subject = $subject;
+    $htmlContent = file_get_contents($tempHtml);
+    $mail->msgHTML($htmlContent);
+    $mail->AltBody = strip_tags($htmlContent);
+    $mail->addAttachment($logFile, 'system_report.log');
+    $mail->send();
     echo "OK";
-} catch (Exception \$e) {
-    echo "ERROR: " . \$mail->ErrorInfo;
+} catch (Exception $e) {
+    echo "ERROR: " . $mail->ErrorInfo;
 }
 ?>
 EOFPHP
+            HESTIA="$HESTIA" \
+            REPORT_MAIL_FROM="$mail_from" \
+            REPORT_MAIL_FROM_NAME="$mail_from_name" \
+            REPORT_ADMIN_EMAIL="$admin_email" \
+            REPORT_SUBJECT="$subject" \
+            REPORT_TEMP_HTML="$temp_html" \
+            REPORT_LOG_FILE="$LOG_FILE" \
             php "$temp_php" 2>/dev/null
             rm -f "$temp_php" 2>/dev/null
         else
