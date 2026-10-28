@@ -98,6 +98,9 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - Deploys to `/etc/fail2ban/jail.d/99-hestiacp-email-hardening.local` to ensure highest precedence over `/etc/fail2ban/jail.local`, surviving all HestiaCP package upgrades without modifying core files.
 - Provides CLI diagnostic tools: `v-optimize-fail2ban --status`, `--dry-run`, and `--unban <IP>`, plus 1-command standalone installation via `bash install.sh --fail2ban`.
 
+#### [Nginx `.txt` Cache Hardener (`v-patch-nginx-txt-nocache`)](scripts/nginx-txt-nocache/)
+- Removes `txt` from Nginx static `expires max` location blocks across PHP-FPM templates, active domain configs, and reverse-proxy `PROXY_EXT` definitions (`web.conf` and HestiaCP proxy defaults) so `.txt` files (`robots.txt`, `llms.txt`, `ads.txt`, `security.txt`) are not cached indefinitely and remain clean across domain rebuilds.
+
 ---
 
 ## 🚀 Installation (Step by Step)
