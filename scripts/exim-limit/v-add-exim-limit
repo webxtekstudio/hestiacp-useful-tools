@@ -57,10 +57,14 @@ handle_error() {
 
 log_wrapper "Starting Exim Limit Monitor installation..."
 
-# 1. Install Monitor Script
-log_wrapper "Copying monitor script..."
-cp "$(dirname "$0")/monitor_large_emails.py" /usr/local/bin/monitor_large_emails.py
-chmod +x /usr/local/bin/monitor_large_emails.py
+# 1. Verify Monitor Script in $HESTIA/bin (remove legacy /usr/local/bin duplicate if present)
+MONITOR_BIN="$HESTIA/bin/monitor_large_emails.py"
+if [ "$(cd "$(dirname "$0")" && pwd)" != "$HESTIA/bin" ] && [ -f "$(dirname "$0")/monitor_large_emails.py" ]; then
+    log_wrapper "Copying monitor script to $MONITOR_BIN..."
+    cp --remove-destination "$(dirname "$0")/monitor_large_emails.py" "$MONITOR_BIN"
+fi
+chmod +x "$MONITOR_BIN"
+rm -f /usr/local/bin/monitor_large_emails.py
 
 log_wrapper "Monitor notifications will use /etc/hestiacp-exim-limit.conf or the Hestia admin contact."
 
@@ -185,9 +189,8 @@ else
 fi
 
 # 4. Setup Cron Job
-if [ ! -f /etc/cron.d/exim-large-monitor ]; then
-    echo "0 * * * * root /usr/local/bin/monitor_large_emails.py" > /etc/cron.d/exim-large-monitor
-    log_wrapper "Cron job installed."
-fi
+echo "0 * * * * root $HESTIA/bin/monitor_large_emails.py" > /etc/cron.d/exim-large-monitor
+chmod 644 /etc/cron.d/exim-large-monitor
+log_wrapper "Cron job ensured at /etc/cron.d/exim-large-monitor."
 
 log_wrapper "Installation Complete."

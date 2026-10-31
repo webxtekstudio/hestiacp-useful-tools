@@ -24,7 +24,7 @@ if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-patch-nginx-txt-nocache" "$ta
     cp "$target_bin" "$BAK_DIR/v-patch-nginx-txt-nocache.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/v-patch-nginx-txt-nocache.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp "$SCRIPT_DIR/v-patch-nginx-txt-nocache" "$target_bin"
+cp --remove-destination "$SCRIPT_DIR/v-patch-nginx-txt-nocache" "$target_bin"
 chmod +x "$target_bin"
 echo "  -> [OK] Installed CLI script: $target_bin"
 

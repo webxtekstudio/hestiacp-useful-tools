@@ -36,7 +36,7 @@ if [ ! -f "$F2B_TARGET_CONF" ] || [ -f "$F2B_LEGACY_CONF" ] || [ "${1:-}" = "--f
     need_apply=true
 fi
 
-cp "$SCRIPT_DIR/v-optimize-fail2ban" "$target_bin"
+cp --remove-destination "$SCRIPT_DIR/v-optimize-fail2ban" "$target_bin"
 chmod +x "$target_bin"
 echo "  -> [OK] Installed CLI script: $target_bin"
 

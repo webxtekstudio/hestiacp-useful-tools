@@ -21,7 +21,7 @@ if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-clean-garbage" "$target_bin";
     cp "$target_bin" "$BAK_DIR/v-clean-garbage.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/v-clean-garbage.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp "$SCRIPT_DIR/v-clean-garbage" "$target_bin"
+cp --remove-destination "$SCRIPT_DIR/v-clean-garbage" "$target_bin"
 chmod +x "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 

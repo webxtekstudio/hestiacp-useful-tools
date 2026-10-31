@@ -24,6 +24,10 @@ if [ -L "$HESTIA_BIN/v-backup-users-custom" ] || [ -f "$HESTIA_BIN/v-backup-user
     rm -f "/etc/hestiacp-backup-custom.conf"
     echo "  -> Cleaned up old v-backup-users-custom wrapper (Arch v1)."
 fi
+if [ -d "$HESTIA_BIN/lib" ] && [ -f "$HESTIA_BIN/lib/core.sh" ] && [ -f "$HESTIA_BIN/lib/retention.sh" ] && [ -f "$HESTIA_BIN/lib/remote.sh" ]; then
+    rm -rf "$HESTIA_BIN/lib"
+    echo "  -> Cleaned up orphaned Arch v1 backup library ($HESTIA_BIN/lib)."
+fi
 
 # 2. Install the new local organization hook
 ln -sf "$SCRIPT_DIR/hooks/v-backup-user-hook" "$HESTIA_BIN/v-backup-user-hook"

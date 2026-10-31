@@ -25,7 +25,7 @@ if [ -f "$TARGET_BIN" ] && ! cmp -s "$SCRIPT_DIR/v-harden-server" "$TARGET_BIN";
     ls -1t "$BAK_DIR"/v-harden-server.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
 
-cp "$SCRIPT_DIR/v-harden-server" "$TARGET_BIN"
+cp --remove-destination "$SCRIPT_DIR/v-harden-server" "$TARGET_BIN"
 chmod +x "$TARGET_BIN"
 echo "  -> [OK] Installed CLI script: $TARGET_BIN"
 

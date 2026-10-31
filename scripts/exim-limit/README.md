@@ -20,7 +20,7 @@ v-add-exim-limit
 ## 📂 2. File Paths (Where is everything?)
 If you want to look at the files, here is exactly where the installer places them:
 * **The Executable Script:** `/usr/local/hestia/bin/v-add-exim-limit`
-* **The Monitor Helper:** `/usr/local/hestia/bin/monitor_large_emails.py` (copied to `/usr/local/bin/monitor_large_emails.py` when `v-add-exim-limit` is applied)
+* **The Monitor Helper:** `/usr/local/hestia/bin/monitor_large_emails.py`
 * **The Configuration File:** `/etc/hestiacp-exim-limit.conf`
 
 ## ⚙️ 3. How to Configure
@@ -55,5 +55,5 @@ When `v-add-exim-limit` is applied, it also sets up a python listener (`monitor_
 
 **Testing the Monitor:**
 You can test the exact email delivery by running:
-`/usr/local/bin/monitor_large_emails.py --test`
+`/usr/local/hestia/bin/monitor_large_emails.py --test`
 This will send a test alert directly to your `ADMIN_EMAIL` bypassing the log validation.
