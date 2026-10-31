@@ -7,6 +7,8 @@
 #
 # All patches are idempotent (safe to re-run).
 
+export HESTIA="${HESTIA:-/usr/local/hestia}"
+
 # ── Patch b2 functions in backup.sh ────────────────────────────────
 patch_b2_functions() {
     local script="$HESTIA/func/backup.sh"
@@ -373,13 +375,14 @@ patch_cron_rm_silence() {
 # ── Entry point ──────────────────────────────────────────────────────
 apply_hestia_patches() {
     _log "[$(date)] : Applying Hestia patches..."
-    patch_delete_command
-    patch_b2_functions
-    patch_v_backup_user_db_repair
-    patch_v_backup_user
-    patch_v_backup_user_notify
-    patch_v_backup_users_interactive
-    patch_v_backup_users_notify
-    patch_v_backup_users_retention
-    patch_cron_rm_silence
+    patch_delete_command || true
+    patch_b2_functions || true
+    patch_v_backup_user_db_repair || true
+    patch_v_backup_user || true
+    patch_v_backup_user_notify || true
+    patch_v_backup_users_interactive || true
+    patch_v_backup_users_notify || true
+    patch_v_backup_users_retention || true
+    patch_cron_rm_silence || true
+    return 0
 }

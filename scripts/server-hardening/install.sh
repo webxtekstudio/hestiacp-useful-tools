@@ -6,22 +6,23 @@
 
 set -euo pipefail
 
+if [ "$EUID" -ne 0 ]; then
+    echo "ERROR: Please run as root (or use sudo)" >&2
+    exit 1
+fi
+
+export HESTIA="${HESTIA:-/usr/local/hestia}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HESTIA_BIN="${HESTIA:-/usr/local/hestia}/bin"
+HESTIA_BIN="$HESTIA/bin"
 BAK_DIR="/var/backups/hestiacp-useful-tools"
 TARGET_BIN="$HESTIA_BIN/v-harden-server"
 
 echo "--- Installing HestiaCP Server Hardening Manager (v-harden-server) ---"
 
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: Please run as root (or use sudo)"
-    exit 1
-fi
-
 if [ -f "$TARGET_BIN" ] && ! cmp -s "$SCRIPT_DIR/v-harden-server" "$TARGET_BIN"; then
-    mkdir -p "$BAK_DIR"
+    install -d -m 0700 "$BAK_DIR"
     cp "$TARGET_BIN" "$BAK_DIR/v-harden-server.bak.$(date +%Y%m%d-%H%M%S)"
-    ls -t "$BAK_DIR"/v-harden-server.bak.* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+    ls -1t "$BAK_DIR"/v-harden-server.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
 
 cp "$SCRIPT_DIR/v-harden-server" "$TARGET_BIN"

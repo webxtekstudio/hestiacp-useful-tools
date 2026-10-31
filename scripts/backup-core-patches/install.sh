@@ -1,11 +1,19 @@
 #!/bin/bash
-# scripts/backup-users-custom/install.sh
+# scripts/backup-core-patches/install.sh
 # Installation module for the Backup Native Patches
 
+set -euo pipefail
+
+if [ "$EUID" -ne 0 ]; then
+    echo "ERROR: Please run as root (or use sudo)" >&2
+    exit 1
+fi
+
+export HESTIA="${HESTIA:-/usr/local/hestia}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
-HESTIA_BIN="${HESTIA:-/usr/local/hestia}/bin"
-HESTIA_CONF="${HESTIA:-/usr/local/hestia}/conf/hestia.conf"
+HESTIA_BIN="$HESTIA/bin"
+HESTIA_CONF="$HESTIA/conf/hestia.conf"
 RETENTION_CONF="/etc/hestiacp-backup-retention.conf"
 
 echo "--- Installing Backup Core Patches ---"
@@ -19,14 +27,14 @@ fi
 
 # 2. Install the new local organization hook
 ln -sf "$SCRIPT_DIR/hooks/v-backup-user-hook" "$HESTIA_BIN/v-backup-user-hook"
-chmod +x "$HESTIA_BIN/v-backup-user-hook"
+chmod +x "$SCRIPT_DIR/hooks/v-backup-user-hook"
 echo "  -> Installed backup organization hook: v-backup-user-hook"
 
 # 2.1 Install the new notification hooks
 ln -sf "$SCRIPT_DIR/hooks/v-backup-user-notify-hook" "$HESTIA_BIN/v-backup-user-notify-hook"
-chmod +x "$HESTIA_BIN/v-backup-user-notify-hook"
+chmod +x "$SCRIPT_DIR/hooks/v-backup-user-notify-hook"
 ln -sf "$SCRIPT_DIR/hooks/v-backup-users-notify-hook" "$HESTIA_BIN/v-backup-users-notify-hook"
-chmod +x "$HESTIA_BIN/v-backup-users-notify-hook"
+chmod +x "$SCRIPT_DIR/hooks/v-backup-users-notify-hook"
 echo "  -> Installed HTML notification hooks"
 
 # 2.2 Install optional retention command and native v-backup-users hook
@@ -52,9 +60,9 @@ fi
 
 # 4. Check remote backup status and guide user
 echo ""
-b2_conf="${HESTIA:-/usr/local/hestia}/conf/b2.backup.conf"
+b2_conf="$HESTIA/conf/b2.backup.conf"
 if [ -f "$b2_conf" ] && grep -q "BUCKET=" "$b2_conf" 2>/dev/null; then
-    b2_bucket=$(grep "^BUCKET=" "$b2_conf" | cut -d"'" -f2)
+    b2_bucket=$(grep "^BUCKET=" "$b2_conf" | cut -d"'" -f2 || true)
     echo "  ✅ B2 cloud backup configured (bucket: $b2_bucket)"
     echo "  Backups will be uploaded to organized paths: YYYY/MM_MONTH/user/"
 else

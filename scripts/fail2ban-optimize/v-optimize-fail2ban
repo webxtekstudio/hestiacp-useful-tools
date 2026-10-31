@@ -184,10 +184,14 @@ EOF
 chmod 644 "$TARGET_FILE"
 echo -e "  -> ${GREEN}[OK]${NC} Installed configuration to $TARGET_FILE"
 
-# 3. Restart Fail2Ban
-echo -e "  -> Restarting Fail2Ban service..."
-systemctl restart fail2ban
-sleep 2
+# 3. Reload Fail2Ban in-place (avoids 90s systemd stop timeout when many IPs are banned)
+echo -e "  -> Reloading Fail2Ban configuration..."
+if systemctl is-active --quiet fail2ban; then
+    fail2ban-client reload >/dev/null 2>&1 || systemctl reload fail2ban || systemctl restart fail2ban
+else
+    systemctl restart fail2ban
+    sleep 2
+fi
 
 # 4. Verify live active settings
 echo ""

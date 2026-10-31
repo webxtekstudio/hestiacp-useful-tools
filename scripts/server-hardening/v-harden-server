@@ -244,6 +244,43 @@ check_f2b_desync_count() {
     echo "$desync"
 }
 
+write_file_if_changed() {
+    local dest="$1"
+    local mode="$2"
+    local dir base tmp
+    dir="$(dirname "$dest")"
+    base="$(basename "$dest")"
+    install -d -m 0755 "$dir"
+    tmp=$(mktemp "${dir}/.${base}.tmp.XXXXXX")
+    chmod "$mode" "$tmp"
+    cat > "$tmp"
+    if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+        chmod "$mode" "$dest" 2>/dev/null || true
+        rm -f "$tmp"
+        return 1
+    fi
+    mv -f "$tmp" "$dest"
+    chmod "$mode" "$dest"
+    return 0
+}
+
+is_apt_locked() {
+    if command -v fuser >/dev/null 2>&1; then
+        fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && return 0
+        fuser /var/lib/dpkg/lock >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+has_ssh_exempt_before_drop() {
+    local fam="$1" tbl="$2" chn="$3" port="$4"
+    nft list chain "$fam" "$tbl" "$chn" 2>/dev/null | awk -v p="$port" '
+        $0 ~ ("(^|[[:space:]])tcp dport " p "([[:space:]]|$)") && /[[:space:]]accept([[:space:]]|$)/ { ok=1; exit }
+        /[[:space:]](drop|reject)([[:space:]]|$)/ { exit }
+        END { exit(ok ? 0 : 1) }
+    '
+}
+
 # =============================================================================
 # ACTION: UNBAN IP
 # =============================================================================
@@ -385,11 +422,11 @@ if [ "$MODE" = "status" ]; then
         ssh_exempt="NO"
         v4_ok=false
         v6_ok=true
-        if nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -q "tcp dport ${SSH_PORT} accept"; then
+        if has_ssh_exempt_before_drop ip crowdsec crowdsec-chain-input "$SSH_PORT"; then
             v4_ok=true
         fi
         if nft list chain ip6 crowdsec6 crowdsec6-chain-input >/dev/null 2>&1; then
-            if ! nft list chain ip6 crowdsec6 crowdsec6-chain-input 2>/dev/null | grep -q "tcp dport ${SSH_PORT} accept"; then
+            if ! has_ssh_exempt_before_drop ip6 crowdsec6 crowdsec6-chain-input "$SSH_PORT"; then
                 v6_ok=false
             fi
         fi
@@ -452,7 +489,8 @@ apply_base_pillars() {
     fi
 
     # --- Pillar 1: Kernel Sysctl Hardening ---
-    cat << 'EOF' > "$SYSCTL_FILE"
+    local sysctl_changed=false
+    if write_file_if_changed "$SYSCTL_FILE" 0644 << 'EOF'
 # HestiaCP Kernel Network & Memory Hardening
 # Managed by: https://github.com/webxtekstudio/hestiacp-useful-tools (v-harden-server)
 net.ipv4.tcp_syncookies = 1
@@ -472,71 +510,81 @@ net.ipv4.icmp_echo_ignore_broadcasts = 1
 kernel.panic = 10
 fs.suid_dumpable = 0
 EOF
-    chmod 0644 "$SYSCTL_FILE"
-    sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
+    then
+        sysctl_changed=true
+    fi
+    if [ "$sysctl_changed" = true ] || [ "$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo 0)" != "1" ] || [ "$(sysctl -n fs.suid_dumpable 2>/dev/null || echo 1)" != "0" ]; then
+        sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
+    fi
     echo -e "  -> ${GREEN}[Pillar 1]${NC} Kernel sysctl hardening active ($SYSCTL_FILE)"
 
     # --- Pillar 2: APT Config Preservation & Crontab Perms ---
-    cat << 'EOF' > "$APT_KEEP_FILE"
+    write_file_if_changed "$APT_KEEP_FILE" 0644 << 'EOF' || true
 Dpkg::Options {
    "--force-confdef";
    "--force-confold";
 };
 EOF
-    chmod 0644 "$APT_KEEP_FILE"
     [ -f /etc/crontab ] && chmod 0600 /etc/crontab
     echo -e "  -> ${GREEN}[Pillar 2]${NC} APT custom config preservation active ($APT_KEEP_FILE)"
 
     # --- Pillar 3: Lockout-Safe SSH Hardening ---
     install -d -m 0755 /etc/ssh/sshd_config.d
-    local ssh_bak=""
-    if [ -f "$SSH_DROPIN" ]; then
-        ssh_bak="${SSH_DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
-        cp "$SSH_DROPIN" "$ssh_bak"
-    fi
-
+    local ssh_target_content=""
     if has_authorized_ssh_key; then
-        cat << 'EOF' > "$SSH_DROPIN"
-# Managed by v-harden-server (hestiacp-useful-tools)
+        ssh_target_content='# Managed by v-harden-server (hestiacp-useful-tools)
 MaxAuthTries 3
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 ClientAliveInterval 300
-ClientAliveCountMax 2
-EOF
+ClientAliveCountMax 2'
     else
-        cat << 'EOF' > "$SSH_DROPIN"
-# Managed by v-harden-server (hestiacp-useful-tools)
+        ssh_target_content='# Managed by v-harden-server (hestiacp-useful-tools)
 # NOTE: PasswordAuthentication left untouched because no authorized_keys were detected.
 MaxAuthTries 3
 PermitEmptyPasswords no
 ClientAliveInterval 300
-ClientAliveCountMax 2
-EOF
+ClientAliveCountMax 2'
         echo -e "  -> ${YELLOW}[Pillar 3 Notice]${NC} No SSH public key found in authorized_keys -- kept password login enabled to prevent lockout."
     fi
-    chmod 0644 "$SSH_DROPIN"
 
-    if sshd -t 2>/dev/null; then
-        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-        rm -f "$ssh_bak"
-        echo -e "  -> ${GREEN}[Pillar 3]${NC} SSH daemon hardened & verified via 'sshd -t' (Port $SSH_PORT)"
-    else
-        echo -e "  -> ${RED}[Pillar 3 Error]${NC} sshd -t validation failed -- rolling back $SSH_DROPIN"
-        if [ -n "$ssh_bak" ] && [ -f "$ssh_bak" ]; then
-            mv "$ssh_bak" "$SSH_DROPIN"
+    local ssh_bak=""
+    if [ -f "$SSH_DROPIN" ]; then
+        ssh_bak=$(mktemp /run/sshd-hardening.bak.XXXXXX)
+        cp "$SSH_DROPIN" "$ssh_bak"
+    fi
+
+    if printf '%s\n' "$ssh_target_content" | write_file_if_changed "$SSH_DROPIN" 0644; then
+        if sshd -t 2>/dev/null; then
+            systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+            [ -n "$ssh_bak" ] && rm -f "$ssh_bak"
+            echo -e "  -> ${GREEN}[Pillar 3]${NC} SSH daemon hardened & verified via 'sshd -t' (Port $SSH_PORT)"
         else
-            rm -f "$SSH_DROPIN"
+            echo -e "  -> ${RED}[Pillar 3 Error]${NC} sshd -t validation failed -- rolling back $SSH_DROPIN"
+            if [ -n "$ssh_bak" ] && [ -f "$ssh_bak" ]; then
+                mv -f "$ssh_bak" "$SSH_DROPIN"
+                chmod 0644 "$SSH_DROPIN"
+            else
+                rm -f "$SSH_DROPIN"
+            fi
         fi
+    else
+        [ -n "$ssh_bak" ] && rm -f "$ssh_bak"
+        echo -e "  -> ${GREEN}[Pillar 3]${NC} SSH daemon hardening verified unchanged (Port $SSH_PORT)"
     fi
 
     # --- Pillar 4: Dual-Stack IPv6 Firewall Mirror (nftables) ---
     if ! command -v nft >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables >/dev/null
+        if is_apt_locked; then
+            echo -e "  -> ${YELLOW}[Pillar 4 Notice]${NC} nftables not installed and APT lock is currently held -- skipping IPv6 guard until APT finishes"
+        else
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables >/dev/null
+        fi
     fi
 
-    cat << 'EOF' > "$IPV6_GUARD_BIN"
+    if command -v nft >/dev/null 2>&1; then
+        write_file_if_changed "$IPV6_GUARD_BIN" 0755 << 'EOF' || true
 #!/bin/bash
 # Mirrors HestiaCP's global IPv4 ACCEPT port rules into an isolated IPv6 nftables table
 # so dual-stack servers do not expose unfirewalled IPv6 ports (while preserving ICMPv6).
@@ -583,13 +631,14 @@ fi
 TCP_SET=$(printf '%s\n' "$TCP_RAW" | tr ',' '\n' | sed 's/:/-/g' | grep -E '^[0-9]+(-[0-9]+)?$' | sort -u | paste -sd, - | sed 's/,/, /g')
 UDP_SET=$(printf '%s\n' "$UDP_RAW" | tr ',' '\n' | sed 's/:/-/g' | grep -E '^[0-9]+(-[0-9]+)?$' | sort -u | paste -sd, - | sed 's/,/, /g' || true)
 
-TMP_NFT=$(mktemp /run/hestia-ipv6-guard.XXXXXX.nft)
+TMP_NFT=$(mktemp /run/hestia-ipv6-guard.nft.XXXXXX)
 chmod 0600 "$TMP_NFT"
 trap 'rm -f "$TMP_NFT"' EXIT
 
-nft delete table ip6 hestia_ipv6_guard 2>/dev/null || true
-
+# Atomic single-batch nf_tables replacement (zero packet window; auto-rolls back on error)
 {
+    echo "table ip6 hestia_ipv6_guard"
+    echo "delete table ip6 hestia_ipv6_guard"
     echo "table ip6 hestia_ipv6_guard {"
     echo "    chain input {"
     echo "        type filter hook input priority filter + 5; policy drop;"
@@ -610,9 +659,8 @@ nft delete table ip6 hestia_ipv6_guard 2>/dev/null || true
 
 nft -f "$TMP_NFT"
 EOF
-    chmod 0755 "$IPV6_GUARD_BIN"
 
-    cat << EOF > "$IPV6_GUARD_SVC"
+        if write_file_if_changed "$IPV6_GUARD_SVC" 0644 << EOF
 [Unit]
 Description=HestiaCP Dual-Stack IPv6 Firewall Mirror (nftables)
 After=network-online.target nftables.service
@@ -628,14 +676,22 @@ ExecStop=/usr/sbin/nft delete table ip6 hestia_ipv6_guard
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable --now hestia-ipv6-guard.service >/dev/null 2>&1
-    "$IPV6_GUARD_BIN"
-    echo -e "  -> ${GREEN}[Pillar 4]${NC} IPv6 firewall mirror active (table ip6 hestia_ipv6_guard)"
+        then
+            systemctl daemon-reload
+            systemctl enable --now hestia-ipv6-guard.service >/dev/null 2>&1 || true
+        elif ! systemctl is-enabled --quiet hestia-ipv6-guard.service 2>/dev/null; then
+            systemctl enable --now hestia-ipv6-guard.service >/dev/null 2>&1 || true
+        fi
+
+        "$IPV6_GUARD_BIN"
+        echo -e "  -> ${GREEN}[Pillar 4]${NC} IPv6 firewall mirror active (table ip6 hestia_ipv6_guard)"
+    fi
 
     # --- Pillar 5: Upgrade-Proof Web/Webmail Filters & Fail2Ban Desync Heal ---
     if [ -d /etc/fail2ban/filter.d ] && command -v fail2ban-client >/dev/null 2>&1; then
-        cat << 'EOF' > "$WP_FILTER_LOCAL"
+        local f2b_files_changed=false
+
+        if write_file_if_changed "$WP_FILTER_LOCAL" 0644 << 'EOF'
 # Managed by v-harden-server (hestiacp-useful-tools)
 # .local override survives HestiaCP package updates and covers both xmlrpc.php and wp-login.php
 [Definition]
@@ -643,9 +699,11 @@ failregex = ^<HOST> .* "POST .*/xmlrpc\.php.*
             ^<HOST> .* "POST .*/wp-login\.php.*
 ignoreregex =
 EOF
-        chmod 0644 "$WP_FILTER_LOCAL"
+        then
+            f2b_files_changed=true
+        fi
 
-        cat << 'EOF' > "$RC_FILTER_LOCAL"
+        if write_file_if_changed "$RC_FILTER_LOCAL" 0644 << 'EOF'
 # Managed by v-harden-server (hestiacp-useful-tools)
 # Fixes Roundcube behind Nginx proxy where '(X-Forwarded-For: ...)' follows 'from <HOST>'
 [Definition]
@@ -654,13 +712,14 @@ failregex = ^\s*(?:\[\]:\s*)?(?:<\w+>\s*)?(?:IMAP Error:\s*)?(?:FAILED login|Log
             ^\s*(?:\[\]:\s*)?(?:<\w+>\s*)?Failed login for .*? from <HOST> in session \w+
 ignoreregex = Could not connect to .* Connection refused
 EOF
-        chmod 0644 "$RC_FILTER_LOCAL"
+        then
+            f2b_files_changed=true
+        fi
 
         local webmail_sys
         webmail_sys=$(get_hestia_conf_val WEBMAIL_SYSTEM)
         if [ "$webmail_sys" = "roundcube" ] && [ -f /var/log/roundcube/errors.log ] && [ -f /etc/fail2ban/action.d/hestia.conf ]; then
-            install -d -m 0755 /etc/fail2ban/jail.d
-            cat << 'EOF' > "$RC_JAIL_LOCAL"
+            if write_file_if_changed "$RC_JAIL_LOCAL" 0644 << 'EOF'
 # Managed by v-harden-server (hestiacp-useful-tools)
 [roundcube-auth]
 enabled  = true
@@ -671,21 +730,26 @@ maxretry = 5
 findtime = 600
 bantime  = 86400
 EOF
-            chmod 0644 "$RC_JAIL_LOCAL"
+            then
+                f2b_files_changed=true
+            fi
         fi
 
-        # Validate Fail2Ban syntax before reloading; auto-rollback Roundcube overrides if validation ever fails
-        if ! fail2ban-client -t >/dev/null 2>&1; then
-            echo -e "  -> ${YELLOW}[Pillar 5 Warning]${NC} fail2ban-client -t reported an issue -- rolling back Roundcube jail override to protect Fail2Ban"
-            rm -f "$RC_JAIL_LOCAL" "$RC_FILTER_LOCAL"
+        if [ "$f2b_files_changed" = true ]; then
+            if ! fail2ban-client -t >/dev/null 2>&1; then
+                echo -e "  -> ${YELLOW}[Pillar 5 Warning]${NC} fail2ban-client -t reported an issue -- rolling back Roundcube jail override to protect Fail2Ban"
+                rm -f "$RC_JAIL_LOCAL" "$RC_FILTER_LOCAL"
+            fi
         fi
 
         if systemctl is-active --quiet fail2ban; then
             if [ "$(check_f2b_desync_count)" -gt 0 ]; then
                 systemctl restart fail2ban
-                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters installed & chain desync healed"
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters verified & chain desync healed"
+            elif [ "$f2b_files_changed" = true ]; then
+                fail2ban-client reload >/dev/null 2>&1 || systemctl reload fail2ban >/dev/null 2>&1 || true
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters (WP + Roundcube) updated & reloaded"
             else
-                systemctl reload fail2ban >/dev/null 2>&1 || fail2ban-client reload >/dev/null 2>&1 || true
                 echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters (WP + Roundcube) verified & active"
             fi
         fi
@@ -1085,13 +1149,13 @@ for _ in 1 2 3 4 5; do
 done
 
 if nft list chain ip crowdsec crowdsec-chain-input >/dev/null 2>&1; then
-    if ! nft list chain ip crowdsec crowdsec-chain-input | grep -q "tcp dport ${SSH_PORT} accept"; then
+    if ! nft list chain ip crowdsec crowdsec-chain-input | awk -v p="$SSH_PORT" '$0 ~ ("(^|[[:space:]])tcp dport " p "([[:space:]]|$)") && /[[:space:]]accept([[:space:]]|$)/{ok=1; exit} /[[:space:]](drop|reject)([[:space:]]|$)/{exit} END{exit(ok?0:1)}'; then
         nft insert rule ip crowdsec crowdsec-chain-input tcp dport "${SSH_PORT}" accept
     fi
 fi
 
 if nft list chain ip6 crowdsec6 crowdsec6-chain-input >/dev/null 2>&1; then
-    if ! nft list chain ip6 crowdsec6 crowdsec6-chain-input | grep -q "tcp dport ${SSH_PORT} accept"; then
+    if ! nft list chain ip6 crowdsec6 crowdsec6-chain-input | awk -v p="$SSH_PORT" '$0 ~ ("(^|[[:space:]])tcp dport " p "([[:space:]]|$)") && /[[:space:]]accept([[:space:]]|$)/{ok=1; exit} /[[:space:]](drop|reject)([[:space:]]|$)/{exit} END{exit(ok?0:1)}'; then
         nft insert rule ip6 crowdsec6 crowdsec6-chain-input tcp dport "${SSH_PORT}" accept
     fi
 fi
