@@ -59,13 +59,11 @@ sudo -n /usr/local/hestia/bin/v-add-letsencrypt-domain admin example.com www.exa
 sudo -n /usr/local/hestia/bin/v-add-letsencrypt-domain admin example.com "" "yes"
 ```
 
-### D. Disable SSL on Web Only (When Website Runs on Cloudflare Workers/Pages & Mail Stays on HestiaCP)
-When a domain's website is hosted externally (e.g., attached to a Cloudflare Worker custom domain) while email remains on HestiaCP:
-- Keep `mail.[DOMAIN]` as DNS-only (`A` record pointing to the HestiaCP IP, Cloudflare proxy OFF / grey cloud) so Mail Let's Encrypt renews automatically.
-- Disable SSL **only** on the unused Web domain in HestiaCP (leaving the Mail domain's Let's Encrypt 100% active):
-```bash
-sudo -n /usr/local/hestia/bin/v-delete-web-domain-ssl USER example.com
-```
+### D. External web hosting with mail on HestiaCP
+
+Inspect the installed command and separate Web/Mail configuration before changing SSL. Where the unused Web domain should stop using Let's Encrypt, upstream v-delete-letsencrypt-domain uses USER DOMAIN [RESTART] [MAIL]: the third argument controls restart; the fourth selects mail. Omitting MAIL targets the Web domain and also removes its Web SSL configuration. This is a remediation action, not a diagnostic command; verify that no required HTTPS site depends on it first. Keep the actual mail/webmail aliases DNS-only and validate mail certificate renewal separately.
+
+[Upstream command](https://github.com/hestiacp/hestiacp/blob/release/bin/v-delete-letsencrypt-domain), reviewed 2026-10-23. Installed versions may differ.
 
 ### E. Apply SSL to HestiaCP Panel
 To secure port 8083 with the hostname's Let's Encrypt certificate:
@@ -77,7 +75,7 @@ sudo -n /usr/local/hestia/bin/v-add-letsencrypt-host
 **Symptoms:** `Let's Encrypt validation status 400`, `LETSENCRYPT_FAIL_COUNT` increasing in `web.conf` or `mail.conf` (Note: HestiaCP stops auto-retrying once `LETSENCRYPT_FAIL_COUNT` exceeds `30`).
 
 1. **Check DNS & Cloudflare Proxy:**
-   - For **Web LE**: `example.com` and `www.example.com` must resolve to the server or pass `/.well-known/acme-challenge/` through to HestiaCP (if a Cloudflare Worker intercepts all routes, disable Web SSL on HestiaCP via `v-delete-web-domain-ssl` while keeping Mail SSL active).
+   - For **Web LE**: `example.com` and `www.example.com` must resolve to the server or pass `/.well-known/acme-challenge/` through to HestiaCP (if a Cloudflare Worker intercepts all routes, review the scoped Web-only remediation in section D while preserving required Mail SSL).
    - For **Mail LE**: Check `WEBMAIL_ALIAS` in `/usr/local/hestia/conf/hestia.conf` (default is `mail` or `webmail`). Both `mail.example.com` and `$WEBMAIL_ALIAS.example.com` must exist in DNS (`A`/`CNAME` pointing to the HestiaCP IP with Cloudflare proxy **OFF / DNS only**).
    - For **Subdomain Mail Domains** (e.g., `sub.example.com` added as a Mail Domain): HestiaCP requests `mail.sub.example.com` (and `webmail.sub.example.com` if `WEBMAIL_ALIAS='webmail'`). Ensure `mail.sub.example.com` has a DNS-only `A` record in Cloudflare, then run `v-add-letsencrypt-domain USER sub.example.com '' yes` (which automatically resets `LETSENCRYPT_FAIL_COUNT='0'`).
 2. **Check LE Logs:**
@@ -85,3 +83,7 @@ sudo -n /usr/local/hestia/bin/v-add-letsencrypt-host
    sudo -n tail -n 50 /var/log/hestia/LE-admin-example.com.log
    sudo -n tail -n 50 /var/log/hestia/LE-admin-mail.example.com.log
    ```
+
+### Renewal state and version checks
+
+The reviewed upstream renewal script has separate Web and Mail loops and skips an entry when its failure counter exceeds 30. Inspect the installed version and certificate aliases; do not assume webmail is always named webmail or that a renewal hook fixes unreachable ACME validation. [Upstream renewal code](https://github.com/hestiacp/hestiacp/blob/release/bin/v-update-letsencrypt-ssl), reviewed 2026-10-23.

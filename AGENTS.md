@@ -18,8 +18,8 @@
 | Path | Description |
 |---|---|
 | [`install.sh`](./install.sh) | Unified installer that deploys tools into `/usr/local/hestia/bin/` and applies idempotent backup patches |
-| [`AI/knowledge/`](./AI/knowledge/) | 16 verified HestiaCP reference guides (paths, CLI, backups, Exim4/Dovecot, PHP-FPM, MariaDB, SSL, security, disaster recovery) |
-| [`AI/DevOps-AI-Prompts/`](./AI/DevOps-AI-Prompts/) | Production system prompts (`System-Monitor-Prompt.md`, `DevOps-Server-Agent-Prompt.md`, `Email-Deliverability-Audit-Prompt.md`) |
+| [`AI/knowledge/`](./AI/knowledge/) | HestiaCP reference guides (paths, CLI, backups, Exim4/Dovecot, PHP-FPM, MariaDB, SSL, security, disaster recovery) |
+| [`AI/DevOps-AI-Prompts/`](./AI/DevOps-AI-Prompts/) | Standalone example prompts (`System-Monitor-Prompt.md`, `DevOps-Agent-Prompt.md`) |
 | [`scripts/security-audit/`](./scripts/security-audit/) | `v-security-audit` — 70-check HestiaCP & Linux security scanner (`lib/core.sh`, `lib/system/`, `lib/hestia.sh`, `lib/wordpress.sh`, `lib/malware.sh`) |
 | [`scripts/server-hardening/`](./scripts/server-hardening/) | `v-harden-server` — 6-pillar upgrade-safe HestiaCP hardening (Kernel sysctl, APT config keep, lockout-safe SSH, IPv6 nftables mirror, WP Fail2Ban sync & CrowdSec IPS) |
 | [`scripts/backup-core-patches/`](./scripts/backup-core-patches/) | Surgical patches for HestiaCP `v-backup-user` / `backup.sh` enabling Backblaze B2 / SFTP hooks, per-user retention, and notifications |

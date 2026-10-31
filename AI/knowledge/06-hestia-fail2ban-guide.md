@@ -72,3 +72,9 @@ To prevent an IP from EVER being banned:
     sudo -n iptables -L -n -v | grep "1.2.3.4"
     ```
 
+
+## Configuration precedence and mail fetchers
+
+Custom jail changes belong in .local files. Jail loading order is jail.conf, jail.d/*.conf, jail.local, then jail.d/*.local (alphabetical within each group); later definitions override earlier values. Review effective configuration before applying changes. [Debian Fail2Ban manual](https://manpages.debian.org/bookworm/fail2ban/jail.conf.5.en.html), reviewed 2026-10-23.
+
+A mail fetcher timeout can be caused by a banned source address, but also DNS, firewall or service faults. Correlate the exact address and time with Dovecot/Fail2Ban logs. Do not infer a ban from the provider name or whitelist an entire provider range. Correct invalid credentials and evaluate an exact-address unban only within the requested remediation scope.

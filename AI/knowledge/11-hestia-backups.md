@@ -116,20 +116,9 @@ sudo -n grep -E "SUMMARY|Upload to B2|Upload global|Size:|Runtime:|Error|FAIL" /
 sudo -n tail -n 80 /var/log/hestia/backup.log 2>/dev/null
 ```
 
-### Tar error classification
+### Tar errors and upload evidence
 
-These tar messages appear frequently in backup logs and are almost always **cosmetic**:
-
-| Message | Meaning | Action |
-|---|---|---|
-| `tar: *: Cannot stat: No such file or directory` | Empty cron job directory — tar tries to glob `*` and finds nothing | Ignore |
-| `tar: ./public_html/wp-content: file changed as we read it` | WordPress/CMS writing cache/logs during backup — file IS included | Ignore |
-| `tar: Exiting with failure status due to previous errors` | Exit status triggered by any of the above warnings | Ignore if `Upload to B2:` line exists for that user |
-
-Only classify as a **real failure** if:
-- A user is completely missing from the backup log
-- There is no `Upload to B2:` (or equivalent remote upload) line for a user
-- The log contains `FAILED`, `abort`, or `killed`
+Do not classify an archive as restorable merely because an upload log exists. Record the archive command exit status and full relevant diagnostics, then verify expected contents and restoreability in an isolated recovery check. GNU tar distinguishes successful completion, changed files and fatal errors; a changed-file archive may be inconsistent. Unresolved errors must stay unresolved in the health report. [GNU tar exit status reference](https://www.gnu.org/software/tar/manual/html_section/Synopsis.html).
 
 ### Empty `/backup/` directory
 
