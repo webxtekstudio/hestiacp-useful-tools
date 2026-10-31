@@ -2,21 +2,25 @@
 # Installer for Security Audit module
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HESTIA_BIN="/usr/local/hestia/bin"
+HESTIA_BIN="${HESTIA:-/usr/local/hestia}/bin"
+BAK_DIR="/var/backups/hestiacp-useful-tools"
 
 echo "--- Installing v-security-audit ---"
 
-# Script (we use a symlink or direct copy)
+# Script
 target_bin="$HESTIA_BIN/v-security-audit"
 target_lib="$HESTIA_BIN/v-security-audit.d"
-[ -f "$target_bin" ] && cp "$target_bin" "${target_bin}.bak.$(date +%Y%m%d-%H%M%S)"
+if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-security-audit" "$target_bin"; then
+    mkdir -p "$BAK_DIR"
+    cp "$target_bin" "$BAK_DIR/v-security-audit.bak.$(date +%Y%m%d-%H%M%S)"
+    ls -t "$BAK_DIR"/v-security-audit.bak.* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+fi
 cp "$SCRIPT_DIR/v-security-audit" "$target_bin"
 chmod +x "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
-# Library modules
+# Library modules — always update (directory comparison is complex, just overwrite)
 if [ -d "$target_lib" ]; then
-    cp -a "$target_lib" "${target_lib}.bak.$(date +%Y%m%d-%H%M%S)"
     rm -rf "$target_lib"
 fi
 mkdir -p "$target_lib"

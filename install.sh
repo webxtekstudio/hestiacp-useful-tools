@@ -1,59 +1,96 @@
 #!/bin/bash
 
-# HestiaCP Scripts Installer
+# HestiaCP Custom Tools — Master Installer
 # Installs scripts to /usr/local/hestia/bin and sets up configuration files in /etc
 # Also cleans up old installations in /usr/local/bin
 #
 # Usage:
-#   bash install.sh              — install scripts + interactive setup wizard
-#   bash install.sh --setup-crons  — also create/update system crontab entries
+#   bash install.sh                           — install scripts + interactive setup wizard
+#   bash install.sh --setup-crons             — install scripts + create/update cron entries
+#   bash install.sh --setup-crons --crowdsec  — install all + crons + CrowdSec IPS
+#   bash install.sh --all                     — install everything (scripts + crons + CrowdSec)
+#   bash install.sh --fail2ban                — install only the Fail2Ban optimizer module
+#   bash install.sh --harden                  — install only Server Hardening (Pillars 1-5)
+#   bash install.sh --crowdsec                — install only Server Hardening + CrowdSec (All 6 Pillars)
 
 set -o pipefail
 
-SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEST_DIR="/usr/local/hestia/bin"
-CRON_FILE="/etc/cron.d/hestiacp-custom"
-SETUP_CRONS=false
+# ---------------------------------------------------------------------------
+# Recursion guard — prevent DPkg::Post-Invoke from re-entering this script
+# when a sub-module runs apt-get during installation
+# ---------------------------------------------------------------------------
+[ "${HESTIA_TOOLS_INSTALLING:-}" = "1" ] && exit 0
+export HESTIA_TOOLS_INSTALLING=1
 
-# --- Parse arguments ---
+# ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+export HESTIA="${HESTIA:-/usr/local/hestia}"
+export PATH="$HESTIA/bin:/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:$PATH"
+
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEST_DIR="$HESTIA/bin"
+CRON_FILE="/etc/cron.d/hestiacp-custom"
+HESTIA_CONF="$HESTIA/conf/hestia.conf"
+BAK_DIR="/var/backups/hestiacp-useful-tools"
+
+SETUP_CRONS=false
+SETUP_CROWDSEC=false
+CROWDSEC_WIZARD_ONLY=false
+RUN_ONLY_MODULE=""
+INSTALL_ERRORS=0
+
+# ---------------------------------------------------------------------------
+# Parse arguments — flags are combinable (no early exit except single-module)
+# ---------------------------------------------------------------------------
 for arg in "$@"; do
     case "$arg" in
         --setup-crons) SETUP_CRONS=true ;;
-        --fail2ban)
-            if [ "$EUID" -ne 0 ]; then
-                echo "ERROR: Please run as root (or use sudo)"
-                exit 1
-            fi
-            bash "$SRC_DIR/scripts/fail2ban-optimize/install.sh"
-            exit 0
-            ;;
-        --harden)
-            if [ "$EUID" -ne 0 ]; then
-                echo "ERROR: Please run as root (or use sudo)"
-                exit 1
-            fi
-            bash "$SRC_DIR/scripts/server-hardening/install.sh"
-            exit 0
-            ;;
-        --crowdsec)
-            if [ "$EUID" -ne 0 ]; then
-                echo "ERROR: Please run as root (or use sudo)"
-                exit 1
-            fi
-            bash "$SRC_DIR/scripts/server-hardening/install.sh" --crowdsec
-            exit 0
-            ;;
+        --crowdsec)    SETUP_CROWDSEC=true ;;
+        --all)         SETUP_CRONS=true; SETUP_CROWDSEC=true ;;
+        --fail2ban)    RUN_ONLY_MODULE="fail2ban-optimize" ;;
+        --harden)      RUN_ONLY_MODULE="server-hardening" ;;
         --help|-h)
-            echo "Usage: $0 [--setup-crons|--fail2ban|--harden|--crowdsec]"
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options (combinable):"
             echo "  --setup-crons   Create/update /etc/cron.d/hestiacp-custom with recommended schedules"
+            echo "  --crowdsec      Also enable CrowdSec Collaborative IPS (Pillar 6)"
+            echo "  --all           Install everything: scripts + crons + CrowdSec"
+            echo ""
+            echo "Single-module shortcuts:"
             echo "  --fail2ban      Install and apply only the Fail2Ban email optimizer"
             echo "  --harden        Install and apply Server Hardening (Pillars 1-5)"
-            echo "  --crowdsec      Install and apply Server Hardening + CrowdSec IPS (All 6 Pillars)"
+            echo ""
+            echo "Without flags:    Install scripts + interactive setup wizard"
             exit 0
             ;;
     esac
 done
 
+# ---------------------------------------------------------------------------
+# Single-module shortcuts (these still exit early by design)
+# ---------------------------------------------------------------------------
+if [ -n "$RUN_ONLY_MODULE" ]; then
+    if [ "$EUID" -ne 0 ]; then
+        echo "ERROR: Please run as root (or use sudo)"
+        exit 1
+    fi
+
+    module_install="$SRC_DIR/scripts/$RUN_ONLY_MODULE/install.sh"
+    if [ ! -f "$module_install" ]; then
+        echo "ERROR: Module installer not found: $module_install"
+        exit 1
+    fi
+
+    echo "Running single module: $RUN_ONLY_MODULE"
+    bash "$module_install"
+    exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# Full installation
+# ---------------------------------------------------------------------------
 echo "========================================"
 echo " HestiaCP Custom Tools Installer"
 echo " Source: $SRC_DIR"
@@ -72,68 +109,30 @@ if [ ! -d "$DEST_DIR" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# Helper: Smart backup — only backup when binary actually changed
 # ---------------------------------------------------------------------------
-
-install_script() {
+safe_install_bin() {
     local src="$1"
-    local script_name="$2"
-    local dest="$DEST_DIR/$script_name"
-    local old_dest="/usr/local/bin/$script_name"
+    local name="$2"
+    local dest="$DEST_DIR/$name"
 
-    if [ -f "$src" ]; then
-        if [ -f "$dest" ]; then
-            local bak="${dest}.bak.$(date +%Y%m%d-%H%M%S)"
-            cp "$dest" "$bak" && echo "  -> Backed up existing: $bak"
-        fi
-        cp "$src" "$dest"
-        chmod +x "$dest"
-        echo "  -> [OK] $script_name installed to $dest"
-
-        if [ -f "$old_dest" ]; then
-            rm -f "$old_dest"
-            echo "  -> Removed legacy: $old_dest"
-        fi
-    else
+    if [ ! -f "$src" ]; then
         echo "  -> [ERROR] Source not found: $src"
+        return 1
     fi
-}
 
-install_symlink() {
-    local src="$1"
-    local script_name="$2"
-    local dest="$DEST_DIR/$script_name"
-    local old_dest="/usr/local/bin/$script_name"
+    mkdir -p "$BAK_DIR"
 
-    if [ -f "$src" ]; then
-        rm -f "$dest"
-        ln -sf "$src" "$dest"
-        chmod +x "$src"
-        echo "  -> [OK] $script_name symlinked to $dest"
-
-        if [ -f "$old_dest" ]; then
-            rm -f "$old_dest"
-            echo "  -> Removed legacy: $old_dest"
-        fi
-    else
-        echo "  -> [ERROR] Source not found: $src"
+    # Only backup if destination exists AND content differs
+    if [ -f "$dest" ] && ! cmp -s "$src" "$dest"; then
+        cp "$dest" "$BAK_DIR/${name}.bak.$(date +%Y%m%d-%H%M%S)"
+        # Keep max 3 backups per script
+        ls -t "$BAK_DIR/${name}.bak."* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
     fi
-}
 
-install_config() {
-    local src="$1"
-    local dest="$2"
-
-    if [ ! -f "$dest" ]; then
-        if [ -f "$src" ]; then
-            cp "$src" "$dest"
-            echo "  -> [OK] Config installed: $dest"
-        else
-            echo "  -> [ERROR] Sample config not found: $src"
-        fi
-    else
-        echo "  -> [INFO] Config already exists (skipped): $dest"
-    fi
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    echo "  -> [OK] $name installed to $dest"
 }
 
 add_cron_entry() {
@@ -163,10 +162,22 @@ echo "--- Installing Modules ---"
 for module_dir in "$SRC_DIR/scripts"/*; do
     [ -d "$module_dir" ] || continue
     module_name=$(basename "$module_dir")
-    
+
     if [ -f "$module_dir/install.sh" ]; then
         echo "Installing module: $module_name"
-        bash "$module_dir/install.sh"
+
+        # Pass --crowdsec to server-hardening if requested
+        if [ "$module_name" = "server-hardening" ] && [ "$SETUP_CROWDSEC" = true ]; then
+            bash "$module_dir/install.sh" --crowdsec
+        else
+            bash "$module_dir/install.sh"
+        fi
+
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            echo "  -> [WARN] Module '$module_name' exited with code $rc"
+            INSTALL_ERRORS=$((INSTALL_ERRORS + 1))
+        fi
     fi
 done
 
@@ -174,7 +185,6 @@ done
 # STEP 2: SETUP WIZARD (only on first install, only if interactive terminal)
 # ---------------------------------------------------------------------------
 
-HESTIA_CONF="/usr/local/hestia/conf/hestia.conf"
 backup_system=$(grep "^BACKUP_SYSTEM=" "$HESTIA_CONF" 2>/dev/null | cut -d"'" -f2)
 
 # Show wizard if: remote backup not configured AND we're in a terminal
@@ -284,6 +294,38 @@ if ! echo "$backup_system" | grep -qE "b2|sftp|ftp|rclone" && [ -t 0 ]; then
     if [[ "$setup_crons_answer" =~ ^[Yy] ]]; then
         SETUP_CRONS=true
     fi
+
+    # --- CrowdSec question ---
+    if [ "$SETUP_CROWDSEC" != true ]; then
+        echo ""
+        echo "---"
+        echo ""
+        echo "Do you want to enable CrowdSec Collaborative IPS? (Pillar 6)"
+        echo "This adds real-time community threat intelligence and nftables bouncing."
+        echo ""
+        read -rp "Enable CrowdSec? [y/N]: " crowdsec_answer
+        crowdsec_answer=${crowdsec_answer:-N}
+        if [[ "$crowdsec_answer" =~ ^[Yy] ]]; then
+            SETUP_CROWDSEC=true
+            CROWDSEC_WIZARD_ONLY=true
+            echo "  -> CrowdSec will be configured after cron setup."
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# STEP 2.5: Apply CrowdSec if requested via wizard (after wizard completes)
+# When --crowdsec or --all is passed via CLI, the module loop in STEP 1 already
+# passes --crowdsec to server-hardening/install.sh. This block only runs when
+# CrowdSec was requested interactively in the wizard.
+# ---------------------------------------------------------------------------
+if [ "$CROWDSEC_WIZARD_ONLY" = true ] && [ -f "$DEST_DIR/v-harden-server" ]; then
+    echo ""
+    echo "--- Applying CrowdSec IPS (Pillar 6) ---"
+    "$DEST_DIR/v-harden-server" --crowdsec 2>&1 || {
+        echo "  -> [WARN] CrowdSec setup had issues (exit code $?)"
+        INSTALL_ERRORS=$((INSTALL_ERRORS + 1))
+    }
 fi
 
 # ---------------------------------------------------------------------------
@@ -293,6 +335,9 @@ fi
 if [ "$SETUP_CRONS" = true ]; then
     echo ""
     echo "--- Setting Up Cron Jobs ---"
+
+    # Ensure log directories exist
+    mkdir -p /var/log/hestia/security-audit
 
     if [ ! -f "$CRON_FILE" ]; then
         cat > "$CRON_FILE" << 'CRONHEADER'
@@ -312,8 +357,6 @@ CRONHEADER
             echo "  -> Disabled legacy cron: $legacy_cron"
         fi
     done
-
-
 
     add_cron_entry "clean-garbage" \
         "30 4 * * 0" \
@@ -350,7 +393,11 @@ backup_system=$(grep "^BACKUP_SYSTEM=" "$HESTIA_CONF" 2>/dev/null | cut -d"'" -f
 
 echo ""
 echo "========================================"
-echo " ✅ Installation complete!"
+if [ "$INSTALL_ERRORS" -gt 0 ]; then
+    echo " ⚠️  Installation complete with $INSTALL_ERRORS warning(s)"
+else
+    echo " ✅ Installation complete!"
+fi
 echo "========================================"
 echo ""
 echo " Scripts:  $DEST_DIR"

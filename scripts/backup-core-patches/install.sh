@@ -4,8 +4,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$SCRIPT_DIR/lib"
-HESTIA_BIN="/usr/local/hestia/bin"
-HESTIA_CONF="/usr/local/hestia/conf/hestia.conf"
+HESTIA_BIN="${HESTIA:-/usr/local/hestia}/bin"
+HESTIA_CONF="${HESTIA:-/usr/local/hestia}/conf/hestia.conf"
 RETENTION_CONF="/etc/hestiacp-backup-retention.conf"
 
 echo "--- Installing Backup Core Patches ---"
@@ -52,7 +52,7 @@ fi
 
 # 4. Check remote backup status and guide user
 echo ""
-b2_conf="/usr/local/hestia/conf/b2.backup.conf"
+b2_conf="${HESTIA:-/usr/local/hestia}/conf/b2.backup.conf"
 if [ -f "$b2_conf" ] && grep -q "BUCKET=" "$b2_conf" 2>/dev/null; then
     b2_bucket=$(grep "^BUCKET=" "$b2_conf" | cut -d"'" -f2)
     echo "  ✅ B2 cloud backup configured (bucket: $b2_bucket)"
