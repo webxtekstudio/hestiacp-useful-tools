@@ -29,7 +29,7 @@
 #   6. CrowdSec Collaborative IPS + Upgrade-Immune nftables Bouncer (--crowdsec)
 #      - Isolates CrowdSec LAPI on 127.0.0.1:8099 (zero port conflict with
 #        HestiaCP's Apache2 on :8080/:8081/:8443 or Nginx on :8084).
-#      - Installs Nginx, Apache2, WordPress, PHP, Exim, Dovecot, SSH & HTTP-CVE
+#      - Installs Nginx, Apache2, WordPress, Exim, Dovecot, SSH & HTTP-CVE
 #        collections + HestiaCP domain log acquisition.
 #      - Runs nftables bouncer in isolated tables (crowdsec / crowdsec6) so
 #        HestiaCP's v-update-firewall (iptables -F) never wipes CrowdSec bans.
@@ -166,6 +166,23 @@ detect_ssh_port() {
     echo "${p:-22}"
 }
 
+validate_ip_or_cidr() {
+    local target="$1"
+    local allow_cidr="${2:-yes}"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$target" "$allow_cidr" << 'PY' 2>/dev/null
+import ipaddress, sys
+val, allow_cidr = sys.argv[1], sys.argv[2]
+if allow_cidr == "yes":
+    ipaddress.ip_network(val, strict=False)
+else:
+    ipaddress.ip_address(val)
+PY
+        return $?
+    fi
+    [[ "$target" =~ ^[0-9a-fA-F:./]+$ ]]
+}
+
 has_authorized_ssh_key() {
     local key_files=("/root/.ssh/authorized_keys")
     if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
@@ -203,6 +220,10 @@ check_f2b_desync_count() {
 # ACTION: UNBAN IP
 # =============================================================================
 if [ "$MODE" = "unban" ]; then
+    if ! validate_ip_or_cidr "$UNBAN_TARGET" "no"; then
+        echo -e "${RED}ERROR: Invalid IP address '$UNBAN_TARGET'. Provide a single IPv4 or IPv6 address.${NC}"
+        exit 1
+    fi
     echo -e "${BLUE}=== Unbanning IP across all security layers: $UNBAN_TARGET ===${NC}"
     if command -v cscli >/dev/null 2>&1; then
         cscli decisions delete --ip "$UNBAN_TARGET" 2>/dev/null && \
@@ -229,6 +250,10 @@ fi
 # ACTION: WHITELIST IP / CIDR
 # =============================================================================
 if [ "$MODE" = "whitelist" ]; then
+    if ! validate_ip_or_cidr "$WHITELIST_TARGET" "yes"; then
+        echo -e "${RED}ERROR: Invalid IP or CIDR '$WHITELIST_TARGET' (example: 198.51.100.10/32 or 2001:db8::/64).${NC}"
+        exit 1
+    fi
     echo -e "${BLUE}=== Whitelisting trusted IP/CIDR: $WHITELIST_TARGET ===${NC}"
     if command -v cscli >/dev/null 2>&1; then
         cscli allowlists create "$CS_ALLOWLIST_NAME" -d "Trusted admin & server IPs" >/dev/null 2>&1 || true
@@ -316,8 +341,18 @@ if [ "$MODE" = "status" ]; then
     # 6. CrowdSec
     if systemctl is-active --quiet crowdsec 2>/dev/null && systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
         ssh_exempt="NO"
+        v4_ok=false
+        v6_ok=true
         if nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -q "tcp dport ${SSH_PORT} accept"; then
-            ssh_exempt="YES (Port $SSH_PORT)"
+            v4_ok=true
+        fi
+        if nft list chain ip6 crowdsec6 crowdsec6-chain-input >/dev/null 2>&1; then
+            if ! nft list chain ip6 crowdsec6 crowdsec6-chain-input 2>/dev/null | grep -q "tcp dport ${SSH_PORT} accept"; then
+                v6_ok=false
+            fi
+        fi
+        if [ "$v4_ok" = true ] && [ "$v6_ok" = true ]; then
+            ssh_exempt="YES (Port $SSH_PORT IPv4/IPv6)"
         fi
         echo -e "  [6] CrowdSec + nft Bouncer:    ${GREEN}ACTIVE${NC} (LAPI $CS_LAPI_ADDR | SSH Anti-Lockout: $ssh_exempt)"
     else
@@ -463,33 +498,47 @@ set -euo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 RULES_CONF="/usr/local/hestia/data/firewall/rules.conf"
-SSH_PORT=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || echo "22")
-SSH_PORT="${SSH_PORT:-22}"
+SSH_PORT=$({ sshd -T 2>/dev/null || true; } | awk '$1=="port" && !p {p=$2} END{print p ? p : "22"}')
 
 TCP_RAW="$SSH_PORT"
 UDP_RAW=""
 
 if [ -f "$RULES_CONF" ]; then
-    while IFS= read -r line; do
-        line="${line%$'\r'}"
-        [[ "$line" =~ ^# || -z "$line" ]] && continue
-        eval "$line" 2>/dev/null || continue
-        if [ "${SUSPENDED:-no}" = "no" ] && [ "${ACTION:-}" = "ACCEPT" ] && [ "${IP:-}" = "0.0.0.0/0" ]; then
-            clean_port=$(printf '%s' "${PORT:-}" | tr -d '\r\n ')
-            if [ "$clean_port" != "0" ] && [ -n "$clean_port" ]; then
-                case "${PROTOCOL:-}" in
-                    TCP) TCP_RAW="${TCP_RAW},${clean_port}" ;;
-                    UDP) UDP_RAW="${UDP_RAW},${clean_port}" ;;
-                esac
-            fi
-        fi
-    done < "$RULES_CONF"
+    while IFS=$'\t' read -r proto port; do
+        [ -z "$port" ] || [ "$port" = "0" ] && continue
+        case "$proto" in
+            TCP) TCP_RAW="${TCP_RAW},${port}" ;;
+            UDP) UDP_RAW="${UDP_RAW},${port}" ;;
+        esac
+    done < <(awk '
+        function get_val(line, key,    pat, s) {
+            pat = key "=\x27[^\x27]*\x27"
+            if (match(line, pat)) {
+                s = substr(line, RSTART + length(key) + 2, RLENGTH - length(key) - 3)
+                gsub(/[\r\n[:space:]]/, "", s)
+                return s
+            }
+            return ""
+        }
+        /^[[:space:]]*#/ || NF == 0 { next }
+        {
+            susp = get_val($0, "SUSPENDED")
+            act  = get_val($0, "ACTION")
+            ip   = get_val($0, "IP")
+            prot = get_val($0, "PROTOCOL")
+            port = get_val($0, "PORT")
+            if ((susp == "" || susp == "no") && act == "ACCEPT" && (ip == "0.0.0.0/0" || ip == "::/0") && port != "" && port != "0") {
+                print prot "\t" port
+            }
+        }
+    ' "$RULES_CONF")
 fi
 
 TCP_SET=$(printf '%s\n' "$TCP_RAW" | tr ',' '\n' | sed 's/:/-/g' | grep -E '^[0-9]+(-[0-9]+)?$' | sort -u | paste -sd, - | sed 's/,/, /g')
 UDP_SET=$(printf '%s\n' "$UDP_RAW" | tr ',' '\n' | sed 's/:/-/g' | grep -E '^[0-9]+(-[0-9]+)?$' | sort -u | paste -sd, - | sed 's/,/, /g' || true)
 
-TMP_NFT=$(mktemp /tmp/hestia-ipv6-guard.XXXXXX.nft)
+TMP_NFT=$(mktemp /run/hestia-ipv6-guard.XXXXXX.nft)
+chmod 0600 "$TMP_NFT"
 trap 'rm -f "$TMP_NFT"' EXIT
 
 nft delete table ip6 hestia_ipv6_guard 2>/dev/null || true
@@ -577,7 +626,7 @@ apply_crowdsec_pillar() {
         echo -e "${YELLOW}[DRY-RUN] Would install & configure:${NC}"
         echo "  - Official CrowdSec APT repo + crowdsec + crowdsec-firewall-bouncer-nftables"
         echo "  - CrowdSec LAPI isolated on $CS_LAPI_ADDR (zero conflict with Apache :8080)"
-        echo "  - Collections: linux, nginx, apache2, wordpress, php, exim, dovecot, sshd, http-cve, whitelist-good-actors"
+        echo "  - Collections: linux, nginx, apache2, wordpress, exim, dovecot, sshd, http-cve, whitelist-good-actors"
         echo "  - Log acquisition: /etc/crowdsec/acquis.d/hestiacp.yaml"
         echo "  - SSH Anti-Lockout Exemption: tcp dport $SSH_PORT accept at index 0 of crowdsec & crowdsec6 input chains"
         return 0
@@ -614,20 +663,24 @@ EOF
     systemctl restart crowdsec
     sleep 2
 
-    # 3. Install HestiaCP Hub Collections
-    cscli collections install \
-        crowdsecurity/linux \
-        crowdsecurity/nginx \
-        crowdsecurity/apache2 \
-        crowdsecurity/wordpress \
-        crowdsecurity/php \
-        crowdsecurity/exim \
-        crowdsecurity/dovecot \
-        crowdsecurity/sshd \
-        crowdsecurity/http-cve \
-        crowdsecurity/whitelist-good-actors \
-        --force >/dev/null 2>&1 || true
+    # 3. Update Hub index & install HestiaCP Collections individually (so a single Hub rename never aborts the rest)
     cscli hub update >/dev/null 2>&1 || true
+    local hub_collections=(
+        crowdsecurity/linux
+        crowdsecurity/nginx
+        crowdsecurity/apache2
+        crowdsecurity/wordpress
+        crowdsecurity/exim
+        crowdsecurity/dovecot
+        crowdsecurity/sshd
+        crowdsecurity/http-cve
+        crowdsecurity/whitelist-good-actors
+    )
+    for col in "${hub_collections[@]}"; do
+        cscli collections install "$col" --force >/dev/null 2>&1 || \
+            echo -e "  -> ${YELLOW}[Warning]${NC} CrowdSec collection '$col' could not be installed from Hub"
+    done
+    cscli scenarios install crowdsecurity/http-bf-wordpress_bf_xmlrpc --force >/dev/null 2>&1 || true
     cscli hub upgrade >/dev/null 2>&1 || true
 
     # 4. Configure HestiaCP Log Acquisition (non-overlapping with setup.nginx / setup.apache2)
@@ -669,14 +722,19 @@ EOF
           /etc/crowdsec/acquis.d/setup.dovecot.yaml \
           /etc/crowdsec/acquis.d/setup.mysql.yaml
 
-    # 5. Create local trusted allowlist (loopback, RFC1918, and server's own public IPs)
+    # 5. Create local trusted allowlist (loopback, RFC1918, and server's own public IPv4 + IPv6 subnet)
     cscli allowlists create "$CS_ALLOWLIST_NAME" -d "Trusted local & server own IPs" >/dev/null 2>&1 || true
     cscli allowlists add "$CS_ALLOWLIST_NAME" 127.0.0.1/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 >/dev/null 2>&1 || true
     for self_v4 in $(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1); do
         cscli allowlists add "$CS_ALLOWLIST_NAME" "${self_v4}/32" >/dev/null 2>&1 || true
     done
-    for self_v6 in $(ip -6 -o addr show scope global | awk '{print $4}' | cut -d/ -f1); do
-        cscli allowlists add "$CS_ALLOWLIST_NAME" "${self_v6}/128" >/dev/null 2>&1 || true
+    for self_v6_cidr in $(ip -6 -o addr show scope global | awk '{print $4}'); do
+        local norm_v6=""
+        if command -v python3 >/dev/null 2>&1; then
+            norm_v6=$(python3 -c "import ipaddress, sys; print(ipaddress.ip_interface(sys.argv[1]).network)" "$self_v6_cidr" 2>/dev/null || true)
+        fi
+        [ -z "$norm_v6" ] && norm_v6="${self_v6_cidr%/*}/128"
+        cscli allowlists add "$CS_ALLOWLIST_NAME" "$norm_v6" >/dev/null 2>&1 || true
     done
 
     # Ensure CAPI (Community Blocklist) is registered and restart so LAPI pulls blocklists for all new scenarios immediately
@@ -697,6 +755,10 @@ api_key: ${bkey}
 EOF
         chmod 0600 /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local
     fi
+    # Clean up unused auto-generated package bouncers (cs-firewall-bouncer-*) when our explicit .local bouncer is active
+    for stale_b in $(cscli bouncers list -o raw 2>/dev/null | awk -F, 'NR>1 && $1 ~ /^cs-firewall-bouncer-/ {print $1}'); do
+        cscli bouncers delete "$stale_b" >/dev/null 2>&1 || true
+    done
 
     # 7. Install SSH Port Anti-Lockout Exemption (ExecStartPost hook)
     cat << 'EOF' > "$CS_SSH_EXEMPT_BIN"
@@ -705,8 +767,7 @@ EOF
 # shared commercial VPN IPs on external blocklists never lock admins out of SSH.
 # Local Fail2Ban continues protecting SSH authentication attempts.
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-SSH_PORT=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || echo "22")
-SSH_PORT="${SSH_PORT:-22}"
+SSH_PORT=$({ sshd -T 2>/dev/null || true; } | awk '$1=="port" && !p {p=$2} END{print p ? p : "22"}')
 
 for _ in 1 2 3 4 5; do
     nft list chain ip crowdsec crowdsec-chain-input >/dev/null 2>&1 && break
