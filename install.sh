@@ -351,12 +351,13 @@ CRONHEADER
         echo "  -> Created $CRON_FILE"
     fi
 
+    BAK_DIR="/var/backups/hestiacp-useful-tools"
     ts="$(date +%Y%m%d-%H%M%S)"
-    for legacy_cron in /etc/cron.d/hestia-github-mirror /etc/cron.d/hestia-github-mirror-weekly; do
-        if [ -f "$legacy_cron" ]; then
-            mv "$legacy_cron" "${legacy_cron}.disabled.${ts}"
-            echo "  -> Disabled legacy cron: $legacy_cron"
-        fi
+    for legacy_cron in /etc/cron.d/hestia-github-mirror /etc/cron.d/hestia-github-mirror-weekly /etc/cron.d/hestia-github-mirror*.disabled.*; do
+        [ -f "$legacy_cron" ] || continue
+        install -d -m 0700 "$BAK_DIR"
+        mv -f "$legacy_cron" "$BAK_DIR/$(basename "$legacy_cron").${ts}"
+        echo "  -> Archived legacy cron to $BAK_DIR: $(basename "$legacy_cron")"
     done
 
     add_cron_entry "clean-garbage" \

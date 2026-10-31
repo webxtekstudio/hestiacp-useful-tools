@@ -30,5 +30,6 @@ if [ ! -f "/etc/hestiacp-system-report.conf" ]; then
     chmod 600 "/etc/hestiacp-system-report.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-system-report.conf"
 else
-    echo "  -> [INFO] Config exists (skipped): /etc/hestiacp-system-report.conf"
+    chmod 600 "/etc/hestiacp-system-report.conf"
+    echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-system-report.conf"
 fi

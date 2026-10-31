@@ -30,5 +30,6 @@ if [ ! -f "/etc/hestiacp-clean-garbage.conf" ]; then
     chmod 600 "/etc/hestiacp-clean-garbage.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-clean-garbage.conf"
 else
-    echo "  -> [INFO] Config exists (skipped): /etc/hestiacp-clean-garbage.conf"
+    chmod 600 "/etc/hestiacp-clean-garbage.conf"
+    echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-clean-garbage.conf"
 fi

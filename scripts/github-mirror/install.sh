@@ -30,7 +30,8 @@ if [ ! -f "/etc/hestiacp-github-mirror.conf" ]; then
     chmod 600 "/etc/hestiacp-github-mirror.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-github-mirror.conf"
 else
-    echo "  -> [INFO] Config exists (skipped): /etc/hestiacp-github-mirror.conf"
+    chmod 600 "/etc/hestiacp-github-mirror.conf"
+    echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-github-mirror.conf"
 fi
 
 if [ ! -f "/etc/hestiacp-github-mirror.settings" ]; then
@@ -38,5 +39,6 @@ if [ ! -f "/etc/hestiacp-github-mirror.settings" ]; then
     chmod 600 "/etc/hestiacp-github-mirror.settings"
     echo "  -> [OK] Installed settings: /etc/hestiacp-github-mirror.settings"
 else
-    echo "  -> [INFO] Settings exist (skipped): /etc/hestiacp-github-mirror.settings"
+    chmod 600 "/etc/hestiacp-github-mirror.settings"
+    echo "  -> [INFO] Settings exist (permissions verified 0600): /etc/hestiacp-github-mirror.settings"
 fi

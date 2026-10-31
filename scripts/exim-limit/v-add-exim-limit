@@ -10,7 +10,9 @@ source $HESTIA/conf/hestia.conf
 
 # Set variables
 CONFIG_FILE="/etc/exim4/exim4.conf.template"
-BACKUP_FILE="$CONFIG_FILE.bak.$(date +%s)"
+BAK_DIR="/var/backups/hestiacp-useful-tools"
+install -d -m 0700 "$BAK_DIR"
+BACKUP_FILE="$BAK_DIR/exim4.conf.template.bak.$(date +%Y%m%d-%H%M%S)"
 
 # Get admin email from Hestia users, then fall back to system contact/root.
 ADMIN_EMAIL=""
@@ -183,6 +185,7 @@ if [ "$UPDATE_NEEDED" == "1" ]; then
 
     log_wrapper "Configuration valid. Restarting Exim..."
     service exim4 restart
+    ls -1t "$BAK_DIR"/exim4.conf.template.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
     log_wrapper "Patch applied successfully!"
 else
     rm -f "$BACKUP_FILE"

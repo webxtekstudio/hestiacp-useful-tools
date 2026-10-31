@@ -50,5 +50,6 @@ if [ ! -f "/etc/hestiacp-exim-limit.conf" ]; then
     chmod 600 "/etc/hestiacp-exim-limit.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-exim-limit.conf"
 else
-    echo "  -> [INFO] Config exists (skipped): /etc/hestiacp-exim-limit.conf"
+    chmod 600 "/etc/hestiacp-exim-limit.conf"
+    echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-exim-limit.conf"
 fi
