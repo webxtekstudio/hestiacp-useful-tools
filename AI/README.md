@@ -27,3 +27,6 @@ Before you connect AI to your production server, enforce these strict rules:
 1. **Never share Root SSH Passwords:** Use SSH keys. Generate a unique ED25519 or RSA key pair exclusively for the AI Agent. Never reuse your personal SSH key.
 2. **Read-Only / Isolated Users (Optional):** While these prompts are meant to solve problems (which usually requires `root` or `sudo` to run `v-commands`), if you only want the AI to perform benign audits, map it to a user with extremely restricted sudoers privileges. 
 3. **Keep an Audit Log:** Use `auth.log` monitoring or bash history tracking combined with system-level fail-safes (Fail2Ban) to monitor what the AI executes.
+## Ownership and deployment
+
+AI/knowledge is the canonical generic manual source. Keep installation/customer details and credentials outside this public repository. These prompt examples are independent templates; an application owns its actual runtime prompts, placeholders, tools and interaction policy. Consumers can package reviewed, revision-pinned snapshots for offline execution. Updating this repository does not automatically change or deploy any consumer.

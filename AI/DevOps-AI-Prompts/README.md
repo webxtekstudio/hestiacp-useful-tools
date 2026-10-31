@@ -65,3 +65,7 @@ This executes a bash command on the server as root via SSH and returns the outpu
 4. **Customize** the placeholder values in the prompts (`[YOUR_AGENT_NAME]`, `[YOUR_TARGET_LANGUAGE]`).
 
 > **Note:** Do NOT hardcode server IPs, credentials, or domain names into the prompts. Pass them via environment variables or your platform's secret store.
+
+## Ownership and deployment
+
+AI/knowledge is the canonical generic manual source. Keep installation/customer details and credentials outside this public repository. These prompt examples are independent templates; an application owns its actual runtime prompts, placeholders, tools and interaction policy. Consumers can package reviewed, revision-pinned snapshots for offline execution. Updating this repository does not automatically change or deploy any consumer.

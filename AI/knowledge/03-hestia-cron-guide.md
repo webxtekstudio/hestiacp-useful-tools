@@ -49,28 +49,10 @@ sudo -n cat /etc/crontab
 ls -l /etc/cron.daily/
 ```
 
-### B. Custom Maintenance Schedule
-Our server has specific custom automation split between Panel and OS levels.
+### B. Installation-specific schedules
 
-**Sunday Morning Maintenance Sequence:**
-This sequence is critical for system health.
+Do not assume a universal weekly schedule, cron account or custom backup wrapper. Inspect panel-managed jobs and system cron files on the selected installation; compare exact dates in the server timezone. Identify the installed native backup command, hooks and log locations before concluding that a run was missed. Repository mirroring is separate from knowledge snapshot maintenance.
 
-1.  **01:00** - `v-backup-users-custom` (Panel Cron - User: `admin`)
-    *   *Purpose:* Enhanced backup with symlink support.
-2.  **04:30** - `v-clean-garbage` (System Cron - `/etc/cron.d/`)
-    *   *Purpose:* Deep system cleanup, log rotation, and temp file removal.
-3.  **06:00** - `v-github-mirror` (System Cron - `/etc/cron.d/`)
-    *   *Purpose:* Syncs repositories to backup locations.
-4.  **08:00** - `v-system-report` (System Cron - `/etc/cron.d/`)
-    *   *Purpose:* Generates weekly health status report.
+## 4. Common issues
 
-**Daily Routine:**
-*   **05:10** - `v-update-sys-queue` (Updates stats/counters)
-*   **Daily** - `v-update-sys-hestia-all` (Auto-updates)
-
-**Important:** If troubleshooting "High Load" on Sunday mornings, check this schedule first.
-
-## 4. Common Issues
-1.  **"Permission Denied":** The script is not executable (`chmod +x`) or user lacks permissions.
-2.  **"Command not found":** Cron has a limited `$PATH`. Always use absolute paths (e.g., `/usr/bin/php` instead of `php`).
-3.  **Timezone Mismatch:** Cron runs in system time (`/etc/timezone`). Check `date`.
+Check executable permissions, the cron user's environment and limited PATH, and the actual server timezone. Use absolute paths. Do not manually execute a backup or maintenance job during a read-only investigation.
