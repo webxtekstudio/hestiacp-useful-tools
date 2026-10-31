@@ -10,21 +10,21 @@ Out of the box on cloud VPS providers, HestiaCP has four subtle architectural bl
 
 1. **Unfirewalled Dual-Stack IPv6 (`INPUT ACCEPT`):** HestiaCP's built-in `v-update-firewall` and `v-add-firewall-ban` only manage IPv4 `iptables`. On dual-stack VPS instances with a global IPv6 `/64`, `ip6tables` defaults to `ACCEPT` with zero rules — exposing `:8083`, `:22`, and mail ports over IPv6 without firewall or Fail2Ban protection.
 2. **HestiaCP Updates Wipe Custom `iptables` Rules:** Daily `v-update-sys-hestia-all` runs can flush `iptables` chains, breaking traditional `iptables`-based CrowdSec bouncers or desyncing Fail2Ban bans.
-3. **Vanilla CrowdSec Collides with Apache `:8080` & Misses Domain Logs:** On HestiaCP, Apache2 binds port `:8080` (colliding with CrowdSec's default `127.0.0.1:8080` LAPI), and CrowdSec's auto-generated acquisition misses `/var/log/apache2/domains/*.log`, `/var/log/nginx/domains/*.log`, `/var/log/exim4/mainlog`, and `/var/log/dovecot.log`.
-4. **Shared VPN SSH Lockout Risk:** Admins connecting via commercial VPNs share exit IPs with thousands of strangers. If that shared VPN IP lands on a global blocklist, standard firewall bouncers lock the admin out of SSH even with a valid Ed25519 key.
+3. **Vanilla CrowdSec Collides with Apache `:8080` & Misses HestiaCP Stack Diversity:** On HestiaCP, Apache2 binds port `:8080` (colliding with CrowdSec's default `127.0.0.1:8080` LAPI), community installations vary widely (`Nginx-only` vs `Nginx+Apache2`, `vsftpd` vs `proftpd`, `MariaDB/MySQL` vs `PostgreSQL`, `Exim4` vs `Postfix`, `Roundcube`), and default acquisition misses per-domain web logs, HestiaCP `:8083` auth logs, and multi-CMS `HTTP 200` login brute-force attacks (Drupal, Nextcloud, Laravel, PrestaShop, OpenCart, DokuWiki, MediaWiki, WordPress).
+4. **Shared VPN SSH Lockout & Nextcloud WebDAV False-Positive Risks:** Admins connecting via commercial VPNs share exit IPs that may appear on external blocklists, while Nextcloud desktop/mobile sync clients trigger rapid WebDAV `404`/`PROPFIND` bursts that naive rules can misclassify without explicit whitelisting and SSH port exemption.
 
 ---
 
 ## 🛡️ What `v-harden-server` Automates (The 6 Pillars)
 
-| Pillar | Protection | Upgrade-Safe Mechanism |
+| Pillar | Protection | Upgrade-Safe & Crash-Safe Mechanism |
 | :--- | :--- | :--- |
 | **1. Kernel Network Hardening** | SYN flood cookies, `rp_filter` anti-spoofing, ICMP redirect & source-route blocks, `fs.suid_dumpable=0`, `kernel.panic=10` (keeps `cubic`) | `/etc/sysctl.d/99-hestiacp-hardening.conf` |
 | **2. APT Config Preservation** | Prevents `apt upgrade` from overwriting custom `/etc` configs + locks `/etc/crontab` (`0600`) | `/etc/apt/apt.conf.d/99-keep-custom-configs` |
-| **3. Lockout-Safe SSH Hardening** | `MaxAuthTries 3`, keepalives, and `PasswordAuthentication no` **only** if a valid SSH public key is verified in `authorized_keys` (tested with `sshd -t` before reload) | `/etc/ssh/sshd_config.d/00-hardening.conf` |
+| **3. Lockout-Safe SSH Hardening** | `MaxAuthTries 3`, keepalives, and `PasswordAuthentication no` **only** if a valid SSH public key is verified in `authorized_keys` (tested with `sshd -t` + auto-rollback) | `/etc/ssh/sshd_config.d/00-hardening.conf` |
 | **4. IPv6 Firewall Mirror** | Dynamically mirrors HestiaCP's open ports from `rules.conf` (+ essential `icmpv6` Neighbor Discovery) into an isolated `nftables` IPv6 firewall | `hestia-ipv6-guard.service` (`table ip6 hestia_ipv6_guard`) |
-| **5. WP Filter & F2B Sync** | Covers both `xmlrpc.php` and `wp-login.php` brute-force attacks and auto-heals Fail2Ban ↔ `iptables` desyncs | `/etc/fail2ban/filter.d/wordpress-xmlrpc.local` |
-| **6. CrowdSec Collaborative IPS** | Isolates LAPI on `127.0.0.1:8099`, tails all HestiaCP domain/mail logs, runs `nftables` bouncer immune to `iptables -F`, and **exempts the active SSH port** from external blocklists | `table ip crowdsec` + `crowdsec-ssh-exempt` |
+| **5. Web/Webmail F2B & Sync** | Covers WordPress (`xmlrpc.php` + `wp-login.php`), fixes Roundcube behind Nginx proxy (`roundcube-auth.local`), validates via `fail2ban-client -t` with auto-rollback, and heals Fail2Ban ↔ `iptables` desyncs | `/etc/fail2ban/filter.d/*.local` |
+| **6. CrowdSec Collaborative IPS** | Isolates LAPI on `127.0.0.1:8099`, auto-detects `hestia.conf` stack (`Nginx-only` or `Nginx+Apache2`, `VSFTPD`/`ProFTPD`, `Exim4`/`Postfix`/`Dovecot`, `MariaDB`/`PgSQL`, `Roundcube`), protects `:8083` + Multi-CMS logins + Nextcloud WebDAV sync whitelist (validated via `crowdsec -t`), runs `nftables` bouncer immune to `iptables -F`, and **exempts the active SSH port** | `table ip crowdsec` + `crowdsec-ssh-exempt` |
 
 ---
 

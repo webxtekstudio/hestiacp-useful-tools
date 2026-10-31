@@ -22,15 +22,20 @@
 #      ip6tables at INPUT ACCEPT on dual-stack cloud servers. Builds an
 #      isolated nftables 'table ip6 hestia_ipv6_guard' mirroring HestiaCP's
 #      open global TCP/UDP ports + essential ICMPv6 Neighbor Discovery.
-#   5. Upgrade-Proof WordPress Fail2Ban Filter & Desync Auto-Healer
-#      Deploys /etc/fail2ban/filter.d/wordpress-xmlrpc.local (.local overrides
-#      survive HestiaCP updates) to catch both xmlrpc.php and wp-login.php
-#      POST floods, and heals post-update Fail2Ban <-> iptables desyncs.
+#   5. Upgrade-Proof Web/Webmail Fail2Ban Filters & Desync Auto-Healer
+#      Deploys .local filter overrides (wordpress-xmlrpc.local for xmlrpc.php +
+#      wp-login.php, and roundcube-auth.local fixing Nginx proxy log matching),
+#      enables Roundcube jail when active (validated via 'fail2ban-client -t'),
+#      and heals post-update Fail2Ban <-> iptables chain desyncs.
 #   6. CrowdSec Collaborative IPS + Upgrade-Immune nftables Bouncer (--crowdsec)
 #      - Isolates CrowdSec LAPI on 127.0.0.1:8099 (zero port conflict with
 #        HestiaCP's Apache2 on :8080/:8081/:8443 or Nginx on :8084).
-#      - Installs Nginx, Apache2, WordPress, Exim, Dovecot, SSH & HTTP-CVE
-#        collections + HestiaCP domain log acquisition.
+#      - Auto-detects active HestiaCP stack from hestia.conf (Nginx-only vs
+#        Nginx+Apache2, Exim4/Postfix/Dovecot, VSFTPD/ProFTPD, MariaDB/PgSQL,
+#        Roundcube) + HestiaCP :8083 auth, Nextcloud sync whitelist, and
+#        Multi-CMS login brute-force (WordPress, Drupal, Nextcloud, Laravel,
+#        Symfony, PrestaShop, OpenCart, DokuWiki, MediaWiki) validated with
+#        'crowdsec -t' before reload.
 #      - Runs nftables bouncer in isolated tables (crowdsec / crowdsec6) so
 #        HestiaCP's v-update-firewall (iptables -F) never wipes CrowdSec bans.
 #      - Enforces SSH Port Anti-Lockout Exemption at index 0 of CrowdSec input
@@ -60,15 +65,20 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # --- Paths -------------------------------------------------------------------
+HESTIA_CONF="/usr/local/hestia/conf/hestia.conf"
 SYSCTL_FILE="/etc/sysctl.d/99-hestiacp-hardening.conf"
 APT_KEEP_FILE="/etc/apt/apt.conf.d/99-keep-custom-configs"
 SSH_DROPIN="/etc/ssh/sshd_config.d/00-hardening.conf"
 WP_FILTER_LOCAL="/etc/fail2ban/filter.d/wordpress-xmlrpc.local"
+RC_FILTER_LOCAL="/etc/fail2ban/filter.d/roundcube-auth.local"
+RC_JAIL_LOCAL="/etc/fail2ban/jail.d/98-hestia-roundcube.local"
 CUSTOM_F2B_WL="/etc/fail2ban/jail.d/99-custom-whitelist.local"
 IPV6_GUARD_BIN="/usr/local/sbin/hestia-ipv6-guard"
 IPV6_GUARD_SVC="/etc/systemd/system/hestia-ipv6-guard.service"
 CS_SSH_EXEMPT_BIN="/usr/local/sbin/crowdsec-ssh-exempt"
 CS_BOUNCER_DROPIN="/etc/systemd/system/crowdsec-firewall-bouncer.service.d/ssh-exempt.conf"
+CS_LOCAL_PARSER="/etc/crowdsec/parsers/s01-parse/hestiacp-local-logs.yaml"
+CS_LOCAL_SCENARIOS="/etc/crowdsec/scenarios/hestiacp-local-scenarios.yaml"
 CS_LAPI_ADDR="127.0.0.1:8099"
 CS_ALLOWLIST_NAME="hestia_trusted"
 
@@ -198,9 +208,27 @@ has_authorized_ssh_key() {
     return 1
 }
 
+get_hestia_conf_val() {
+    local key="$1"
+    [ -f "$HESTIA_CONF" ] || return 0
+    awk -v k="$key" '
+        {
+            pat = "^[[:space:]]*" k "=\x27[^\x27]*\x27"
+            if (match($0, pat)) {
+                s = substr($0, RSTART, RLENGTH)
+                sub(/^[[:space:]]*[^\x27]*\x27/, "", s)
+                sub(/\x27$/, "", s)
+                print s
+                exit
+            }
+        }
+    ' "$HESTIA_CONF"
+}
+
 check_f2b_desync_count() {
+    command -v fail2ban-client >/dev/null 2>&1 || { echo "0"; return 0; }
     local desync=0
-    local pairs="wordpress-xmlrpc:WEB dovecot-iptables:MAIL ssh-iptables:SSH exim-iptables:MAIL hestia-iptables:HESTIA"
+    local pairs="wordpress-xmlrpc:WEB roundcube-auth:WEB phpmyadmin-auth:WEB dovecot-iptables:MAIL exim-iptables:MAIL ssh-iptables:SSH vsftpd-iptables:FTP proftpd-iptables:FTP mysqld-iptables:DB hestia-iptables:HESTIA recidive:RECIDIVE"
     for pair in $pairs; do
         local jail="${pair%%:*}"
         local chain="fail2ban-${pair##*:}"
@@ -326,16 +354,30 @@ if [ "$MODE" = "status" ]; then
         echo -e "  [4] IPv6 Firewall Guard:       ${RED}EXPOSED${NC} (Global IPv6 active without hestia_ipv6_guard)"
     fi
 
-    # 5. WordPress Fail2Ban + Sync
-    desync=$(check_f2b_desync_count)
-    if { [ -f "$WP_FILTER_LOCAL" ] && grep -q 'wp-login' "$WP_FILTER_LOCAL" 2>/dev/null; } || grep -q 'wp-login' /etc/fail2ban/filter.d/wordpress-xmlrpc.conf 2>/dev/null; then
-        if [ "$desync" -eq 0 ]; then
-            echo -e "  [5] Fail2Ban WP & Chain Sync:  ${GREEN}ACTIVE${NC} (wp-login+xmlrpc covered, 0 chain desyncs)"
-        else
-            echo -e "  [5] Fail2Ban WP & Chain Sync:  ${RED}DESYNCED${NC} ($desync jail(s) missing iptables rules)"
-        fi
+    # 5. Web/Webmail Fail2Ban + Sync
+    if ! command -v fail2ban-client >/dev/null 2>&1 || [ ! -d /etc/fail2ban ]; then
+        echo -e "  [5] Fail2Ban Filters & Sync:   ${GREEN}N/A${NC} (Fail2Ban not installed)"
     else
-        echo -e "  [5] Fail2Ban WP & Chain Sync:  ${YELLOW}MISSING wp-login.php FILTER${NC}"
+        desync=$(check_f2b_desync_count)
+        rc_state="n/a"
+        if [ "$(get_hestia_conf_val WEBMAIL_SYSTEM)" = "roundcube" ]; then
+            if [ -f "$RC_FILTER_LOCAL" ] && fail2ban-client status roundcube-auth >/dev/null 2>&1; then
+                rc_state="roundcube=on"
+            elif [ -f "$RC_FILTER_LOCAL" ]; then
+                rc_state="roundcube=filter-ready"
+            else
+                rc_state="roundcube=unpatched"
+            fi
+        fi
+        if { [ -f "$WP_FILTER_LOCAL" ] && grep -q 'wp-login' "$WP_FILTER_LOCAL" 2>/dev/null; } || grep -q 'wp-login' /etc/fail2ban/filter.d/wordpress-xmlrpc.conf 2>/dev/null; then
+            if [ "$desync" -eq 0 ]; then
+                echo -e "  [5] Fail2Ban Filters & Sync:   ${GREEN}ACTIVE${NC} (wp-login+xmlrpc, $rc_state, 0 chain desyncs)"
+            else
+                echo -e "  [5] Fail2Ban Filters & Sync:   ${RED}DESYNCED${NC} ($desync jail(s) missing iptables rules)"
+            fi
+        else
+            echo -e "  [5] Fail2Ban Filters & Sync:   ${YELLOW}MISSING .local FILTERS${NC}"
+        fi
     fi
 
     # 6. CrowdSec
@@ -354,7 +396,11 @@ if [ "$MODE" = "status" ]; then
         if [ "$v4_ok" = true ] && [ "$v6_ok" = true ]; then
             ssh_exempt="YES (Port $SSH_PORT IPv4/IPv6)"
         fi
-        echo -e "  [6] CrowdSec + nft Bouncer:    ${GREEN}ACTIVE${NC} (LAPI $CS_LAPI_ADDR | SSH Anti-Lockout: $ssh_exempt)"
+        multi_cms="base"
+        if [ -f "$CS_LOCAL_SCENARIOS" ] && [ -f "$CS_LOCAL_PARSER" ]; then
+            multi_cms="Hestia+Roundcube+Multi-CMS"
+        fi
+        echo -e "  [6] CrowdSec + nft Bouncer:    ${GREEN}ACTIVE${NC} (LAPI $CS_LAPI_ADDR | Profiles: $multi_cms | SSH Exempt: $ssh_exempt)"
     else
         echo -e "  [6] CrowdSec + nft Bouncer:    ${YELLOW}NOT INSTALLED${NC} (run 'v-harden-server --crowdsec')"
     fi
@@ -401,7 +447,7 @@ apply_base_pillars() {
             echo "  3. $SSH_DROPIN (MaxAuthTries=3 ONLY -- keeping PasswordAuthentication unchanged because no SSH key was found)"
         fi
         echo "  4. $IPV6_GUARD_BIN + $IPV6_GUARD_SVC (nftables ip6 mirror of HestiaCP firewall)"
-        echo "  5. $WP_FILTER_LOCAL (xmlrpc.php + wp-login.php) + Fail2Ban desync check"
+        echo "  5. $WP_FILTER_LOCAL + $RC_FILTER_LOCAL (validated via fail2ban-client -t) + Fail2Ban desync check"
         return 0
     fi
 
@@ -587,8 +633,8 @@ EOF
     "$IPV6_GUARD_BIN"
     echo -e "  -> ${GREEN}[Pillar 4]${NC} IPv6 firewall mirror active (table ip6 hestia_ipv6_guard)"
 
-    # --- Pillar 5: Upgrade-Proof WordPress Filter & Fail2Ban Desync Heal ---
-    if [ -d /etc/fail2ban/filter.d ]; then
+    # --- Pillar 5: Upgrade-Proof Web/Webmail Filters & Fail2Ban Desync Heal ---
+    if [ -d /etc/fail2ban/filter.d ] && command -v fail2ban-client >/dev/null 2>&1; then
         cat << 'EOF' > "$WP_FILTER_LOCAL"
 # Managed by v-harden-server (hestiacp-useful-tools)
 # .local override survives HestiaCP package updates and covers both xmlrpc.php and wp-login.php
@@ -598,13 +644,49 @@ failregex = ^<HOST> .* "POST .*/xmlrpc\.php.*
 ignoreregex =
 EOF
         chmod 0644 "$WP_FILTER_LOCAL"
+
+        cat << 'EOF' > "$RC_FILTER_LOCAL"
+# Managed by v-harden-server (hestiacp-useful-tools)
+# Fixes Roundcube behind Nginx proxy where '(X-Forwarded-For: ...)' follows 'from <HOST>'
+[Definition]
+prefregex =
+failregex = ^\s*(?:\[\]:\s*)?(?:<\w+>\s*)?(?:IMAP Error:\s*)?(?:FAILED login|Login failed) for .*? from <HOST>(?:\s*\([^)]*\))?\.
+            ^\s*(?:\[\]:\s*)?(?:<\w+>\s*)?Failed login for .*? from <HOST> in session \w+
+ignoreregex = Could not connect to .* Connection refused
+EOF
+        chmod 0644 "$RC_FILTER_LOCAL"
+
+        local webmail_sys
+        webmail_sys=$(get_hestia_conf_val WEBMAIL_SYSTEM)
+        if [ "$webmail_sys" = "roundcube" ] && [ -f /var/log/roundcube/errors.log ] && [ -f /etc/fail2ban/action.d/hestia.conf ]; then
+            install -d -m 0755 /etc/fail2ban/jail.d
+            cat << 'EOF' > "$RC_JAIL_LOCAL"
+# Managed by v-harden-server (hestiacp-useful-tools)
+[roundcube-auth]
+enabled  = true
+filter   = roundcube-auth
+action   = hestia[name=WEB]
+logpath  = /var/log/roundcube/errors.log
+maxretry = 5
+findtime = 600
+bantime  = 86400
+EOF
+            chmod 0644 "$RC_JAIL_LOCAL"
+        fi
+
+        # Validate Fail2Ban syntax before reloading; auto-rollback Roundcube overrides if validation ever fails
+        if ! fail2ban-client -t >/dev/null 2>&1; then
+            echo -e "  -> ${YELLOW}[Pillar 5 Warning]${NC} fail2ban-client -t reported an issue -- rolling back Roundcube jail override to protect Fail2Ban"
+            rm -f "$RC_JAIL_LOCAL" "$RC_FILTER_LOCAL"
+        fi
+
         if systemctl is-active --quiet fail2ban; then
             if [ "$(check_f2b_desync_count)" -gt 0 ]; then
                 systemctl restart fail2ban
-                echo -e "  -> ${GREEN}[Pillar 5]${NC} WordPress .local filter installed & Fail2Ban desync healed"
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters installed & chain desync healed"
             else
-                fail2ban-client reload wordpress-xmlrpc >/dev/null 2>&1 || systemctl reload fail2ban >/dev/null 2>&1 || true
-                echo -e "  -> ${GREEN}[Pillar 5]${NC} WordPress .local filter (xmlrpc + wp-login) active"
+                systemctl reload fail2ban >/dev/null 2>&1 || fail2ban-client reload >/dev/null 2>&1 || true
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters (WP + Roundcube) verified & active"
             fi
         fi
     fi
@@ -614,8 +696,40 @@ EOF
 # PILLAR 6 IMPLEMENTATION: CROWDSEC + UPGRADE-IMMUNE NFTABLES BOUNCER
 # =============================================================================
 apply_crowdsec_pillar() {
-    local SSH_PORT
+    local SSH_PORT web_sys proxy_sys ftp_sys mail_sys imap_sys db_sys webmail_sys
     SSH_PORT=$(detect_ssh_port)
+    web_sys=$(get_hestia_conf_val WEB_SYSTEM)
+    proxy_sys=$(get_hestia_conf_val PROXY_SYSTEM)
+    ftp_sys=$(get_hestia_conf_val FTP_SYSTEM)
+    mail_sys=$(get_hestia_conf_val MAIL_SYSTEM)
+    imap_sys=$(get_hestia_conf_val IMAP_SYSTEM)
+    db_sys=$(get_hestia_conf_val DB_SYSTEM)
+    webmail_sys=$(get_hestia_conf_val WEBMAIL_SYSTEM)
+
+    local use_nginx=false use_apache=false
+    if [ "$proxy_sys" = "nginx" ] || [ "$web_sys" = "nginx" ] || [ -d /etc/nginx ]; then
+        use_nginx=true
+    fi
+    if [ "$web_sys" = "apache2" ] || { [ -z "$web_sys" ] && [ -d /etc/apache2 ]; }; then
+        use_apache=true
+    fi
+
+    local hub_collections=(
+        crowdsecurity/linux
+        crowdsecurity/sshd
+        crowdsecurity/http-cve
+        crowdsecurity/whitelist-good-actors
+        crowdsecurity/wordpress
+    )
+    [ "$use_nginx" = true ] && hub_collections+=(crowdsecurity/nginx)
+    [ "$use_apache" = true ] && hub_collections+=(crowdsecurity/apache2)
+    [ "$mail_sys" = "exim4" ] && hub_collections+=(crowdsecurity/exim)
+    [ "$mail_sys" = "postfix" ] && hub_collections+=(crowdsecurity/postfix)
+    [ "$imap_sys" = "dovecot" ] && hub_collections+=(crowdsecurity/dovecot)
+    [ "$ftp_sys" = "vsftpd" ] && hub_collections+=(crowdsecurity/vsftpd)
+    [ "$ftp_sys" = "proftpd" ] && hub_collections+=(crowdsecurity/proftpd)
+    [[ ",${db_sys}," == *",mysql,"* ]] && hub_collections+=(crowdsecurity/mariadb crowdsecurity/mysql)
+    [[ ",${db_sys}," == *",pgsql,"* ]] && hub_collections+=(crowdsecurity/pgsql)
 
     echo ""
     echo "================================================================="
@@ -626,8 +740,9 @@ apply_crowdsec_pillar() {
         echo -e "${YELLOW}[DRY-RUN] Would install & configure:${NC}"
         echo "  - Official CrowdSec APT repo + crowdsec + crowdsec-firewall-bouncer-nftables"
         echo "  - CrowdSec LAPI isolated on $CS_LAPI_ADDR (zero conflict with Apache :8080)"
-        echo "  - Collections: linux, nginx, apache2, wordpress, exim, dovecot, sshd, http-cve, whitelist-good-actors"
-        echo "  - Log acquisition: /etc/crowdsec/acquis.d/hestiacp.yaml"
+        echo "  - Auto-detected collections: ${hub_collections[*]}"
+        echo "  - Extra profiles: nextcloud-whitelist + Hestia :8083 + Roundcube + Multi-CMS (Drupal, Nextcloud, Laravel, PrestaShop, OpenCart, DokuWiki, MediaWiki)"
+        echo "  - Log acquisition: /etc/crowdsec/acquis.d/hestiacp.yaml (validated via crowdsec -t)"
         echo "  - SSH Anti-Lockout Exemption: tcp dport $SSH_PORT accept at index 0 of crowdsec & crowdsec6 input chains"
         return 0
     fi
@@ -659,35 +774,26 @@ EOF
     if [ -f /etc/crowdsec/local_api_credentials.yaml ]; then
         sed -i "s|http://127.0.0.1:8080|http://${CS_LAPI_ADDR}|g" /etc/crowdsec/local_api_credentials.yaml
     fi
-    systemctl enable --now crowdsec >/dev/null 2>&1
-    systemctl restart crowdsec
-    sleep 2
+    systemctl enable crowdsec >/dev/null 2>&1 || true
 
-    # 3. Update Hub index & install HestiaCP Collections individually (so a single Hub rename never aborts the rest)
+    # 3. Update Hub index & install auto-detected official HestiaCP Collections individually
     cscli hub update >/dev/null 2>&1 || true
-    local hub_collections=(
-        crowdsecurity/linux
-        crowdsecurity/nginx
-        crowdsecurity/apache2
-        crowdsecurity/wordpress
-        crowdsecurity/exim
-        crowdsecurity/dovecot
-        crowdsecurity/sshd
-        crowdsecurity/http-cve
-        crowdsecurity/whitelist-good-actors
-    )
     for col in "${hub_collections[@]}"; do
         cscli collections install "$col" --force >/dev/null 2>&1 || \
             echo -e "  -> ${YELLOW}[Warning]${NC} CrowdSec collection '$col' could not be installed from Hub"
     done
     cscli scenarios install crowdsecurity/http-bf-wordpress_bf_xmlrpc --force >/dev/null 2>&1 || true
+    # Prevent WebDAV/Photos/Contacts sync false positives on Nextcloud domains without reading untrusted public_html logs
+    cscli parsers install crowdsecurity/nextcloud-whitelist --force >/dev/null 2>&1 || true
     cscli hub upgrade >/dev/null 2>&1 || true
 
-    # 4. Configure HestiaCP Log Acquisition (non-overlapping with setup.nginx / setup.apache2)
+    # 4. Configure Dynamic HestiaCP Log Acquisition (trusted daemon logs only)
     install -d -m 0755 /etc/crowdsec/acquis.d
-    cat << 'EOF' > /etc/crowdsec/acquis.d/hestiacp.yaml
-# HestiaCP Per-Domain Web, Panel, Exim4, Dovecot & Journald SSH Log Acquisition
-# Managed by v-harden-server (hestiacp-useful-tools)
+    {
+        echo "# HestiaCP Dynamic Stack Log Acquisition"
+        echo "# Managed by v-harden-server (hestiacp-useful-tools)"
+        if [ "$use_nginx" = true ]; then
+            cat << 'EOF'
 filenames:
   - /var/log/nginx/domains/*.log
   - /var/log/hestia/nginx-access.log
@@ -695,32 +801,241 @@ filenames:
 labels:
   type: nginx
 ---
+EOF
+        fi
+        if [ "$use_apache" = true ]; then
+            cat << 'EOF'
 filenames:
   - /var/log/apache2/domains/*.log
 labels:
   type: apache2
 ---
+EOF
+        fi
+        cat << 'EOF'
+filenames:
+  - /var/log/hestia/auth.log
+labels:
+  type: hestia-auth
+---
+EOF
+        if [ "$webmail_sys" = "roundcube" ]; then
+            cat << 'EOF'
+filenames:
+  - /var/log/roundcube/errors.log
+labels:
+  type: roundcube-auth
+---
+EOF
+        fi
+        if [ "$mail_sys" = "exim4" ]; then
+            cat << 'EOF'
 filenames:
   - /var/log/exim4/mainlog
   - /var/log/exim4/rejectlog
 labels:
   type: exim
 ---
+EOF
+        elif [ "$mail_sys" = "postfix" ]; then
+            cat << 'EOF'
+filenames:
+  - /var/log/mail.log
+labels:
+  type: syslog
+---
+EOF
+        fi
+        if [ "$imap_sys" = "dovecot" ]; then
+            cat << 'EOF'
 filenames:
   - /var/log/dovecot.log
 labels:
   type: dovecot
 ---
+EOF
+        fi
+        if [ "$ftp_sys" = "vsftpd" ]; then
+            cat << 'EOF'
+filenames:
+  - /var/log/vsftpd.log
+labels:
+  type: vsftpd
+---
+EOF
+        elif [ "$ftp_sys" = "proftpd" ]; then
+            cat << 'EOF'
+filenames:
+  - /var/log/proftpd/proftpd.log
+labels:
+  type: proftpd
+---
+EOF
+        fi
+        if [[ ",${db_sys}," == *",mysql,"* ]]; then
+            cat << 'EOF'
+filenames:
+  - /var/log/mysql/error.log
+  - /var/log/mariadb/mariadb.log
+labels:
+  type: mysql
+---
+EOF
+        fi
+        if [[ ",${db_sys}," == *",pgsql,"* ]]; then
+            cat << 'EOF'
+filenames:
+  - /var/log/postgresql/*.log
+labels:
+  type: postgres
+---
+EOF
+        fi
+        cat << 'EOF'
 source: journalctl
 journalctl_filter:
   - "_SYSTEMD_UNIT=ssh.service"
+  - "_SYSTEMD_UNIT=sshd.service"
 labels:
   type: syslog
 EOF
-    # Remove broken/duplicate default setup files (RHEL /var/log/maillog, duplicate mysql, non-journald sshd)
+    } > /etc/crowdsec/acquis.d/hestiacp.yaml
+
+    # Remove broken/duplicate default package setup files so logs are never parsed twice
     rm -f /etc/crowdsec/acquis.d/setup.sshd.yaml \
           /etc/crowdsec/acquis.d/setup.dovecot.yaml \
-          /etc/crowdsec/acquis.d/setup.mysql.yaml
+          /etc/crowdsec/acquis.d/setup.exim.yaml \
+          /etc/crowdsec/acquis.d/setup.postfix.yaml \
+          /etc/crowdsec/acquis.d/setup.mysql.yaml \
+          /etc/crowdsec/acquis.d/setup.mariadb.yaml \
+          /etc/crowdsec/acquis.d/setup.vsftpd.yaml \
+          /etc/crowdsec/acquis.d/setup.proftpd.yaml \
+          /etc/crowdsec/acquis.d/setup.pgsql.yaml \
+          /etc/crowdsec/acquis.d/setup.postgresql.yaml
+
+    # 4b. Install self-contained HestiaCP Panel, Roundcube & Multi-CMS rules (validated via crowdsec -t)
+    install -d -m 0755 /etc/crowdsec/parsers/s01-parse /etc/crowdsec/scenarios
+    cat << 'EOF' > "$CS_LOCAL_PARSER"
+# Managed by v-harden-server (hestiacp-useful-tools)
+name: hestiacp-local/auth-logs
+description: "Parse HestiaCP panel (:8083) and Roundcube webmail failed logins"
+filter: "evt.Parsed.program in ['hestia-auth', 'roundcube-auth']"
+onsuccess: next_stage
+nodes:
+  - filter: "evt.Parsed.program == 'hestia-auth'"
+    grok:
+      pattern: '^%{YEAR:year}-%{MONTHNUM:month}-%{MONTHDAY:day} %{TIME:time} %{NOTSPACE:target_user} %{IP:source_ip} failed to login\s*$'
+      apply_on: message
+    statics:
+      - meta: service
+        value: hestiacp
+      - meta: log_type
+        value: hestiacp_failed_auth
+      - meta: source_ip
+        expression: "evt.Parsed.source_ip"
+      - meta: target_user
+        expression: "evt.Parsed.target_user"
+      - target: evt.StrTime
+        expression: "evt.Parsed.year + '-' + evt.Parsed.month + '-' + evt.Parsed.day + ' ' + evt.Parsed.time"
+      - target: evt.StrTimeFormat
+        value: "2006-01-02 15:04:05"
+  - filter: "evt.Parsed.program == 'roundcube-auth'"
+    grok:
+      pattern: '^\[%{MONTHDAY:day}-%{MONTH:month}-%{YEAR:year} %{TIME:time} %{ISO8601_TIMEZONE:tz}\]: (?:<[^>]+> )?(?:IMAP Error: )?(?:FAILED login|Login failed|Failed login) for %{DATA:target_user} from %{IP:source_ip}(?: \([^)]*\))?(?:\.| in session )'
+      apply_on: message
+    statics:
+      - meta: service
+        value: roundcube
+      - meta: log_type
+        value: roundcube_failed_auth
+      - meta: source_ip
+        expression: "evt.Parsed.source_ip"
+      - meta: target_user
+        expression: "evt.Parsed.target_user"
+      - target: evt.StrTime
+        expression: "evt.Parsed.day + '-' + evt.Parsed.month + '-' + evt.Parsed.year + ' ' + evt.Parsed.time + ' ' + evt.Parsed.tz"
+      - target: evt.StrTimeFormat
+        value: "02-Jan-2006 15:04:05 -0700"
+EOF
+    chmod 0644 "$CS_LOCAL_PARSER"
+
+    cat << 'EOF' > "$CS_LOCAL_SCENARIOS"
+# Managed by v-harden-server (hestiacp-useful-tools)
+type: leaky
+name: hestiacp-local/panel-bf
+description: "Detect HestiaCP (:8083) control panel login brute-force (IPv4 & IPv6)"
+filter: "evt.Meta.log_type == 'hestiacp_failed_auth'"
+groupby: evt.Meta.source_ip
+capacity: 5
+leakspeed: "1m"
+blackhole: 5m
+labels:
+  service: hestiacp
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1110
+  behavior: "http:bruteforce"
+  label: "HestiaCP Panel Bruteforce"
+  remediation: true
+---
+type: leaky
+name: hestiacp-local/roundcube-bf
+description: "Detect Roundcube webmail login brute-force (IPv4 & IPv6)"
+filter: "evt.Meta.log_type == 'roundcube_failed_auth' && evt.Meta.source_ip not in ['127.0.0.1', '::1']"
+groupby: evt.Meta.source_ip
+capacity: 5
+leakspeed: "30s"
+blackhole: 5m
+labels:
+  service: roundcube
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1110
+  behavior: "http:bruteforce"
+  label: "Roundcube Webmail Bruteforce"
+  remediation: true
+---
+type: leaky
+name: hestiacp-local/http-cms-login-bf
+description: "Detect multi-CMS login form brute-force (Drupal, Nextcloud, Laravel, Symfony, PrestaShop, OpenCart, DokuWiki, MediaWiki)"
+filter: |
+  evt.Meta.log_type == 'http_access-log' &&
+  evt.Meta.http_verb == 'POST' &&
+  evt.Meta.http_status == '200' &&
+  (
+    evt.Parsed.request matches '^/([a-zA-Z]{2}(-[a-zA-Z]{2})?/)?user/login/?$' ||
+    evt.Parsed.request matches '^/(index\\.php/)?(admin/)?login/?$' ||
+    ((evt.Parsed.request == '/index.php' || evt.Parsed.request == '/admin/index.php') && evt.Parsed.http_args matches '(^|&)route=(account|common)/login(&|$)') ||
+    (evt.Parsed.request endsWith '/doku.php' && evt.Parsed.http_args matches '(^|&)do=login(&|$)') ||
+    (evt.Parsed.request endsWith '/index.php' && evt.Parsed.http_args contains 'Special:UserLogin')
+  )
+groupby: evt.Meta.source_ip
+capacity: 8
+leakspeed: "10s"
+blackhole: 5m
+labels:
+  service: http
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1110
+  behavior: "http:bruteforce"
+  label: "Multi-CMS Login Bruteforce"
+  remediation: true
+EOF
+    chmod 0644 "$CS_LOCAL_SCENARIOS"
+
+    if ! crowdsec -t >/dev/null 2>&1; then
+        echo -e "  -> ${YELLOW}[Pillar 6 Warning]${NC} crowdsec -t reported a syntax mismatch in local rules -- rolling back local rules to keep CrowdSec healthy"
+        rm -f "$CS_LOCAL_PARSER" "$CS_LOCAL_SCENARIOS"
+    fi
+
+    # Ensure CAPI (Community Blocklist) is registered, then start/restart validated CrowdSec LAPI once
+    cscli capi status >/dev/null 2>&1 || cscli capi register >/dev/null 2>&1 || true
+    systemctl restart crowdsec
+    sleep 2
 
     # 5. Create local trusted allowlist (loopback, RFC1918, and server's own public IPv4 + IPv6 subnet)
     cscli allowlists create "$CS_ALLOWLIST_NAME" -d "Trusted local & server own IPs" >/dev/null 2>&1 || true
@@ -736,11 +1051,6 @@ EOF
         [ -z "$norm_v6" ] && norm_v6="${self_v6_cidr%/*}/128"
         cscli allowlists add "$CS_ALLOWLIST_NAME" "$norm_v6" >/dev/null 2>&1 || true
     done
-
-    # Ensure CAPI (Community Blocklist) is registered and restart so LAPI pulls blocklists for all new scenarios immediately
-    cscli capi status >/dev/null 2>&1 || cscli capi register >/dev/null 2>&1 || true
-    systemctl restart crowdsec
-    sleep 2
 
     # 6. Install & register upgrade-immune nftables bouncer
     apt-get install -y crowdsec-firewall-bouncer-nftables >/dev/null
