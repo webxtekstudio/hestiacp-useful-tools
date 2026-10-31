@@ -1,0 +1,2 @@
+*.sh text eol=lf
+v-harden-server text eol=lf

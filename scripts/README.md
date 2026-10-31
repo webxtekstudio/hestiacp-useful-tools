@@ -34,6 +34,12 @@ Automates the cloning and syncing of your private GitHub repositories down to yo
 ### 8. [logrotate-optimize](./logrotate-optimize/)
 Upgrades Apache & Nginx log rotation from weekly to daily (14 days compressed). Prevents single domain logs from growing to 100MB+ during ad campaigns or brute-force attacks.
 
+### 9. [fail2ban-optimize](./fail2ban-optimize/)
+Balances Dovecot & Exim Fail2Ban thresholds (`2h` ban after `5` attempts via `.local` precedence) so clients and Gmail POP3 fetchers are not locked out for 7 days on accidental typos.
+
+### 10. [server-hardening](./server-hardening/)
+**🛡️ Recommended Tool:** Automates 6 upgrade-safe HestiaCP hardening pillars — Kernel sysctl, APT config preservation, lockout-safe SSH, Dual-Stack IPv6 Firewall Mirror (`nftables`), WordPress `wp-login.php` filter + Fail2Ban desync auto-healer, and **CrowdSec Collaborative IPS** (isolated on `127.0.0.1:8099` with SSH anti-lockout protection).
+
 ---
 
 ## 🚀 How to Install Everything (The Easy Way)
