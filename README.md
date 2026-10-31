@@ -88,6 +88,14 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - **Frontend Layer:** Checks TLS ciphers, HSTS, and Security Headers.
 - **Pentest Layer:** An aggressive offensive layer that simulates real-world OWASP Top 10 attacks (SQLi, XSS, Brute-Force floods) against your own domains to test firewall resiliency.
 
+#### [Server Hardening & CrowdSec IPS (`v-harden-server`)](scripts/server-hardening/)
+- Automates 6 upgrade-safe security layers engineered specifically for HestiaCP on Debian and Ubuntu:
+- **Kernel & APT Hardening:** Applies SYN flood cookies, `rp_filter`, redirect/source-route blocks, SUID core-dump protection, and `99-keep-custom-configs` (`--force-confdef --force-confold`) so `apt upgrade` never overwrites custom `/etc` configs.
+- **Lockout-Safe SSH Hardening:** Enforces `MaxAuthTries 3`, keepalives, and disables `PasswordAuthentication` *only* after verifying at least one valid SSH public key exists in `authorized_keys` (with `sshd -t` pre-flight validation).
+- **Dual-Stack IPv6 Firewall Mirror (`hestia-ipv6-guard`):** Closes HestiaCP's IPv6 `INPUT ACCEPT` blind spot on dual-stack cloud servers by dynamically mirroring HestiaCP's open ports into an isolated `nftables` `table ip6 hestia_ipv6_guard` while preserving ICMPv6 Neighbor Discovery.
+- **Upgrade-Proof WordPress Filter & Desync Healer:** Deploys `/etc/fail2ban/filter.d/wordpress-xmlrpc.local` (covering both `xmlrpc.php` and `wp-login.php` POST attacks) and automatically heals post-update Fail2Ban ↔ `iptables` desyncs (`50 4 * * *` cron right after HestiaCP's `04:41` auto-update).
+- **CrowdSec Collaborative IPS (`--crowdsec`):** Isolates CrowdSec LAPI on `127.0.0.1:8099` (zero port conflict with Apache `:8080`), acquires all HestiaCP per-domain Nginx/Apache/Exim4/Dovecot logs, runs `crowdsec-firewall-bouncer-nftables` in isolated tables immune to `v-update-firewall`, and **exempts the active SSH port from external blocklists** so admins on shared VPNs are never locked out of SSH.
+
 #### [Logrotate Optimizer (`v-optimize-logrotate`)](scripts/logrotate-optimize/)
 - Upgrades Apache & Nginx log rotation from the HestiaCP default (`weekly rotate 4`) to `daily rotate 14` — preventing domain logs from growing to 100MB+ during ad campaigns (Facebook/Instagram UTM params inflate each log line to ~630 bytes) or sustained brute-force attacks.
 - Safe and persistent across HestiaCP updates. Backs up original configs and validates before applying.

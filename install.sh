@@ -27,10 +27,28 @@ for arg in "$@"; do
             bash "$SRC_DIR/scripts/fail2ban-optimize/install.sh"
             exit 0
             ;;
+        --harden)
+            if [ "$EUID" -ne 0 ]; then
+                echo "ERROR: Please run as root (or use sudo)"
+                exit 1
+            fi
+            bash "$SRC_DIR/scripts/server-hardening/install.sh"
+            exit 0
+            ;;
+        --crowdsec)
+            if [ "$EUID" -ne 0 ]; then
+                echo "ERROR: Please run as root (or use sudo)"
+                exit 1
+            fi
+            bash "$SRC_DIR/scripts/server-hardening/install.sh" --crowdsec
+            exit 0
+            ;;
         --help|-h)
-            echo "Usage: $0 [--setup-crons|--fail2ban]"
+            echo "Usage: $0 [--setup-crons|--fail2ban|--harden|--crowdsec]"
             echo "  --setup-crons   Create/update /etc/cron.d/hestiacp-custom with recommended schedules"
             echo "  --fail2ban      Install and apply only the Fail2Ban email optimizer"
+            echo "  --harden        Install and apply Server Hardening (Pillars 1-5)"
+            echo "  --crowdsec      Install and apply Server Hardening + CrowdSec IPS (All 6 Pillars)"
             exit 0
             ;;
     esac
@@ -316,6 +334,10 @@ CRONHEADER
     add_cron_entry "security-audit" \
         "0 7 * * 0" \
         "root /usr/local/hestia/bin/v-security-audit --system --backend --quiet --email >> /var/log/hestia/security-audit/weekly.log 2>&1"
+
+    add_cron_entry "server-hardening-heal" \
+        "50 4 * * *" \
+        "root /usr/local/hestia/bin/v-harden-server --cron-heal >> /var/log/hestia/server-hardening.log 2>&1"
 
     chmod 644 "$CRON_FILE"
 fi

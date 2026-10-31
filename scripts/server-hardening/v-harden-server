@@ -1,0 +1,761 @@
+#!/bin/bash
+# =============================================================================
+# v-harden-server -- HestiaCP 6-Pillar Server Hardening & CrowdSec IPS Manager
+#
+# Automates production-tested Linux, Firewall, Fail2Ban, IPv6, and CrowdSec
+# security hardening tailored specifically for HestiaCP (Debian / Ubuntu)
+# without breaking panel updates, Apache/Nginx ports, or SSH access.
+#
+# THE 6 PILLARS:
+#   1. Kernel Sysctl Hardening (/etc/sysctl.d/99-hestiacp-hardening.conf)
+#      SYN cookies, rp_filter, ICMP redirect/source-route blocks, SUID dump
+#      protection, and kernel panic auto-reboot (preserves TCP cubic).
+#   2. APT Config Preservation (/etc/apt/apt.conf.d/99-keep-custom-configs)
+#      Prevents unattended/manual apt upgrades from overwriting custom /etc
+#      configs (--force-confdef --force-confold) and locks /etc/crontab (0600).
+#   3. Lockout-Safe SSH Hardening (/etc/ssh/sshd_config.d/00-hardening.conf)
+#      Sets MaxAuthTries 3, keepalives, and disables PasswordAuthentication
+#      ONLY after verifying at least one valid SSH public key is authorized.
+#      Validates syntax with 'sshd -t' before reload with automatic rollback.
+#   4. Dual-Stack IPv6 Firewall Mirror (hestia-ipv6-guard.service)
+#      HestiaCP's native firewall (v-update-firewall) is IPv4-only, leaving
+#      ip6tables at INPUT ACCEPT on dual-stack cloud servers. Builds an
+#      isolated nftables 'table ip6 hestia_ipv6_guard' mirroring HestiaCP's
+#      open global TCP/UDP ports + essential ICMPv6 Neighbor Discovery.
+#   5. Upgrade-Proof WordPress Fail2Ban Filter & Desync Auto-Healer
+#      Deploys /etc/fail2ban/filter.d/wordpress-xmlrpc.local (.local overrides
+#      survive HestiaCP updates) to catch both xmlrpc.php and wp-login.php
+#      POST floods, and heals post-update Fail2Ban <-> iptables desyncs.
+#   6. CrowdSec Collaborative IPS + Upgrade-Immune nftables Bouncer (--crowdsec)
+#      - Isolates CrowdSec LAPI on 127.0.0.1:8099 (zero port conflict with
+#        HestiaCP's Apache2 on :8080/:8081/:8443 or Nginx on :8084).
+#      - Installs Nginx, Apache2, WordPress, PHP, Exim, Dovecot, SSH & HTTP-CVE
+#        collections + HestiaCP domain log acquisition.
+#      - Runs nftables bouncer in isolated tables (crowdsec / crowdsec6) so
+#        HestiaCP's v-update-firewall (iptables -F) never wipes CrowdSec bans.
+#      - Enforces SSH Port Anti-Lockout Exemption at index 0 of CrowdSec input
+#        chains so admins on shared VPNs are never locked out by global lists.
+#
+# USAGE:
+#   v-harden-server                  # Apply Pillars 1-5 (fast OS/F2B/IPv6 baseline)
+#   v-harden-server --crowdsec       # Install & configure Pillar 6 (CrowdSec IPS)
+#   v-harden-server --all            # Apply all 6 Pillars (Pillars 1-5 + CrowdSec)
+#   v-harden-server --status         # Read-only status audit of all 6 Pillars
+#   v-harden-server --dry-run        # Preview actions without modifying files
+#   v-harden-server --cron-heal      # Quiet post-update sync (IPv6 + F2B + CrowdSec)
+#   v-harden-server --whitelist CIDR # Whitelist IP/CIDR in CrowdSec + Fail2Ban
+#   v-harden-server --unban IP       # Unban IP across CrowdSec, Hestia & Fail2Ban
+#
+# Part of: https://github.com/webxtekstudio/hestiacp-useful-tools
+# =============================================================================
+
+set -euo pipefail
+export PATH="/usr/local/hestia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# --- Formatting --------------------------------------------------------------
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# --- Paths -------------------------------------------------------------------
+SYSCTL_FILE="/etc/sysctl.d/99-hestiacp-hardening.conf"
+APT_KEEP_FILE="/etc/apt/apt.conf.d/99-keep-custom-configs"
+SSH_DROPIN="/etc/ssh/sshd_config.d/00-hardening.conf"
+WP_FILTER_LOCAL="/etc/fail2ban/filter.d/wordpress-xmlrpc.local"
+CUSTOM_F2B_WL="/etc/fail2ban/jail.d/99-custom-whitelist.local"
+IPV6_GUARD_BIN="/usr/local/sbin/hestia-ipv6-guard"
+IPV6_GUARD_SVC="/etc/systemd/system/hestia-ipv6-guard.service"
+CS_SSH_EXEMPT_BIN="/usr/local/sbin/crowdsec-ssh-exempt"
+CS_BOUNCER_DROPIN="/etc/systemd/system/crowdsec-firewall-bouncer.service.d/ssh-exempt.conf"
+CS_LAPI_ADDR="127.0.0.1:8099"
+CS_ALLOWLIST_NAME="hestia_trusted"
+
+# --- Mode flags --------------------------------------------------------------
+MODE="apply_base"
+WITH_CROWDSEC=false
+DRY_RUN=false
+WHITELIST_TARGET=""
+UNBAN_TARGET=""
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}ERROR: Please run as root (or use sudo).${NC}"
+    exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --apply)
+            MODE="apply_base"
+            shift
+            ;;
+        --crowdsec)
+            MODE="crowdsec_only"
+            WITH_CROWDSEC=true
+            shift
+            ;;
+        --all)
+            MODE="apply_all"
+            WITH_CROWDSEC=true
+            shift
+            ;;
+        --status)
+            MODE="status"
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --cron-heal)
+            MODE="cron_heal"
+            shift
+            ;;
+        --whitelist)
+            if [ -n "${2:-}" ]; then
+                MODE="whitelist"
+                WHITELIST_TARGET="$2"
+                shift 2
+            else
+                echo -e "${RED}ERROR: --whitelist requires an IP or CIDR (e.g. 198.51.100.10/32).${NC}"
+                exit 1
+            fi
+            ;;
+        --unban)
+            if [ -n "${2:-}" ]; then
+                MODE="unban"
+                UNBAN_TARGET="$2"
+                shift 2
+            else
+                echo -e "${RED}ERROR: --unban requires an IP address.${NC}"
+                exit 1
+            fi
+            ;;
+        --help|-h)
+            cat << 'HELP'
+Usage: v-harden-server [OPTIONS]
+
+Options:
+  (no args), --apply   Apply Pillars 1-5 (Kernel, APT, safe SSH, IPv6 Guard, WP Fail2Ban)
+  --crowdsec           Install & configure Pillar 6 (CrowdSec + nftables bouncer + SSH anti-lockout)
+  --all                Apply all 6 Pillars (Pillars 1-5 + CrowdSec IPS)
+  --status             Read-only audit of all 6 security pillars
+  --dry-run            Preview planned changes without writing files
+  --cron-heal          Silent post-update healer (syncs IPv6 firewall, F2B chains & CrowdSec SSH rule)
+  --whitelist <CIDR>   Permanently whitelist an IP/CIDR across CrowdSec & Fail2Ban
+  --unban <IP>         Unban an IP across CrowdSec, HestiaCP firewall, and all Fail2Ban jails
+  --help, -h           Show this help message
+HELP
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Run 'v-harden-server --help' for usage."
+            exit 1
+            ;;
+    esac
+done
+
+# --- Helpers -----------------------------------------------------------------
+detect_ssh_port() {
+    local p=""
+    if command -v sshd >/dev/null 2>&1; then
+        p=$({ sshd -T 2>/dev/null || true; } | awk '$1=="port" && !p {p=$2} END{print p}')
+    fi
+    echo "${p:-22}"
+}
+
+has_authorized_ssh_key() {
+    local key_files=("/root/.ssh/authorized_keys")
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        local uhome
+        uhome=$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)
+        [ -n "$uhome" ] && key_files+=("$uhome/.ssh/authorized_keys")
+    fi
+    for kf in "${key_files[@]}"; do
+        if [ -s "$kf" ] && grep -qE '^(ssh-(rsa|ed25519)|ecdsa-sha2-)' "$kf" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+check_f2b_desync_count() {
+    local desync=0
+    local pairs="wordpress-xmlrpc:WEB dovecot-iptables:MAIL ssh-iptables:SSH exim-iptables:MAIL hestia-iptables:HESTIA"
+    for pair in $pairs; do
+        local jail="${pair%%:*}"
+        local chain="fail2ban-${pair##*:}"
+        if fail2ban-client status "$jail" >/dev/null 2>&1; then
+            local f2b_bans ipt_rules
+            f2b_bans=$(fail2ban-client status "$jail" 2>/dev/null | awk '/Currently banned:/{print $NF}')
+            ipt_rules=$(iptables -L "$chain" -n 2>/dev/null | grep -cE 'REJECT|DROP' || true)
+            if [ "${f2b_bans:-0}" -gt 0 ] && [ "${ipt_rules:-0}" -eq 0 ]; then
+                desync=$((desync + 1))
+            fi
+        fi
+    done
+    echo "$desync"
+}
+
+# =============================================================================
+# ACTION: UNBAN IP
+# =============================================================================
+if [ "$MODE" = "unban" ]; then
+    echo -e "${BLUE}=== Unbanning IP across all security layers: $UNBAN_TARGET ===${NC}"
+    if command -v cscli >/dev/null 2>&1; then
+        cscli decisions delete --ip "$UNBAN_TARGET" 2>/dev/null && \
+            echo -e "  -> ${GREEN}[CrowdSec]${NC} Cleared decisions for $UNBAN_TARGET" || true
+    fi
+    if [ -x /usr/local/hestia/bin/v-list-firewall-ban ]; then
+        for chain in SSH WEB MAIL DNS FTP HESTIA RECIDIVE; do
+            /usr/local/hestia/bin/v-delete-firewall-ban "$UNBAN_TARGET" "$chain" >/dev/null 2>&1 && \
+                echo -e "  -> ${GREEN}[HestiaCP]${NC} Removed $UNBAN_TARGET from chain $chain" || true
+        done
+    fi
+    if command -v fail2ban-client >/dev/null 2>&1; then
+        for jail in $(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' '); do
+            if fail2ban-client status "$jail" 2>/dev/null | grep -qF "$UNBAN_TARGET"; then
+                fail2ban-client set "$jail" unbanip "$UNBAN_TARGET" >/dev/null 2>&1 && \
+                    echo -e "  -> ${GREEN}[Fail2Ban]${NC} Unbanned $UNBAN_TARGET from $jail" || true
+            fi
+        done
+    fi
+    exit 0
+fi
+
+# =============================================================================
+# ACTION: WHITELIST IP / CIDR
+# =============================================================================
+if [ "$MODE" = "whitelist" ]; then
+    echo -e "${BLUE}=== Whitelisting trusted IP/CIDR: $WHITELIST_TARGET ===${NC}"
+    if command -v cscli >/dev/null 2>&1; then
+        cscli allowlists create "$CS_ALLOWLIST_NAME" -d "Trusted admin & server IPs" >/dev/null 2>&1 || true
+        cscli allowlists add "$CS_ALLOWLIST_NAME" "$WHITELIST_TARGET" && \
+            echo -e "  -> ${GREEN}[CrowdSec]${NC} Added $WHITELIST_TARGET to allowlist '$CS_ALLOWLIST_NAME'"
+    fi
+    mkdir -p /etc/fail2ban/jail.d
+    existing_ips="127.0.0.1/8 ::1"
+    if [ -f "$CUSTOM_F2B_WL" ]; then
+        existing_ips=$(awk -F= '/^ignoreip/{print $2}' "$CUSTOM_F2B_WL" | xargs || echo "127.0.0.1/8 ::1")
+    fi
+    if ! echo " $existing_ips " | grep -qF " $WHITELIST_TARGET "; then
+        existing_ips="$existing_ips $WHITELIST_TARGET"
+    fi
+    cat << EOF > "$CUSTOM_F2B_WL"
+# Managed by v-harden-server (hestiacp-useful-tools)
+[DEFAULT]
+ignoreip = $existing_ips
+EOF
+    chmod 0644 "$CUSTOM_F2B_WL"
+    if command -v fail2ban-client >/dev/null 2>&1 && systemctl is-active --quiet fail2ban; then
+        for jail in $(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' '); do
+            fail2ban-client set "$jail" addignoreip "$WHITELIST_TARGET" >/dev/null 2>&1 || true
+        done
+    fi
+    echo -e "  -> ${GREEN}[Fail2Ban]${NC} Persisted $WHITELIST_TARGET in $CUSTOM_F2B_WL"
+    exit 0
+fi
+
+# =============================================================================
+# ACTION: STATUS AUDIT (READ-ONLY)
+# =============================================================================
+if [ "$MODE" = "status" ]; then
+    SSH_PORT=$(detect_ssh_port)
+    echo -e "${BLUE}=================================================================${NC}"
+    echo -e "${BLUE} HestiaCP Server Hardening Status (v-harden-server)${NC}"
+    echo -e "${BLUE}=================================================================${NC}"
+
+    # 1. Kernel sysctl
+    if [ -f "$SYSCTL_FILE" ] && [ "$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null)" = "1" ] && [ "$(sysctl -n fs.suid_dumpable 2>/dev/null)" = "0" ]; then
+        echo -e "  [1] Kernel Sysctl Hardening:   ${GREEN}ACTIVE${NC} ($SYSCTL_FILE, congestion=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null))"
+    else
+        echo -e "  [1] Kernel Sysctl Hardening:   ${YELLOW}NOT APPLIED${NC}"
+    fi
+
+    # 2. APT preservation
+    if [ -f "$APT_KEEP_FILE" ]; then
+        echo -e "  [2] APT Config Preservation:   ${GREEN}ACTIVE${NC} ($APT_KEEP_FILE)"
+    else
+        echo -e "  [2] APT Config Preservation:   ${YELLOW}MISSING${NC}"
+    fi
+
+    # 3. SSH hardening
+    sshd_dump=$(sshd -T 2>/dev/null || true)
+    pw_auth=$(printf '%s\n' "$sshd_dump" | awk '$1=="passwordauthentication" && !v {v=$2} END{print v ? v : "unknown"}')
+    max_tries=$(printf '%s\n' "$sshd_dump" | awk '$1=="maxauthtries" && !v {v=$2} END{print v ? v : "unknown"}')
+    if [ "$pw_auth" = "no" ]; then
+        echo -e "  [3] SSH Hardening (Port $SSH_PORT):   ${GREEN}ACTIVE${NC} (PasswordAuthentication=no, MaxAuthTries=$max_tries)"
+    else
+        echo -e "  [3] SSH Hardening (Port $SSH_PORT):   ${YELLOW}PARTIAL${NC} (PasswordAuthentication=$pw_auth, MaxAuthTries=$max_tries)"
+    fi
+
+    # 4. IPv6 Guard
+    has_global_v6=$(ip -6 addr show scope global 2>/dev/null | grep -c 'inet6' || true)
+    if [ "$has_global_v6" -eq 0 ]; then
+        echo -e "  [4] IPv6 Firewall Guard:       ${GREEN}N/A${NC} (No global IPv6 address assigned)"
+    elif nft list table ip6 hestia_ipv6_guard >/dev/null 2>&1; then
+        echo -e "  [4] IPv6 Firewall Guard:       ${GREEN}ACTIVE${NC} (nftables table ip6 hestia_ipv6_guard)"
+    else
+        echo -e "  [4] IPv6 Firewall Guard:       ${RED}EXPOSED${NC} (Global IPv6 active without hestia_ipv6_guard)"
+    fi
+
+    # 5. WordPress Fail2Ban + Sync
+    desync=$(check_f2b_desync_count)
+    if { [ -f "$WP_FILTER_LOCAL" ] && grep -q 'wp-login' "$WP_FILTER_LOCAL" 2>/dev/null; } || grep -q 'wp-login' /etc/fail2ban/filter.d/wordpress-xmlrpc.conf 2>/dev/null; then
+        if [ "$desync" -eq 0 ]; then
+            echo -e "  [5] Fail2Ban WP & Chain Sync:  ${GREEN}ACTIVE${NC} (wp-login+xmlrpc covered, 0 chain desyncs)"
+        else
+            echo -e "  [5] Fail2Ban WP & Chain Sync:  ${RED}DESYNCED${NC} ($desync jail(s) missing iptables rules)"
+        fi
+    else
+        echo -e "  [5] Fail2Ban WP & Chain Sync:  ${YELLOW}MISSING wp-login.php FILTER${NC}"
+    fi
+
+    # 6. CrowdSec
+    if systemctl is-active --quiet crowdsec 2>/dev/null && systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        ssh_exempt="NO"
+        if nft list chain ip crowdsec crowdsec-chain-input 2>/dev/null | grep -q "tcp dport ${SSH_PORT} accept"; then
+            ssh_exempt="YES (Port $SSH_PORT)"
+        fi
+        echo -e "  [6] CrowdSec + nft Bouncer:    ${GREEN}ACTIVE${NC} (LAPI $CS_LAPI_ADDR | SSH Anti-Lockout: $ssh_exempt)"
+    else
+        echo -e "  [6] CrowdSec + nft Bouncer:    ${YELLOW}NOT INSTALLED${NC} (run 'v-harden-server --crowdsec')"
+    fi
+    exit 0
+fi
+
+# =============================================================================
+# ACTION: CRON HEAL (QUIET POST-UPDATE SYNC)
+# =============================================================================
+if [ "$MODE" = "cron_heal" ]; then
+    if [ -x "$IPV6_GUARD_BIN" ]; then
+        "$IPV6_GUARD_BIN" >/dev/null 2>&1 || true
+    fi
+    if [ "$(check_f2b_desync_count)" -gt 0 ]; then
+        echo "[$(date -Is)] Healing Fail2Ban <-> iptables desync after HestiaCP update"
+        systemctl restart fail2ban || true
+    fi
+    if systemctl is-enabled --quiet crowdsec-firewall-bouncer 2>/dev/null; then
+        systemctl is-active --quiet crowdsec || systemctl restart crowdsec || true
+        systemctl is-active --quiet crowdsec-firewall-bouncer || systemctl restart crowdsec-firewall-bouncer || true
+        [ -x "$CS_SSH_EXEMPT_BIN" ] && "$CS_SSH_EXEMPT_BIN" || true
+    fi
+    exit 0
+fi
+
+# =============================================================================
+# PILLARS 1-5 IMPLEMENTATION
+# =============================================================================
+apply_base_pillars() {
+    local SSH_PORT
+    SSH_PORT=$(detect_ssh_port)
+
+    echo "================================================================="
+    echo " HestiaCP Server Hardening -- Applying Pillars 1 to 5"
+    echo "================================================================="
+
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}[DRY-RUN] Would configure:${NC}"
+        echo "  1. $SYSCTL_FILE (SYN cookies, rp_filter, redirect/source-route blocks, suid_dumpable=0, kernel.panic=10)"
+        echo "  2. $APT_KEEP_FILE (--force-confdef --force-confold) + chmod 600 /etc/crontab"
+        if has_authorized_ssh_key; then
+            echo "  3. $SSH_DROPIN (MaxAuthTries=3, PasswordAuthentication=no -- SSH key verified)"
+        else
+            echo "  3. $SSH_DROPIN (MaxAuthTries=3 ONLY -- keeping PasswordAuthentication unchanged because no SSH key was found)"
+        fi
+        echo "  4. $IPV6_GUARD_BIN + $IPV6_GUARD_SVC (nftables ip6 mirror of HestiaCP firewall)"
+        echo "  5. $WP_FILTER_LOCAL (xmlrpc.php + wp-login.php) + Fail2Ban desync check"
+        return 0
+    fi
+
+    # --- Pillar 1: Kernel Sysctl Hardening ---
+    cat << 'EOF' > "$SYSCTL_FILE"
+# HestiaCP Kernel Network & Memory Hardening
+# Managed by: https://github.com/webxtekstudio/hestiacp-useful-tools (v-harden-server)
+net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+kernel.panic = 10
+fs.suid_dumpable = 0
+EOF
+    chmod 0644 "$SYSCTL_FILE"
+    sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
+    echo -e "  -> ${GREEN}[Pillar 1]${NC} Kernel sysctl hardening active ($SYSCTL_FILE)"
+
+    # --- Pillar 2: APT Config Preservation & Crontab Perms ---
+    cat << 'EOF' > "$APT_KEEP_FILE"
+Dpkg::Options {
+   "--force-confdef";
+   "--force-confold";
+};
+EOF
+    chmod 0644 "$APT_KEEP_FILE"
+    [ -f /etc/crontab ] && chmod 0600 /etc/crontab
+    echo -e "  -> ${GREEN}[Pillar 2]${NC} APT custom config preservation active ($APT_KEEP_FILE)"
+
+    # --- Pillar 3: Lockout-Safe SSH Hardening ---
+    install -d -m 0755 /etc/ssh/sshd_config.d
+    local ssh_bak=""
+    if [ -f "$SSH_DROPIN" ]; then
+        ssh_bak="${SSH_DROPIN}.bak.$(date +%Y%m%d-%H%M%S)"
+        cp "$SSH_DROPIN" "$ssh_bak"
+    fi
+
+    if has_authorized_ssh_key; then
+        cat << 'EOF' > "$SSH_DROPIN"
+# Managed by v-harden-server (hestiacp-useful-tools)
+MaxAuthTries 3
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+EOF
+    else
+        cat << 'EOF' > "$SSH_DROPIN"
+# Managed by v-harden-server (hestiacp-useful-tools)
+# NOTE: PasswordAuthentication left untouched because no authorized_keys were detected.
+MaxAuthTries 3
+PermitEmptyPasswords no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+EOF
+        echo -e "  -> ${YELLOW}[Pillar 3 Notice]${NC} No SSH public key found in authorized_keys -- kept password login enabled to prevent lockout."
+    fi
+    chmod 0644 "$SSH_DROPIN"
+
+    if sshd -t 2>/dev/null; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+        rm -f "$ssh_bak"
+        echo -e "  -> ${GREEN}[Pillar 3]${NC} SSH daemon hardened & verified via 'sshd -t' (Port $SSH_PORT)"
+    else
+        echo -e "  -> ${RED}[Pillar 3 Error]${NC} sshd -t validation failed -- rolling back $SSH_DROPIN"
+        if [ -n "$ssh_bak" ] && [ -f "$ssh_bak" ]; then
+            mv "$ssh_bak" "$SSH_DROPIN"
+        else
+            rm -f "$SSH_DROPIN"
+        fi
+    fi
+
+    # --- Pillar 4: Dual-Stack IPv6 Firewall Mirror (nftables) ---
+    if ! command -v nft >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables >/dev/null
+    fi
+
+    cat << 'EOF' > "$IPV6_GUARD_BIN"
+#!/bin/bash
+# Mirrors HestiaCP's global IPv4 ACCEPT port rules into an isolated IPv6 nftables table
+# so dual-stack servers do not expose unfirewalled IPv6 ports (while preserving ICMPv6).
+set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+RULES_CONF="/usr/local/hestia/data/firewall/rules.conf"
+SSH_PORT=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || echo "22")
+SSH_PORT="${SSH_PORT:-22}"
+
+TCP_RAW="$SSH_PORT"
+UDP_RAW=""
+
+if [ -f "$RULES_CONF" ]; then
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^# || -z "$line" ]] && continue
+        eval "$line" 2>/dev/null || continue
+        if [ "${SUSPENDED:-no}" = "no" ] && [ "${ACTION:-}" = "ACCEPT" ] && [ "${IP:-}" = "0.0.0.0/0" ]; then
+            clean_port=$(printf '%s' "${PORT:-}" | tr -d '\r\n ')
+            if [ "$clean_port" != "0" ] && [ -n "$clean_port" ]; then
+                case "${PROTOCOL:-}" in
+                    TCP) TCP_RAW="${TCP_RAW},${clean_port}" ;;
+                    UDP) UDP_RAW="${UDP_RAW},${clean_port}" ;;
+                esac
+            fi
+        fi
+    done < "$RULES_CONF"
+fi
+
+TCP_SET=$(printf '%s\n' "$TCP_RAW" | tr ',' '\n' | sed 's/:/-/g' | grep -E '^[0-9]+(-[0-9]+)?$' | sort -u | paste -sd, - | sed 's/,/, /g')
+UDP_SET=$(printf '%s\n' "$UDP_RAW" | tr ',' '\n' | sed 's/:/-/g' | grep -E '^[0-9]+(-[0-9]+)?$' | sort -u | paste -sd, - | sed 's/,/, /g' || true)
+
+TMP_NFT=$(mktemp /tmp/hestia-ipv6-guard.XXXXXX.nft)
+trap 'rm -f "$TMP_NFT"' EXIT
+
+nft delete table ip6 hestia_ipv6_guard 2>/dev/null || true
+
+{
+    echo "table ip6 hestia_ipv6_guard {"
+    echo "    chain input {"
+    echo "        type filter hook input priority filter + 5; policy drop;"
+    echo "        iifname \"lo\" accept"
+    echo "        ct state established,related accept"
+    echo "        ct state invalid drop"
+    echo "        ip6 nexthdr ipv6-icmp accept"
+    echo "        udp dport 546 accept"
+    if [ -n "$TCP_SET" ]; then
+        echo "        tcp dport { $TCP_SET } accept"
+    fi
+    if [ -n "$UDP_SET" ]; then
+        echo "        udp dport { $UDP_SET } accept"
+    fi
+    echo "    }"
+    echo "}"
+} > "$TMP_NFT"
+
+nft -f "$TMP_NFT"
+EOF
+    chmod 0755 "$IPV6_GUARD_BIN"
+
+    cat << EOF > "$IPV6_GUARD_SVC"
+[Unit]
+Description=HestiaCP Dual-Stack IPv6 Firewall Mirror (nftables)
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$IPV6_GUARD_BIN
+ExecReload=$IPV6_GUARD_BIN
+ExecStop=/usr/sbin/nft delete table ip6 hestia_ipv6_guard
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now hestia-ipv6-guard.service >/dev/null 2>&1
+    "$IPV6_GUARD_BIN"
+    echo -e "  -> ${GREEN}[Pillar 4]${NC} IPv6 firewall mirror active (table ip6 hestia_ipv6_guard)"
+
+    # --- Pillar 5: Upgrade-Proof WordPress Filter & Fail2Ban Desync Heal ---
+    if [ -d /etc/fail2ban/filter.d ]; then
+        cat << 'EOF' > "$WP_FILTER_LOCAL"
+# Managed by v-harden-server (hestiacp-useful-tools)
+# .local override survives HestiaCP package updates and covers both xmlrpc.php and wp-login.php
+[Definition]
+failregex = ^<HOST> .* "POST .*/xmlrpc\.php.*
+            ^<HOST> .* "POST .*/wp-login\.php.*
+ignoreregex =
+EOF
+        chmod 0644 "$WP_FILTER_LOCAL"
+        if systemctl is-active --quiet fail2ban; then
+            if [ "$(check_f2b_desync_count)" -gt 0 ]; then
+                systemctl restart fail2ban
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} WordPress .local filter installed & Fail2Ban desync healed"
+            else
+                fail2ban-client reload wordpress-xmlrpc >/dev/null 2>&1 || systemctl reload fail2ban >/dev/null 2>&1 || true
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} WordPress .local filter (xmlrpc + wp-login) active"
+            fi
+        fi
+    fi
+}
+
+# =============================================================================
+# PILLAR 6 IMPLEMENTATION: CROWDSEC + UPGRADE-IMMUNE NFTABLES BOUNCER
+# =============================================================================
+apply_crowdsec_pillar() {
+    local SSH_PORT
+    SSH_PORT=$(detect_ssh_port)
+
+    echo ""
+    echo "================================================================="
+    echo " HestiaCP Server Hardening -- Applying Pillar 6 (CrowdSec IPS)"
+    echo "================================================================="
+
+    if [ "$DRY_RUN" = true ]; then
+        echo -e "${YELLOW}[DRY-RUN] Would install & configure:${NC}"
+        echo "  - Official CrowdSec APT repo + crowdsec + crowdsec-firewall-bouncer-nftables"
+        echo "  - CrowdSec LAPI isolated on $CS_LAPI_ADDR (zero conflict with Apache :8080)"
+        echo "  - Collections: linux, nginx, apache2, wordpress, php, exim, dovecot, sshd, http-cve, whitelist-good-actors"
+        echo "  - Log acquisition: /etc/crowdsec/acquis.d/hestiacp.yaml"
+        echo "  - SSH Anti-Lockout Exemption: tcp dport $SSH_PORT accept at index 0 of crowdsec & crowdsec6 input chains"
+        return 0
+    fi
+
+    # 1. Install official CrowdSec GPG keyring & repository
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq curl gnupg ca-certificates apt-transport-https nftables >/dev/null
+
+    install -d -m 0755 /etc/apt/keyrings
+    if [ ! -f /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg ]; then
+        curl -fsSL https://packagecloud.io/crowdsec/crowdsec/gpgkey | gpg --dearmor -o /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg
+        chmod 0644 /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg
+    fi
+    cat << 'EOF' > /etc/apt/sources.list.d/crowdsec_crowdsec.list
+deb [signed-by=/etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/any/ any main
+EOF
+
+    # 2. Pre-configure LAPI on 127.0.0.1:8099 BEFORE installing crowdsec to prevent Apache :8080 conflict
+    install -d -m 0755 /etc/crowdsec
+    cat << EOF > /etc/crowdsec/config.yaml.local
+api:
+  server:
+    listen_uri: ${CS_LAPI_ADDR}
+EOF
+
+    apt-get update -qq
+    apt-get install -y crowdsec >/dev/null
+    if [ -f /etc/crowdsec/local_api_credentials.yaml ]; then
+        sed -i "s|http://127.0.0.1:8080|http://${CS_LAPI_ADDR}|g" /etc/crowdsec/local_api_credentials.yaml
+    fi
+    systemctl enable --now crowdsec >/dev/null 2>&1
+    systemctl restart crowdsec
+    sleep 2
+
+    # 3. Install HestiaCP Hub Collections
+    cscli collections install \
+        crowdsecurity/linux \
+        crowdsecurity/nginx \
+        crowdsecurity/apache2 \
+        crowdsecurity/wordpress \
+        crowdsecurity/php \
+        crowdsecurity/exim \
+        crowdsecurity/dovecot \
+        crowdsecurity/sshd \
+        crowdsecurity/http-cve \
+        crowdsecurity/whitelist-good-actors \
+        --force >/dev/null 2>&1 || true
+    cscli hub update >/dev/null 2>&1 || true
+    cscli hub upgrade >/dev/null 2>&1 || true
+
+    # 4. Configure HestiaCP Log Acquisition (non-overlapping with setup.nginx / setup.apache2)
+    install -d -m 0755 /etc/crowdsec/acquis.d
+    cat << 'EOF' > /etc/crowdsec/acquis.d/hestiacp.yaml
+# HestiaCP Per-Domain Web, Panel, Exim4, Dovecot & Journald SSH Log Acquisition
+# Managed by v-harden-server (hestiacp-useful-tools)
+filenames:
+  - /var/log/nginx/domains/*.log
+  - /var/log/hestia/nginx-access.log
+  - /var/log/hestia/nginx-error.log
+labels:
+  type: nginx
+---
+filenames:
+  - /var/log/apache2/domains/*.log
+labels:
+  type: apache2
+---
+filenames:
+  - /var/log/exim4/mainlog
+  - /var/log/exim4/rejectlog
+labels:
+  type: exim
+---
+filenames:
+  - /var/log/dovecot.log
+labels:
+  type: dovecot
+---
+source: journalctl
+journalctl_filter:
+  - "_SYSTEMD_UNIT=ssh.service"
+labels:
+  type: syslog
+EOF
+    # Remove broken/duplicate default setup files (RHEL /var/log/maillog, duplicate mysql, non-journald sshd)
+    rm -f /etc/crowdsec/acquis.d/setup.sshd.yaml \
+          /etc/crowdsec/acquis.d/setup.dovecot.yaml \
+          /etc/crowdsec/acquis.d/setup.mysql.yaml
+
+    # 5. Create local trusted allowlist (loopback, RFC1918, and server's own public IPs)
+    cscli allowlists create "$CS_ALLOWLIST_NAME" -d "Trusted local & server own IPs" >/dev/null 2>&1 || true
+    cscli allowlists add "$CS_ALLOWLIST_NAME" 127.0.0.1/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 >/dev/null 2>&1 || true
+    for self_v4 in $(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1); do
+        cscli allowlists add "$CS_ALLOWLIST_NAME" "${self_v4}/32" >/dev/null 2>&1 || true
+    done
+    for self_v6 in $(ip -6 -o addr show scope global | awk '{print $4}' | cut -d/ -f1); do
+        cscli allowlists add "$CS_ALLOWLIST_NAME" "${self_v6}/128" >/dev/null 2>&1 || true
+    done
+
+    # Ensure CAPI (Community Blocklist) is registered and restart so LAPI pulls blocklists for all new scenarios immediately
+    cscli capi status >/dev/null 2>&1 || cscli capi register >/dev/null 2>&1 || true
+    systemctl restart crowdsec
+    sleep 2
+
+    # 6. Install & register upgrade-immune nftables bouncer
+    apt-get install -y crowdsec-firewall-bouncer-nftables >/dev/null
+    local bouncer_name="hestia-nftables-bouncer"
+    if [ ! -s /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local ] || ! grep -q "api_key:" /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local 2>/dev/null; then
+        cscli bouncers delete "$bouncer_name" >/dev/null 2>&1 || true
+        local bkey
+        bkey=$(cscli bouncers add "$bouncer_name" -o raw)
+        cat << EOF > /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local
+api_url: http://${CS_LAPI_ADDR}/
+api_key: ${bkey}
+EOF
+        chmod 0600 /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local
+    fi
+
+    # 7. Install SSH Port Anti-Lockout Exemption (ExecStartPost hook)
+    cat << 'EOF' > "$CS_SSH_EXEMPT_BIN"
+#!/bin/bash
+# Exempts the active SSH port at index 0 of CrowdSec's nftables input chains so
+# shared commercial VPN IPs on external blocklists never lock admins out of SSH.
+# Local Fail2Ban continues protecting SSH authentication attempts.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+SSH_PORT=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || echo "22")
+SSH_PORT="${SSH_PORT:-22}"
+
+for _ in 1 2 3 4 5; do
+    nft list chain ip crowdsec crowdsec-chain-input >/dev/null 2>&1 && break
+    sleep 1
+done
+
+if nft list chain ip crowdsec crowdsec-chain-input >/dev/null 2>&1; then
+    if ! nft list chain ip crowdsec crowdsec-chain-input | grep -q "tcp dport ${SSH_PORT} accept"; then
+        nft insert rule ip crowdsec crowdsec-chain-input tcp dport "${SSH_PORT}" accept
+    fi
+fi
+
+if nft list chain ip6 crowdsec6 crowdsec6-chain-input >/dev/null 2>&1; then
+    if ! nft list chain ip6 crowdsec6 crowdsec6-chain-input | grep -q "tcp dport ${SSH_PORT} accept"; then
+        nft insert rule ip6 crowdsec6 crowdsec6-chain-input tcp dport "${SSH_PORT}" accept
+    fi
+fi
+EOF
+    chmod 0755 "$CS_SSH_EXEMPT_BIN"
+
+    install -d -m 0755 /etc/systemd/system/crowdsec-firewall-bouncer.service.d
+    cat << EOF > "$CS_BOUNCER_DROPIN"
+[Service]
+ExecStartPost=$CS_SSH_EXEMPT_BIN
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now crowdsec-firewall-bouncer >/dev/null 2>&1
+    systemctl restart crowdsec-firewall-bouncer
+    sleep 2
+    "$CS_SSH_EXEMPT_BIN"
+
+    echo -e "  -> ${GREEN}[Pillar 6]${NC} CrowdSec LAPI ($CS_LAPI_ADDR) + nftables bouncer active"
+    echo -e "  -> ${GREEN}[Pillar 6]${NC} SSH Anti-Lockout Exemption verified on TCP port $SSH_PORT"
+}
+
+# --- Dispatch ----------------------------------------------------------------
+case "$MODE" in
+    apply_base)
+        apply_base_pillars
+        ;;
+    crowdsec_only)
+        apply_crowdsec_pillar
+        ;;
+    apply_all)
+        apply_base_pillars
+        apply_crowdsec_pillar
+        ;;
+esac
+
+echo ""
+echo -e "${GREEN}[OK] Done! Run 'v-harden-server --status' anytime to inspect active protections.${NC}"
