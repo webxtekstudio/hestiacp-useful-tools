@@ -13,7 +13,7 @@ export HESTIA="${HESTIA:-/usr/local/hestia}"
 patch_b2_functions() {
     local script="$HESTIA/func/backup.sh"
     [ ! -f "$script" ] && return 1
-    grep -q "hestia-custom-b2-v5.2-retry" "$script" 2>/dev/null && return 0
+    grep -q "hestia-custom-b2-v5.3-retry" "$script" 2>/dev/null && return 0
 
     [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
@@ -28,7 +28,8 @@ patch_b2_functions() {
 
     cat > "$repl_file" << 'PATCH_EOF'
 b2_backup() {
-	# hestia-custom-b2-v5.2-retry
+	# hestia-custom-b2-v5.3-retry
+	# hestia-custom-b2-v4-retention
 	# Defining backblaze b2 settings
 	source_conf "$HESTIA/conf/b2.backup.conf"
 
@@ -86,6 +87,12 @@ b2_backup() {
 	if [ "$rc" -ne 0 ]; then
 		[ -n "$tmpdir" ] && [[ "$tmpdir" == "$_bkp_root/tmp."* ]] && rm -rf "$tmpdir"
 		check_result "$E_CONNECT" "b2 failed to upload $user.$backup_new_date.tar"
+	fi
+
+	# Record standalone v-backup-user B2 uploads in global backup.log so monitoring sees retries immediately
+	_global_bkp_log="$HESTIA/log/backup.log"
+	if [ -f "$_global_bkp_log" ] && [ "$(stat -c '%d:%i' /proc/$$/fd/1 2>/dev/null)" != "$(stat -c '%d:%i' "$_global_bkp_log" 2>/dev/null)" ]; then
+		printf '\n-- SUMMARY (SINGLE-USER RETRY: %s) --\n%s Upload to B2: %s\n' "$user" "$(date "+%F %T")" "$_b2_remote_path" >> "$_global_bkp_log" 2>/dev/null || true
 	fi
 
 	# Checking retention (compatible with both B2 CLI v4 b2:// URI and v3 positional bucket)
@@ -200,9 +207,9 @@ PATCH_EOF
 
     rm -f "$repl_file" 2>/dev/null
 
-    if grep -q "hestia-custom-b2-v5.2-retry" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
+    if grep -q "hestia-custom-b2-v5.3-retry" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
         mv "$temp" "$script" && chmod 755 "$script"
-        _log "[$(date)] : Patched b2_backup/b2_download/b2_delete (v5.2 retry + env auth + B2 CLI v4/v3)"
+        _log "[$(date)] : Patched b2_backup/b2_download/b2_delete (v5.3 retry + global log sync + B2 CLI v4/v3)"
         return 0
     fi
 

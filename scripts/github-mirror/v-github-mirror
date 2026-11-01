@@ -84,7 +84,8 @@ if [ -z "$ADMIN_EMAIL" ]; then
 fi
 
 STAGE_BASE="/var/lib/hestiacp-github-mirror"
-GIT_NET_SSH="ssh -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new"
+TOKEN_FILE="/etc/hestiacp-github-mirror.token"
+GIT_NET_SSH="ssh -o BatchMode=yes -o ConnectTimeout=30 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
 FATAL_HANDLED="false"
 
 _cleanup_mirror_stage() {
@@ -288,10 +289,80 @@ log_git_output() {
     printf '%s\n' "$out" | sed -E 's#(https?://)[^/@]+@#\1***@#' >> "$LOG_FILE"
 }
 
-REMOTE_AUTH_MODE=""
 REMOTE_REF=""
 REMOTE_HEAD=""
 LAST_GIT_ERR=""
+
+_load_readonly_token() {
+    [ -f "$TOKEN_FILE" ] || return 1
+    [ -L "$TOKEN_FILE" ] && return 1
+    local meta owner perm tok
+    meta=$(stat -c '%u:%a' "$TOKEN_FILE" 2>/dev/null) || return 1
+    owner="${meta%%:*}"
+    perm="${meta##*:}"
+    [ "$owner" = "0" ] || return 1
+    case "$perm" in
+        400|600) ;;
+        *) return 1 ;;
+    esac
+    tok=$(head -n 1 "$TOKEN_FILE" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$tok" ] || return 1
+    printf '%s' "$tok"
+}
+
+# Execute network git ONLY as isolated root (never as tenant user, never reading tenant files).
+# Supports either /root/.ssh deploy/user key or optional /etc/hestiacp-github-mirror.token (0600 root:root).
+_run_root_git_net() {
+    local repo_url="$1"
+    shift
+    local tok auth_hdr https_url
+    if tok=$(_load_readonly_token); then
+        auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+        https_url="$repo_url"
+        if [[ "$https_url" =~ ^git@github\.com:(.+)$ ]]; then
+            https_url="https://github.com/${BASH_REMATCH[1]}"
+        fi
+        GIT_TERMINAL_PROMPT=0 \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+        GIT_CONFIG_VALUE_0="$auth_hdr" \
+        git "$@" "$https_url" 9>&-
+        return $?
+    fi
+
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND="$GIT_NET_SSH" \
+    git "$@" "$repo_url" 9>&-
+}
+
+# Execute offline local git as target HestiaCP user with sanitized env, closed lock FD,
+# and zero access to ~/.gitconfig, /etc/gitconfig, hooks, fsmonitor, or network.
+_run_user_git() {
+    local user="$1"
+    shift
+    runuser -u "$user" -- env -i \
+        PATH="/usr/local/bin:/usr/bin:/bin" \
+        HOME="/nonexistent" \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND=/bin/false \
+        git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never "$@" 9>&-
+}
+
+_run_user_local_fetch_or_clone() {
+    local user="$1"
+    shift
+    runuser -u "$user" -- env -i \
+        PATH="/usr/local/bin:/usr/bin:/bin" \
+        HOME="/nonexistent" \
+        GIT_CONFIG_NOSYSTEM=1 \
+        GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND=/bin/false \
+        git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=always "$@" 9>&-
+}
 
 _parse_ls_remote_output() {
     local out="$1"
@@ -314,21 +385,28 @@ _parse_ls_remote_output() {
 }
 
 resolve_remote_ref() {
-    local user="$1"
-    local user_home="$2"
-    local repo="$3"
-    local branch="$4"
-    local out rc uout urc
+    local repo="$1"
+    local branch="$2"
+    local out rc tok auth_hdr effective_repo
 
-    REMOTE_AUTH_MODE=""
     REMOTE_REF=""
     REMOTE_HEAD=""
     LAST_GIT_ERR=""
 
-    out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git ls-remote "$repo" "refs/heads/$branch" "refs/tags/$branch^{}" "refs/tags/$branch" 2>&1)
-    rc=$?
+    effective_repo="$repo"
+    if tok=$(_load_readonly_token); then
+        auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+        if [[ "$effective_repo" =~ ^git@github\.com:(.+)$ ]]; then
+            effective_repo="https://github.com/${BASH_REMATCH[1]}"
+        fi
+        out=$(GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" GIT_CONFIG_VALUE_0="$auth_hdr" git ls-remote "$effective_repo" "refs/heads/$branch" "refs/tags/$branch^{}" "refs/tags/$branch" 9>&- 2>&1)
+        rc=$?
+    else
+        out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git ls-remote "$repo" "refs/heads/$branch" "refs/tags/$branch^{}" "refs/tags/$branch" 9>&- 2>&1)
+        rc=$?
+    fi
+
     if [ "$rc" -eq 0 ]; then
-        REMOTE_AUTH_MODE="root"
         if _parse_ls_remote_output "$out" "$branch"; then
             return 0
         fi
@@ -336,23 +414,102 @@ resolve_remote_ref() {
         return 1
     fi
 
-    if [ -d "$user_home/.ssh" ]; then
-        uout=$(runuser -u "$user" -- env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git ls-remote "$repo" "refs/heads/$branch" "refs/tags/$branch^{}" "refs/tags/$branch" 2>&1)
-        urc=$?
-        if [ "$urc" -eq 0 ]; then
-            REMOTE_AUTH_MODE="user"
-            if _parse_ls_remote_output "$uout" "$branch"; then
-                return 0
-            fi
-            LAST_GIT_ERR="Remote branch or tag '$branch' not found"
-            return 1
-        fi
-        LAST_GIT_ERR="${uout:-$out}"
-        return 1
-    fi
-
     LAST_GIT_ERR="$out"
     return 1
+}
+
+# Descriptor-pinned O_NOFOLLOW sanitizer for tenant mirror repositories:
+# - Replaces .git/config atomically with a minimal offline config (zero remote URLs,
+#   zero fsmonitor/sshCommand/filter/hooks directives) BEFORE and AFTER local git runs.
+# - Locks the mirror directory permissions to 0700 (owner-only, compatible with HestiaCP
+#   v-backup-user and v-restore-user while completely inert/offline).
+_sanitize_user_git_repo() {
+    local user_home="$1"
+    local dest_rel="$2"
+    local user="$3"
+    local branch="$4"
+    local target_uid target_gid
+    target_uid=$(id -u "$user" 2>/dev/null) || return 1
+    target_gid=$(id -g "$user" 2>/dev/null) || return 1
+
+    python3 - "$user_home" "$dest_rel" "$target_uid" "$target_gid" "$branch" << 'PYEOF' 9>&- 2>/dev/null
+import os
+import re
+import stat
+import sys
+
+user_home, dest_rel, uid_s, gid_s, branch = sys.argv[1:6]
+uid, gid = int(uid_s), int(gid_s)
+
+if not re.match(r"^[A-Za-z0-9._/-]+$", branch) or ".." in branch:
+    branch = "main"
+
+parts = [p for p in dest_rel.split("/") if p]
+if not parts or any(p in (".", "..") for p in parts):
+    sys.exit(1)
+
+cur_fd = os.open(user_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in parts:
+        nxt_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt_fd
+
+    st_root = os.fstat(cur_fd)
+    if not stat.S_ISDIR(st_root.st_mode):
+        sys.exit(1)
+    os.fchmod(cur_fd, 0o700)
+
+    git_fd = os.open(".git", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur_fd)
+    try:
+        os.fchmod(git_fd, 0o700)
+        clean_cfg = (
+            "[core]\n"
+            "\trepositoryformatversion = 0\n"
+            "\tfilemode = true\n"
+            "\tbare = false\n"
+            "\tlogallrefupdates = true\n"
+            f'[branch "{branch}"]\n'
+            f"\tmerge = refs/heads/{branch}\n"
+        ).encode("utf-8")
+
+        tmp_name = f".config.clean.{os.getpid()}"
+        try:
+            os.unlink(tmp_name, dir_fd=git_fd)
+        except FileNotFoundError:
+            pass
+
+        tfd = os.open(
+            tmp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=git_fd,
+        )
+        try:
+            os.write(tfd, clean_cfg)
+            os.fchown(tfd, uid, gid)
+            os.fchmod(tfd, 0o600)
+        finally:
+            os.close(tfd)
+
+        os.replace(tmp_name, "config", src_dir_fd=git_fd, dst_dir_fd=git_fd)
+
+        # Remove .git/info/attributes if present so no custom smudge/clean filter attributes apply
+        try:
+            info_fd = os.open("info", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=git_fd)
+            try:
+                os.unlink("attributes", dir_fd=info_fd)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(info_fd)
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(git_fd)
+finally:
+    os.close(cur_fd)
+PYEOF
 }
 
 # Descriptor-pinned O_NOFOLLOW legacy repair for repos previously cloned as root (UID 0).
@@ -365,7 +522,7 @@ _repair_legacy_root_repo_ownership() {
     target_uid=$(id -u "$user" 2>/dev/null) || return 1
     target_gid=$(id -g "$user" 2>/dev/null) || return 1
 
-    python3 - "$user_home" "$dest_rel" "$target_uid" "$target_gid" << 'PYEOF' 2>/dev/null
+    python3 - "$user_home" "$dest_rel" "$target_uid" "$target_gid" << 'PYEOF' 9>&- 2>/dev/null
 import os
 import stat
 import sys
@@ -440,46 +597,49 @@ sync_overwrite_existing() {
     local user_group="$2"
     local user_home="$3"
     local repo="$4"
-    local safe_repo="$5"
-    local branch="$6"
-    local dest="$7"
-    local dest_rel="$8"
-    local local_head stage_git out rc
+    local branch="$5"
+    local dest="$6"
+    local dest_rel="$7"
+    local local_head stage_git out rc tok auth_hdr effective_repo
 
     if [ "$(stat -c '%u' "$dest/.git" 2>/dev/null)" = "0" ]; then
         _repair_legacy_root_repo_ownership "$user_home" "$dest_rel" "$user" || true
     fi
 
-    if ! resolve_remote_ref "$user" "$user_home" "$repo" "$branch"; then
+    # Always overwrite .git/config with a clean static config BEFORE running git in tenant dir
+    _sanitize_user_git_repo "$user_home" "$dest_rel" "$user" "$branch" || return 1
+
+    if ! resolve_remote_ref "$repo" "$branch"; then
         log_git_output "$LAST_GIT_ERR"
         return 1
     fi
 
-    local_head=$(runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null rev-parse --verify HEAD 2>/dev/null || true)
+    local_head=$(_run_user_git "$user" -C "$dest" rev-parse --verify HEAD 2>/dev/null || true)
     if [ -n "$REMOTE_HEAD" ] && [ "$REMOTE_HEAD" = "$local_head" ]; then
-        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null reset --hard HEAD >> "$LOG_FILE" 2>&1 || return 1
-        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
-        return 0
-    fi
-
-    if [ "$REMOTE_AUTH_MODE" = "user" ]; then
-        out=$(runuser -u "$user" -- env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -C "$dest" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/remotes/origin/$branch" 2>&1)
-        rc=$?
+        out=$(_run_user_git "$user" -C "$dest" reset --hard HEAD 2>&1) || { log_git_output "$out"; return 1; }
         log_git_output "$out"
-        [ "$rc" -eq 0 ] || return 1
-        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null reset --hard "refs/remotes/origin/$branch" >> "$LOG_FILE" 2>&1 || return 1
-        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
+        _sanitize_user_git_repo "$user_home" "$dest_rel" "$user" "$branch" || return 1
         return 0
     fi
 
     # Stage fetch into an isolated bare repo without objects/info/alternates so root git
-    # never reads or follows tenant-controlled object stores.
+    # never reads or follows tenant-controlled object stores, and tenant never touches credentials.
     install -d -m 0711 -o root -g root "$STAGE_BASE" || return 1
     stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
     git init --bare -q "$stage_git"
 
-    out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git --git-dir="$stage_git" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/mirror/target" 2>&1)
-    rc=$?
+    effective_repo="$repo"
+    if tok=$(_load_readonly_token); then
+        auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+        if [[ "$effective_repo" =~ ^git@github\.com:(.+)$ ]]; then
+            effective_repo="https://github.com/${BASH_REMATCH[1]}"
+        fi
+        out=$(GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" GIT_CONFIG_VALUE_0="$auth_hdr" git --git-dir="$stage_git" -c core.hooksPath=/dev/null fetch --no-tags "$effective_repo" "+${REMOTE_REF}:refs/mirror/target" 9>&- 2>&1)
+        rc=$?
+    else
+        out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git --git-dir="$stage_git" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/mirror/target" 9>&- 2>&1)
+        rc=$?
+    fi
     log_git_output "$out"
     if [ "$rc" -ne 0 ]; then
         rm -rf "$stage_git"
@@ -488,14 +648,15 @@ sync_overwrite_existing() {
 
     chown -RP "$user:$user_group" "$stage_git"
     chmod -R u=rwX,go= "$stage_git"
-    if ! runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null fetch --no-tags "$stage_git" "+refs/mirror/target:refs/remotes/origin/$branch" >> "$LOG_FILE" 2>&1; then
-        rm -rf "$stage_git"
-        return 1
-    fi
+    out=$(_run_user_local_fetch_or_clone "$user" -C "$dest" fetch --no-tags "$stage_git" "+refs/mirror/target:refs/remotes/origin/$branch" 2>&1)
+    rc=$?
+    log_git_output "$out"
     rm -rf "$stage_git"
+    [ "$rc" -eq 0 ] || return 1
 
-    runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null reset --hard "refs/remotes/origin/$branch" >> "$LOG_FILE" 2>&1 || return 1
-    runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
+    out=$(_run_user_git "$user" -C "$dest" reset --hard "refs/remotes/origin/$branch" 2>&1) || { log_git_output "$out"; return 1; }
+    log_git_output "$out"
+    _sanitize_user_git_repo "$user_home" "$dest_rel" "$user" "$branch" || return 1
     return 0
 }
 
@@ -504,49 +665,50 @@ clone_repo_staged() {
     local user_group="$2"
     local user_home="$3"
     local repo="$4"
-    local safe_repo="$5"
-    local branch="$6"
-    local target_dir="$7"
+    local branch="$5"
+    local target_dir="$6"
+    local dest_rel="$7"
     local shallow_mode="$8"
     local depth_args=()
-    local stage_git out rc uout urc
+    local stage_git out rc tok auth_hdr effective_repo
 
     [ "$shallow_mode" = "shallow" ] && depth_args=(--depth 1)
 
     install -d -m 0711 -o root -g root "$STAGE_BASE" || return 1
     stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
 
-    out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -c core.hooksPath=/dev/null clone --bare -b "$branch" "${depth_args[@]}" "$repo" "$stage_git" 2>&1)
-    rc=$?
-    if [ "$rc" -eq 0 ]; then
-        log_git_output "$out"
-        chown -RP "$user:$user_group" "$stage_git"
-        chmod -R u=rwX,go= "$stage_git"
-        if ! runuser -u "$user" -- git -c core.hooksPath=/dev/null clone --no-local -b "$branch" "$stage_git" "$target_dir" >> "$LOG_FILE" 2>&1; then
-            rm -rf "$stage_git"
-            return 1
+    effective_repo="$repo"
+    if tok=$(_load_readonly_token); then
+        auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+        if [[ "$effective_repo" =~ ^git@github\.com:(.+)$ ]]; then
+            effective_repo="https://github.com/${BASH_REMATCH[1]}"
         fi
-        rm -rf "$stage_git"
-        runuser -u "$user" -- git -C "$target_dir" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
-        return 0
+        out=$(GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" GIT_CONFIG_VALUE_0="$auth_hdr" git -c core.hooksPath=/dev/null clone --bare -b "$branch" "${depth_args[@]}" "$effective_repo" "$stage_git" 9>&- 2>&1)
+        rc=$?
+    else
+        out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -c core.hooksPath=/dev/null clone --bare -b "$branch" "${depth_args[@]}" "$repo" "$stage_git" 9>&- 2>&1)
+        rc=$?
     fi
 
-    rm -rf "$stage_git"
-
-    if [ -d "$user_home/.ssh" ]; then
-        uout=$(runuser -u "$user" -- env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -c core.hooksPath=/dev/null clone -b "$branch" "${depth_args[@]}" "$repo" "$target_dir" 2>&1)
-        urc=$?
-        if [ "$urc" -eq 0 ]; then
-            log_git_output "$uout"
-            runuser -u "$user" -- git -C "$target_dir" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
-            return 0
-        fi
-        log_git_output "${uout:-$out}"
+    if [ "$rc" -ne 0 ]; then
+        rm -rf "$stage_git"
+        log_git_output "$out"
         return 1
     fi
 
     log_git_output "$out"
-    return 1
+    chown -RP "$user:$user_group" "$stage_git"
+    chmod -R u=rwX,go= "$stage_git"
+    out=$(_run_user_local_fetch_or_clone "$user" clone --no-local -b "$branch" "$stage_git" "$target_dir" 2>&1)
+    rc=$?
+    log_git_output "$out"
+    rm -rf "$stage_git"
+    [ "$rc" -eq 0 ] || return 1
+
+    if [ -n "$dest_rel" ]; then
+        _sanitize_user_git_repo "$user_home" "$dest_rel" "$user" "$branch" || return 1
+    fi
+    return 0
 }
 
 # Argument parsing
@@ -626,7 +788,9 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
     # Ensure destination parent directory exists as target user
     if [ ! -d "$(dirname "$BASE_DEST_PATH")" ]; then
         log "Creating parent directory for $user: $(dirname "$BASE_DEST_PATH")"
-        if ! runuser -u "$user" -- mkdir -p "$(dirname "$BASE_DEST_PATH")" 2>>"$LOG_FILE"; then
+        mkdir_err=$(runuser -u "$user" -- env -i PATH="/usr/bin:/bin" mkdir -p "$(dirname "$BASE_DEST_PATH")" 9>&- 2>&1)
+        if [ $? -ne 0 ]; then
+            log_git_output "$mkdir_err"
             msg="Failed to create parent directory $(dirname "$BASE_DEST_PATH")"
             log "ERROR: $msg"
             REPOS_FAILED+=("$user/$safe_repo: $msg")
@@ -641,10 +805,10 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
     if [ "$retention_mode" == "overwrite" ]; then
         # === OVERWRITE MODE ===
         if [ -d "$BASE_DEST_PATH/.git" ]; then
-            if sync_overwrite_existing "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$BASE_DEST_PATH" "$dest_path"; then
+            if sync_overwrite_existing "$user" "$user_group" "$USER_HOME" "$repo" "$branch" "$BASE_DEST_PATH" "$dest_path"; then
                 log "SUCCESS: Updated $safe_repo."
-                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --date=format:"%Y-%m-%d %H:%M" --format="%cd")
-                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --format="%h")
+                last_commit=$(_run_user_git "$user" -C "$BASE_DEST_PATH" log -1 --no-show-signature --date=format:"%Y-%m-%d %H:%M" --format="%cd" 2>/dev/null)
+                short_hash=$(_run_user_git "$user" -C "$BASE_DEST_PATH" log -1 --no-show-signature --format="%h" 2>/dev/null)
                 REPOS_SUCCESS+=("$user/$safe_repo (Updated: $last_commit - $short_hash)")
             else
                 error_msg="Failed to update $safe_repo"
@@ -653,10 +817,10 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
             fi
         else
             log "Cloning $safe_repo into $BASE_DEST_PATH..."
-            if clone_repo_staged "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$BASE_DEST_PATH" "full"; then
+            if clone_repo_staged "$user" "$user_group" "$USER_HOME" "$repo" "$branch" "$BASE_DEST_PATH" "$dest_path" "full"; then
                 log "SUCCESS: Cloned $safe_repo."
-                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --date=format:"%Y-%m-%d %H:%M" --format="%cd")
-                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --format="%h")
+                last_commit=$(_run_user_git "$user" -C "$BASE_DEST_PATH" log -1 --no-show-signature --date=format:"%Y-%m-%d %H:%M" --format="%cd" 2>/dev/null)
+                short_hash=$(_run_user_git "$user" -C "$BASE_DEST_PATH" log -1 --no-show-signature --format="%h" 2>/dev/null)
                 REPOS_SUCCESS+=("$user/$safe_repo (Cloned: $last_commit - $short_hash)")
             else
                 error_msg="Failed to clone $safe_repo"
@@ -669,11 +833,12 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
         # === BACKUP / VERSIONED MODE ===
         TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
         VERSION_DIR="${BASE_DEST_PATH}_${TIMESTAMP}"
+        VERSION_REL="${dest_path}_${TIMESTAMP}"
         
         log "Cloning new version into $VERSION_DIR..."
-        if clone_repo_staged "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$VERSION_DIR" "shallow"; then
+        if clone_repo_staged "$user" "$user_group" "$USER_HOME" "$repo" "$branch" "$VERSION_DIR" "$VERSION_REL" "shallow"; then
             log "SUCCESS: Cloned version $TIMESTAMP."
-            runuser -u "$user" -- rm -rf "$VERSION_DIR/.git"
+            runuser -u "$user" -- env -i PATH="/usr/bin:/bin" rm -rf "$VERSION_DIR/.git" 9>&-
             REPOS_SUCCESS+=("$user/$safe_repo (Backup)")
             
             # Match ONLY exact <basename>_YYYYMMDD_HHMMSS directories (never unrelated prefix siblings)
@@ -739,7 +904,7 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                 for backup in "${BACKUPS[@]}"; do
                     if [ -z "${KEEP_LIST["$backup"]}" ]; then
                         log "Deleting old backup: $(basename "$backup")"
-                        runuser -u "$user" -- rm -rf "$backup"
+                        runuser -u "$user" -- env -i PATH="/usr/bin:/bin" rm -rf "$backup" 9>&-
                     fi
                 done
                 unset KEEP_LIST
@@ -751,7 +916,7 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                 if [ "$total_versions" -gt "$retention_count" ]; then
                     prune_until=$((total_versions - retention_count))
                     for (( idx=0; idx<prune_until; idx++ )); do
-                        runuser -u "$user" -- rm -rf "${BACKUPS[$idx]}"
+                        runuser -u "$user" -- env -i PATH="/usr/bin:/bin" rm -rf "${BACKUPS[$idx]}" 9>&-
                     done
                 fi
             fi
