@@ -28,7 +28,7 @@ fi
 
 # Calculate organized paths
 current_year=$(date +%Y)
-current_month=$(date +%m_%B | tr '[:lower:]' '[:upper:]')
+current_month=$(LC_TIME=C date +%m_%B | tr '[:lower:]' '[:upper:]')
 org_dir="$BACKUP_DIR/$current_year/$current_month/$user"
 
 # Create target directories

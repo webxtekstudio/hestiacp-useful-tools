@@ -73,6 +73,13 @@ if [ -z "$ADMIN_EMAIL" ]; then
     ADMIN_EMAIL="root"
 fi
 
+STAGE_BASE="/var/tmp/hestiacp-github-mirror"
+GIT_NET_SSH="ssh -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new"
+
+_cleanup_mirror_stage() {
+    rm -rf "$STAGE_BASE"/stage.$$.* 2>/dev/null || true
+}
+
 # Email notification on unexpected fatal crash (trap)
 _send_fatal_email_mirror() {
     local exit_code="$1"
@@ -85,12 +92,21 @@ _send_fatal_email_mirror() {
     local body="Script v-github-mirror terminated unexpectedly.\nExit code: $exit_code at line $line.\nCheck $LOG_FILE for details."
     local SENDMAIL="/usr/local/hestia/web/inc/mail-wrapper.php"
     if [ -f "$SENDMAIL" ]; then
-        echo "$body" | "$SENDMAIL" -s "$subject" "$ADMIN_EMAIL" 2>/dev/null
+        echo -e "$body" | "$SENDMAIL" -s "$subject" "$ADMIN_EMAIL" 2>/dev/null
     else
-        { echo "Subject: $subject"; echo; echo "$body"; } | /usr/sbin/sendmail "$ADMIN_EMAIL" 2>/dev/null
+        { echo "Subject: $subject"; echo; echo -e "$body"; } | /usr/sbin/sendmail "$ADMIN_EMAIL" 2>/dev/null
     fi
 }
-trap '_send_fatal_email_mirror "$?" "$LINENO"' EXIT INT TERM ABRT
+
+_on_exit_mirror() {
+    local exit_code="$1"
+    local line="$2"
+    _cleanup_mirror_stage
+    _send_fatal_email_mirror "$exit_code" "$line"
+}
+trap '_on_exit_mirror "$?" "$LINENO"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM ABRT
 
 # Arrays to track status
 REPOS_SUCCESS=()
@@ -208,7 +224,9 @@ send_html_email() {
 </body>
 </html>"
 
-    local temp_html="/tmp/github_mirror_email_$$.html"
+    local temp_html
+    temp_html=$(mktemp /tmp/github_mirror_email.XXXXXX)
+    chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     
     local SENDMAIL="$HESTIA/web/inc/mail-wrapper.php"
@@ -228,6 +246,203 @@ send_html_email() {
     
     rm -f "$temp_html" 2>/dev/null
     return 0
+}
+
+sanitize_repo_url() {
+    printf '%s' "$1" | sed -E 's#(https?://)[^/@]+@#\1***@#'
+}
+
+log_git_output() {
+    local out="$1"
+    [ -z "$out" ] && return 0
+    printf '%s\n' "$out" | sed -E 's#(https?://)[^/@]+@#\1***@#' >> "$LOG_FILE"
+}
+
+REMOTE_AUTH_MODE=""
+REMOTE_REF=""
+REMOTE_HEAD=""
+LAST_GIT_ERR=""
+
+_parse_ls_remote_output() {
+    local out="$1"
+    local branch="$2"
+    local head_sha peeled_tag_sha raw_tag_sha
+    head_sha=$(printf '%s\n' "$out" | awk -v r="refs/heads/$branch" '$2 == r {print $1; exit}')
+    if [ -n "$head_sha" ]; then
+        REMOTE_REF="refs/heads/$branch"
+        REMOTE_HEAD="$head_sha"
+        return 0
+    fi
+    peeled_tag_sha=$(printf '%s\n' "$out" | awk -v r="refs/tags/$branch^{}" '$2 == r {print $1; exit}')
+    raw_tag_sha=$(printf '%s\n' "$out" | awk -v r="refs/tags/$branch" '$2 == r {print $1; exit}')
+    if [ -n "$raw_tag_sha" ]; then
+        REMOTE_REF="refs/tags/$branch"
+        REMOTE_HEAD="${peeled_tag_sha:-$raw_tag_sha}"
+        return 0
+    fi
+    return 1
+}
+
+resolve_remote_ref() {
+    local user="$1"
+    local user_home="$2"
+    local repo="$3"
+    local branch="$4"
+    local out rc uout urc
+
+    REMOTE_AUTH_MODE=""
+    REMOTE_REF=""
+    REMOTE_HEAD=""
+    LAST_GIT_ERR=""
+
+    out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git ls-remote "$repo" "refs/heads/$branch" "refs/tags/$branch^{}" "refs/tags/$branch" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        REMOTE_AUTH_MODE="root"
+        if _parse_ls_remote_output "$out" "$branch"; then
+            return 0
+        fi
+        LAST_GIT_ERR="Remote branch or tag '$branch' not found"
+        return 1
+    fi
+
+    if [ -d "$user_home/.ssh" ]; then
+        uout=$(runuser -u "$user" -- env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git ls-remote "$repo" "refs/heads/$branch" "refs/tags/$branch^{}" "refs/tags/$branch" 2>&1)
+        urc=$?
+        if [ "$urc" -eq 0 ]; then
+            REMOTE_AUTH_MODE="user"
+            if _parse_ls_remote_output "$uout" "$branch"; then
+                return 0
+            fi
+            LAST_GIT_ERR="Remote branch or tag '$branch' not found"
+            return 1
+        fi
+    fi
+
+    LAST_GIT_ERR="$out"
+    return 1
+}
+
+sync_overwrite_existing() {
+    local user="$1"
+    local user_group="$2"
+    local user_home="$3"
+    local repo="$4"
+    local safe_repo="$5"
+    local branch="$6"
+    local dest="$7"
+    local real_dest local_head stage_git real_objs out rc
+
+    if ! runuser -u "$user" -- test -w "$dest/.git" 2>/dev/null; then
+        real_dest=$(realpath -m "$dest" 2>/dev/null || true)
+        if [[ "$real_dest" == "${user_home%/}/"* ]] && [ ! -L "$dest" ]; then
+            chown -RP "$user:$user_group" "$dest" 2>/dev/null || true
+        fi
+    fi
+
+    if ! resolve_remote_ref "$user" "$user_home" "$repo" "$branch"; then
+        log_git_output "$LAST_GIT_ERR"
+        return 1
+    fi
+
+    local_head=$(runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null rev-parse --verify HEAD 2>/dev/null || true)
+    if [ -n "$REMOTE_HEAD" ] && [ "$REMOTE_HEAD" = "$local_head" ]; then
+        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null reset --hard HEAD >> "$LOG_FILE" 2>&1 || return 1
+        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    if [ "$REMOTE_AUTH_MODE" = "user" ]; then
+        out=$(runuser -u "$user" -- env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -C "$dest" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/remotes/origin/$branch" 2>&1)
+        rc=$?
+        log_git_output "$out"
+        [ "$rc" -eq 0 ] || return 1
+        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null reset --hard "refs/remotes/origin/$branch" >> "$LOG_FILE" 2>&1 || return 1
+        runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    install -d -m 0711 -o root -g root "$STAGE_BASE"
+    stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
+    git init --bare -q "$stage_git"
+
+    real_objs=$(runuser -u "$user" -- realpath -e "$dest/.git/objects" 2>/dev/null || true)
+    if [[ "$real_objs" == "${user_home%/}/"* ]] && [ -d "$real_objs" ] && [ ! -L "$dest/.git/objects" ]; then
+        printf '%s\n' "$real_objs" > "$stage_git/objects/info/alternates"
+    fi
+
+    out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git --git-dir="$stage_git" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/mirror/target" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ -f "$stage_git/objects/info/alternates" ]; then
+        rm -f "$stage_git/objects/info/alternates"
+        out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git --git-dir="$stage_git" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/mirror/target" 2>&1)
+        rc=$?
+    fi
+    log_git_output "$out"
+    if [ "$rc" -ne 0 ]; then
+        rm -rf "$stage_git"
+        return 1
+    fi
+
+    chown -RP "$user:$user_group" "$stage_git"
+    chmod -R u=rwX,go= "$stage_git"
+    if ! runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null fetch --no-tags "$stage_git" "+refs/mirror/target:refs/remotes/origin/$branch" >> "$LOG_FILE" 2>&1; then
+        rm -rf "$stage_git"
+        return 1
+    fi
+    rm -rf "$stage_git"
+
+    runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null reset --hard "refs/remotes/origin/$branch" >> "$LOG_FILE" 2>&1 || return 1
+    runuser -u "$user" -- git -C "$dest" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
+    return 0
+}
+
+clone_repo_staged() {
+    local user="$1"
+    local user_group="$2"
+    local user_home="$3"
+    local repo="$4"
+    local safe_repo="$5"
+    local branch="$6"
+    local target_dir="$7"
+    local shallow_mode="$8"
+    local depth_args=()
+    local stage_git out rc uout urc
+
+    [ "$shallow_mode" = "shallow" ] && depth_args=(--depth 1)
+
+    install -d -m 0711 -o root -g root "$STAGE_BASE"
+    stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
+
+    out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -c core.hooksPath=/dev/null clone --bare -b "$branch" "${depth_args[@]}" "$repo" "$stage_git" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        log_git_output "$out"
+        chown -RP "$user:$user_group" "$stage_git"
+        chmod -R u=rwX,go= "$stage_git"
+        if ! runuser -u "$user" -- git -c core.hooksPath=/dev/null clone --no-local -b "$branch" "$stage_git" "$target_dir" >> "$LOG_FILE" 2>&1; then
+            rm -rf "$stage_git"
+            return 1
+        fi
+        rm -rf "$stage_git"
+        runuser -u "$user" -- git -C "$target_dir" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    rm -rf "$stage_git"
+
+    if [ -d "$user_home/.ssh" ]; then
+        uout=$(runuser -u "$user" -- env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -c core.hooksPath=/dev/null clone -b "$branch" "${depth_args[@]}" "$repo" "$target_dir" 2>&1)
+        urc=$?
+        if [ "$urc" -eq 0 ]; then
+            log_git_output "$uout"
+            runuser -u "$user" -- git -C "$target_dir" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
+            return 0
+        fi
+    fi
+
+    log_git_output "$out"
+    return 1
 }
 
 # Argument parsing
@@ -276,58 +491,70 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
     # Default values
     retention_mode=${retention_mode:-"overwrite"}
     retention_count=${retention_count:-1}
+    safe_repo=$(sanitize_repo_url "$repo")
 
     # Validate User
     if ! id "$user" >/dev/null 2>&1; then
-        msg="User $user does not exist. Skipping $repo."
+        msg="User $user does not exist. Skipping $safe_repo."
         log "WARNING: $msg"
-        REPOS_FAILED+=("$user/$repo: $msg")
+        REPOS_FAILED+=("$user/$safe_repo: $msg")
         continue
     fi
 
+    # Reject empty or path-traversal destinations
+    case "$dest_path" in
+        ""|*..*|/*)
+            msg="Invalid destination path '$dest_path'. Must be relative to user home without '..'."
+            log "ERROR: $msg"
+            REPOS_FAILED+=("$user/$safe_repo: $msg")
+            continue
+            ;;
+    esac
+
     USER_HOME=$(getent passwd "$user" | cut -d: -f6)
     [ -z "$USER_HOME" ] && USER_HOME="/home/$user"
-    BASE_DEST_PATH="$USER_HOME/$dest_path"
+    user_group=$(id -gn "$user" 2>/dev/null || echo "$user")
+    BASE_DEST_PATH="${USER_HOME%/}/$dest_path"
     
-    # Ensure destination parent directory exists
+    # Ensure destination parent directory exists as target user
     if [ ! -d "$(dirname "$BASE_DEST_PATH")" ]; then
         log "Creating parent directory for $user: $(dirname "$BASE_DEST_PATH")"
-        mkdir -p "$(dirname "$BASE_DEST_PATH")"
-        chown "$user:$user" "$(dirname "$BASE_DEST_PATH")"
+        if ! runuser -u "$user" -- mkdir -p "$(dirname "$BASE_DEST_PATH")" 2>>"$LOG_FILE"; then
+            msg="Failed to create parent directory $(dirname "$BASE_DEST_PATH")"
+            log "ERROR: $msg"
+            REPOS_FAILED+=("$user/$safe_repo: $msg")
+            continue
+        fi
     fi
 
-    log "Processing $repo for user $user (Mode: $retention_mode)..."
+    log "Processing $safe_repo for user $user (Mode: $retention_mode)..."
 
     error_msg=""
 
     if [ "$retention_mode" == "overwrite" ]; then
         # === OVERWRITE MODE ===
         if [ -d "$BASE_DEST_PATH/.git" ]; then
-            chown -RP -h "$user:$user" "$BASE_DEST_PATH"
-            if runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null fetch origin "$branch" >> "$LOG_FILE" 2>&1 && \
-               runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null reset --hard "origin/$branch" >> "$LOG_FILE" 2>&1; then
-                log "SUCCESS: Updated $repo."
-                chown -RP -h "$user:$user" "$BASE_DEST_PATH"
+            if sync_overwrite_existing "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$BASE_DEST_PATH"; then
+                log "SUCCESS: Updated $safe_repo."
                 last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
                 short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --format="%h")
-                REPOS_SUCCESS+=("$user/$repo (Updated: $last_commit - $short_hash)")
+                REPOS_SUCCESS+=("$user/$safe_repo (Updated: $last_commit - $short_hash)")
             else
-                error_msg="Failed to update $repo"
+                error_msg="Failed to update $safe_repo"
                 log "ERROR: $error_msg"
-                REPOS_FAILED+=("$user/$repo: $error_msg")
+                REPOS_FAILED+=("$user/$safe_repo: $error_msg")
             fi
         else
-            log "Cloning $repo into $BASE_DEST_PATH..."
-            if runuser -u "$user" -- git -c core.hooksPath=/dev/null clone -b "$branch" "$repo" "$BASE_DEST_PATH" >> "$LOG_FILE" 2>&1; then
-                log "SUCCESS: Cloned $repo."
-                chown -RP -h "$user:$user" "$BASE_DEST_PATH"
+            log "Cloning $safe_repo into $BASE_DEST_PATH..."
+            if clone_repo_staged "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$BASE_DEST_PATH" "full"; then
+                log "SUCCESS: Cloned $safe_repo."
                 last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
                 short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --format="%h")
-                REPOS_SUCCESS+=("$user/$repo (Cloned: $last_commit - $short_hash)")
+                REPOS_SUCCESS+=("$user/$safe_repo (Cloned: $last_commit - $short_hash)")
             else
-                error_msg="Failed to clone $repo"
+                error_msg="Failed to clone $safe_repo"
                 log "ERROR: $error_msg"
-                REPOS_FAILED+=("$user/$repo: $error_msg")
+                REPOS_FAILED+=("$user/$safe_repo: $error_msg")
             fi
         fi
 
@@ -337,11 +564,10 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
         VERSION_DIR="${BASE_DEST_PATH}_${TIMESTAMP}"
         
         log "Cloning new version into $VERSION_DIR..."
-        if runuser -u "$user" -- git -c core.hooksPath=/dev/null clone -b "$branch" --depth 1 "$repo" "$VERSION_DIR" >> "$LOG_FILE" 2>&1; then
+        if clone_repo_staged "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$VERSION_DIR" "shallow"; then
             log "SUCCESS: Cloned version $TIMESTAMP."
-            rm -rf "$VERSION_DIR/.git"
-            chown -RP -h "$user:$user" "$VERSION_DIR"
-            REPOS_SUCCESS+=("$user/$repo (Backup)")
+            runuser -u "$user" -- rm -rf "$VERSION_DIR/.git"
+            REPOS_SUCCESS+=("$user/$safe_repo (Backup)")
             
             # --- Retention Cleanup Logic ---
             if [ "$retention_mode" == "backup" ]; then
@@ -358,7 +584,7 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                 CURRENT_DATE_SEC=$(date +%s)
                 
                 # Arrays to keep track of what to keep
-                declare -A KEEP_LIST
+                declare -A KEEP_LIST=()
                 
                 for backup in $BACKUPS; do
                     dirname=$(basename "$backup")
@@ -398,7 +624,7 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                 for backup in $BACKUPS; do
                     if [ -z "${KEEP_LIST["$backup"]}" ]; then
                         log "Deleting old backup: $(basename "$backup")"
-                        rm -rf "$backup"
+                        runuser -u "$user" -- rm -rf "$backup"
                     fi
                 done
                 
@@ -406,12 +632,12 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                 # SIMPLE RETENTION (Keep last N)
                 log "Cleaning up old versions (keeping last $retention_count)..."
                 find "$(dirname "${BASE_DEST_PATH}_x")" -maxdepth 1 -type d -name "$(basename "${BASE_DEST_PATH}")_*" -print0 2>/dev/null \
-                    | sort -rz | tail -z -n +$((retention_count + 1)) | xargs -0 -r rm -rf
+                    | sort -rz | tail -z -n +$((retention_count + 1)) | xargs -0 -r runuser -u "$user" -- rm -rf
             fi
         else
             error_msg="Failed to clone version $TIMESTAMP"
             log "ERROR: $error_msg"
-            REPOS_FAILED+=("$user/$repo: $error_msg")
+            REPOS_FAILED+=("$user/$safe_repo: $error_msg")
         fi
     fi
 

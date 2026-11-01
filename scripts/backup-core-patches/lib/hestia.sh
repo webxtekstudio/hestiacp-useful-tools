@@ -13,78 +13,62 @@ export HESTIA="${HESTIA:-/usr/local/hestia}"
 patch_b2_functions() {
     local script="$HESTIA/func/backup.sh"
     [ ! -f "$script" ] && return 1
-    grep -q "hestia-custom-b2-v4-retention" "$script" 2>/dev/null && return 0
+    grep -q "hestia-custom-b2-v5-retry" "$script" 2>/dev/null && return 0
 
     [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
-    if grep -q "hestia-custom-b2-v3" "$script" 2>/dev/null; then
-        patch_b2_retention
-        return $?
+    if ! grep -q "^b2_backup() {" "$script" || ! grep -q "^b2_download() {" "$script" || ! grep -q "^b2_delete() {" "$script"; then
+        return 1
     fi
 
-    # --- PATCH b2_backup: organized upload path ---
-    # Find the upload echo line and replace the function body
-    local upload_line=$(grep -n 'Upload to B2:' "$script" | head -1 | cut -d: -f1)
-    if [ -n "$upload_line" ]; then
-        # Insert our path calculation BEFORE the echo line
-        sed -i "${upload_line}i\\
-\\t# hestia-custom-b2-v3\\
-\\t_b2_year=\$(date +%Y)\\
-\\t_b2_month=\$(date +%m_%B | tr '[:lower:]' '[:upper:]')\\
-\\t_b2_remote_path=\"\${_b2_year}/\${_b2_month}/\${user}/\${user}.\${backup_new_date}.tar\"" "$script"
+    local temp repl_file
+    temp=$(mktemp /tmp/patch-b2-v5.XXXXXX)
+    repl_file=$(mktemp /tmp/patch-b2-v5-body.XXXXXX)
+    chmod 600 "$temp" "$repl_file"
 
-        # Replace the flat upload paths with our organized path
-        sed -i "s|b2 upload-file \$BUCKET \$user\.\$backup_new_date\.tar \$user/\$user\.\$backup_new_date\.tar|b2 upload-file \$BUCKET \$user.\$backup_new_date.tar \$_b2_remote_path|g" "$script"
+    cat > "$repl_file" << 'PATCH_EOF'
+b2_backup() {
+	# hestia-custom-b2-v5-retry
+	# Defining backblaze b2 settings
+	source_conf "$HESTIA/conf/b2.backup.conf"
 
-        # Replace the echo to show organized path
-        sed -i "s|Upload to B2: \$user/\$user\.\$backup_new_date\.tar|Upload to B2: \$_b2_remote_path|" "$script"
+	_b2_year=$(date +%Y)
+	_b2_month=$(LC_TIME=C date +%m_%B | tr '[:lower:]' '[:upper:]')
+	_b2_remote_path="${_b2_year}/${_b2_month}/${user}/${user}.${backup_new_date}.tar"
+	echo -e "$(date "+%F %T") Upload to B2: $_b2_remote_path"
 
-        _log "[$(date)] : Patched b2_backup() → organized upload paths"
-    fi
+	if [ "$localbackup" != 'yes' ]; then
+		cd "$tmpdir"
+		tar -cf "$BACKUP/$user.$backup_new_date.tar" .
+	fi
+	cd "$BACKUP/"
 
-    # --- PATCH b2_download: search organized paths ---
-    local download_line=$(grep -n 'b2 download-file-by-name $BUCKET $user/$1 $1' "$script" | head -1 | cut -d: -f1)
-    if [ -n "$download_line" ]; then
-        sed -i "${download_line}i\\
-\\t# hestia-custom-b2-v3-download: search organized paths\\
-\\t_b2_remote=\$(b2 ls \$BUCKET --recursive 2>/dev/null | grep -E \"(^|/)\${user}\\.[0-9]{4}-[0-9]{2}-[0-9]{2}_\" | grep -F \"/\$1\" | head -1)\\
-\\tif [ -n \"\$_b2_remote\" ]; then\\
-\\t\\tb2 download-file-by-name \$BUCKET \$_b2_remote \$1 > /dev/null 2>\&1\\
-\\t\\tif [ \"\$?\" -eq 0 ]; then return 0; fi\\
-\\tfi" "$script"
-        _log "[$(date)] : Patched b2_download() → searches organized paths"
-    fi
+	rc=1
+	_b2_err=""
+	for _b2_attempt in 1 2 3; do
+		b2 clear-account > /dev/null 2>&1
+		b2 authorize-account "$B2_KEYID" "$B2_KEY" > /dev/null 2>&1
+		_b2_err=$(b2 upload-file --no-progress "$BUCKET" "$user.$backup_new_date.tar" "$_b2_remote_path" 2>&1 >/dev/null)
+		rc=$?
+		if [ "$rc" -eq 0 ]; then
+			break
+		fi
+		_b2_err_line=$(printf '%s' "$_b2_err" | tr '\r\n' '  ' | sed 's/  */ /g')
+		echo -e "$(date "+%F %T") WARN: B2 upload attempt ${_b2_attempt}/3 failed (rc=${rc}): ${_b2_err_line}"
+		if [ "$_b2_attempt" -lt 3 ]; then
+			sleep $((_b2_attempt * 10))
+		fi
+	done
 
-    # --- PATCH b2_delete: find in organized paths ---
-    local delete_line=$(grep -n 'b2 delete-file-version $1/$2' "$script" | head -1 | cut -d: -f1)
-    if [ -n "$delete_line" ]; then
-        sed -i "${delete_line}s|b2 delete-file-version \$1/\$2|# hestia-custom-b2-v3-delete: find in organized paths\n\t_del_ids=\$(b2 ls \"\$BUCKET\" --recursive --long 2>/dev/null \| grep -E \"(^|/)\${user}\\.[0-9]{4}-[0-9]{2}-[0-9]{2}_\" \| grep -F \"/\$2\" \| awk '{print \$1}')\n\tfor _did in \$_del_ids; do b2 delete-file-version \"\$_did\" >/dev/null 2>\&1; done\n\t# fallback: b2 delete-file-version \$1/\$2|" "$script"
-        _log "[$(date)] : Patched b2_delete() → finds in organized paths"
-    fi
+	if [ "$localbackup" != 'yes' ]; then
+		rm -f "$user.$backup_new_date.tar"
+	fi
+	if [ "$rc" -ne 0 ]; then
+		check_result "$E_CONNECT" "b2 failed to upload $user.$backup_new_date.tar"
+	fi
 
-    patch_b2_retention
-    return 0
-}
-
-patch_b2_retention() {
-    local script="$HESTIA/func/backup.sh"
-    [ ! -f "$script" ] && return 1
-    grep -q "hestia-custom-b2-v4-retention" "$script" 2>/dev/null && return 0
-
-    local start_line
-    local end_line
-    local temp
-    start_line=$(grep -n 'backup_list=$(b2 ls --long $BUCKET $user' "$script" | head -1 | cut -d: -f1)
-    [ -z "$start_line" ] && return 1
-
-    end_line=$(awk -v start="$start_line" 'NR > start && /^$/ { print NR; exit }' "$script")
-    [ -z "$end_line" ] && return 1
-
-    temp=$(mktemp /tmp/patch-b2-retention.XXXXXX)
-    sed -n "1,$((start_line-1))p" "$script" > "$temp"
-    cat >> "$temp" << 'PATCH_EOF'
-	# hestia-custom-b2-v4-retention: rotate organized cloud backups per user
-	backup_list=$(b2 ls "$BUCKET" --recursive --long 2>/dev/null | awk -v user="$user" '
+	# Checking retention (compatible with both B2 CLI v4 b2:// URI and v3 positional bucket)
+	backup_list=$({ b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null || b2 ls "$BUCKET" --recursive --long 2>/dev/null; } | awk -v user="$user" '
 		$NF ~ ("(^|/)" user "/" user "\\.[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\\.tar$") {
 			archive = $NF
 			sub(/^.*\//, "", archive)
@@ -103,12 +87,81 @@ patch_b2_retention() {
 			fi
 		done
 	fi
-PATCH_EOF
-    sed -n "$((end_line+1)),\$p" "$script" >> "$temp"
+}
 
-    if grep -q "hestia-custom-b2-v4-retention" "$temp" 2>/dev/null; then
+b2_download() {
+	# hestia-custom-b2-v5-download
+	source_conf "$HESTIA/conf/b2.backup.conf"
+
+	b2 clear-account > /dev/null 2>&1
+	b2 authorize-account "$B2_KEYID" "$B2_KEY" > /dev/null 2>&1
+	cd "$BACKUP"
+
+	_b2_remote=$({ b2 ls "b2://$BUCKET" --recursive 2>/dev/null || b2 ls "$BUCKET" --recursive 2>/dev/null; } | awk -v target="$1" '
+		{
+			base = $0
+			sub(/^.*\//, "", base)
+			if (base == target) { print $0; exit }
+		}
+	')
+	if [ -n "$_b2_remote" ]; then
+		for _b2_attempt in 1 2 3; do
+			if b2 download-file-by-name --no-progress "$BUCKET" "$_b2_remote" "$1" > /dev/null 2>&1; then
+				return 0
+			fi
+			[ "$_b2_attempt" -lt 3 ] && sleep 5
+		done
+	fi
+	b2 download-file-by-name --no-progress "$BUCKET" "$user/$1" "$1" > /dev/null 2>&1
+	if [ "$?" -ne 0 ]; then
+		check_result "$E_CONNECT" "b2 failed to download $user.$1"
+	fi
+}
+
+b2_delete() {
+	# hestia-custom-b2-v5-delete
+	source_conf "$HESTIA/conf/b2.backup.conf"
+
+	b2 clear-account > /dev/null 2>&1
+	b2 authorize-account "$B2_KEYID" "$B2_KEY" > /dev/null 2>&1
+
+	_del_ids=$({ b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null || b2 ls "$BUCKET" --recursive --long 2>/dev/null; } | awk -v target="$2" '
+		{
+			base = $NF
+			sub(/^.*\//, "", base)
+			if (base == target) { print $1 }
+		}
+	')
+	for _did in $_del_ids; do
+		b2 delete-file-version "$_did" > /dev/null 2>&1
+	done
+}
+PATCH_EOF
+
+    awk -v repl_file="$repl_file" '
+        /^b2_backup\(\) \{/ {
+            while ((getline line < repl_file) > 0) print line
+            close(repl_file)
+            in_skip = 1
+            next
+        }
+        /^b2_(download|delete)\(\) \{/ {
+            in_skip = 1
+            next
+        }
+        in_skip && /^\}$/ {
+            in_skip = 0
+            next
+        }
+        !in_skip { print }
+    ' "$script" > "$temp"
+
+    rm -f "$repl_file" 2>/dev/null
+
+    if grep -q "hestia-custom-b2-v5-retry" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
+        # Remove empty gap lines if consecutive skipped blocks left extra blank lines
         mv "$temp" "$script" && chmod +x "$script"
-        _log "[$(date)] : Patched b2_backup() -> organized retention"
+        _log "[$(date)] : Patched b2_backup/b2_download/b2_delete (v5 retry + B2 CLI v4 URI support)"
         return 0
     fi
 

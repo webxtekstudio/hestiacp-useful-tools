@@ -182,7 +182,7 @@ Logic to retrieve dynamic information not found in static files.
 
 | Info | Retrieval Method | Example Command |
 | :--- | :--- | :--- |
-| **Admin Email** | Read `CONTACT` in admin's `user.conf` | `grep "^CONTACT=" /usr/local/hestia/data/users/admin/user.conf \| cut -d"'" -f2` |
+| **Admin Email** | Scan `user.conf` for `ROLE='admin'` -> `CONTACT` | `awk -F"'" '/^ROLE='\''admin'\''/{f=1} f && /^CONTACT=/{print $2; exit}' /usr/local/hestia/data/users/*/user.conf` |
 | **User Home** | Read `/etc/passwd` or `hestia.conf` | `grep "^HOME=" /usr/local/hestia/conf/hestia.conf \| cut -f 2 -d \'` |
 | **Git Dest** | Read `github-mirror.conf` | `grep "^$USER|" /etc/hestiacp-github-mirror.conf \| cut -d"|" -f4` |
 | **PHP Processes** | Count FPM processes per pool | `pgrep -c 'php-fpm: pool www'` |

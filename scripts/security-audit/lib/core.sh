@@ -284,8 +284,20 @@ print_summary() {
 
 send_email_report() {
     local target_email="$MODE_EMAIL"
+    local HESTIA="/usr/local/hestia"
     if [ "$target_email" = "auto" ]; then
-        target_email=$(grep "^CONTACT=" /usr/local/hestia/conf/hestia.conf 2>/dev/null | cut -d"'" -f2)
+        target_email=""
+        local user_conf
+        for user_conf in "$HESTIA/data/users"/*/user.conf; do
+            [ -f "$user_conf" ] || continue
+            if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+                target_email=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+                [ -n "$target_email" ] && break
+            fi
+        done
+        if [ -z "$target_email" ] && [ -f "$HESTIA/conf/hestia.conf" ]; then
+            target_email=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
+        fi
         if [ -z "$target_email" ]; then
             echo -e " ${RED}[FAIL] Could not auto-detect admin email for reporting.${NC}"
             return 1
@@ -374,15 +386,18 @@ send_email_report() {
 </body>
 </html>"
 
-    local temp_html="/tmp/security_audit_email_$$.html"
+    local temp_html
+    temp_html=$(mktemp /tmp/security_audit_email.XXXXXX)
+    chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     
-    local HESTIA="/usr/local/hestia"
     local SENDMAIL="$HESTIA/web/inc/mail-wrapper.php"
     
     # Try using PHPMailer from HestiaCP directly to ensure DKIM/formatting is perfect
     if [ -f "$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php" ]; then
-        local temp_php="/tmp/send_sec_audit_email_$$.php"
+        local temp_php
+        temp_php=$(mktemp /tmp/send_sec_audit_email.XXXXXX)
+        chmod 600 "$temp_php"
         cat > "$temp_php" << 'EOFPHP'
 <?php
 $hestia = getenv('HESTIA') ?: '/usr/local/hestia';

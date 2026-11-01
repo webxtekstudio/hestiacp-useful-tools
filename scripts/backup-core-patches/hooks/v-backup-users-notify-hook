@@ -43,13 +43,23 @@ upload_global_log_to_b2() {
     local b2_month
     local b2_log_name
     local b2_log_path
+    local attempt
     b2_year=$(date +%Y)
-    b2_month=$(date +%m_%B | tr '[:lower:]' '[:upper:]')
+    b2_month=$(LC_TIME=C date +%m_%B | tr '[:lower:]' '[:upper:]')
     b2_log_name="backup-users-$(date +%Y-%m-%d_%H-%M-%S).log"
     b2_log_path="${b2_year}/${b2_month}/${b2_log_name}"
 
     echo "$(date +"%Y-%m-%d %H:%M:%S") Upload global backup log to B2: ${b2_log_path}" >> "$LOG_FILE"
-    b2 upload-file "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1 || true
+    for attempt in 1 2 3; do
+        if b2 upload-file --no-progress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1; then
+            break
+        fi
+        [ "$attempt" -lt 3 ] && {
+            sleep 5
+            b2 clear-account >/dev/null 2>&1 || true
+            b2 authorize-account "$B2_KEYID" "$B2_KEY" >/dev/null 2>&1 || true
+        }
+    done
 }
 
 TOTAL_SIZE=0
