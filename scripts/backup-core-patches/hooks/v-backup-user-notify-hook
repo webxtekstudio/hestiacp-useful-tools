@@ -2,9 +2,19 @@
 # HestiaCP Backup User Notification Hook
 # Replaces standard plaintext email with beautiful HTML format + inline logs
 
-USER="$1"
-SUBJ="${2:-Backup Completed}"
-ADMIN_EMAIL="$3"
+html_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    s="${s//\"/&quot;}"
+    s="${s//\'/&#39;}"
+    printf '%s' "$s"
+}
+
+USER=$(printf '%s' "$1" | tr -cd 'a-zA-Z0-9._-')
+SUBJ=$(printf '%s' "${2:-Backup Completed}" | tr -d '\r\n')
+ADMIN_EMAIL=$(printf '%s' "$3" | tr -d '\r\n')
 NOTIFY="$4"
 LOG_FILE="$5"
 
@@ -12,10 +22,13 @@ LOG_FILE="$5"
 [ "$NOTIFY" != "yes" ] && exit 0
 [ ! -f "$LOG_FILE" ] && exit 0
 
-HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+RAW_HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+RAW_HOSTNAME=$(printf '%s' "$RAW_HOSTNAME" | tr -d '\r\n')
+HOSTNAME=$(html_escape "$RAW_HOSTNAME")
+SUBJ_HTML=$(html_escape "$SUBJ")
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-MAIL_FROM="${MAIL_FROM:-root@$HOSTNAME}"
-MAIL_FROM_NAME="${MAIL_FROM_NAME:-HestiaCP Backup}"
+MAIL_FROM=$(printf '%s' "${MAIL_FROM:-root@$RAW_HOSTNAME}" | tr -d '\r\n')
+MAIL_FROM_NAME=$(printf '%s' "${MAIL_FROM_NAME:-HestiaCP Backup}" | tr -d '\r\n')
 
 # Check for errors in the log
 if grep -qE "Error:|Failed|failed|command not found" "$LOG_FILE"; then
@@ -41,22 +54,26 @@ fi
 if [ "$RUNTIME" = "Unknown" ]; then
     RUNTIME=$(grep -i "Runtime:" "$LOG_FILE" | awk '{print $4, $5}')
 fi
+SIZE=$(html_escape "$SIZE")
+RUNTIME=$(html_escape "$RUNTIME")
 
-# Build Multipart MIME Email
-BOUNDARY="--==_boundary_$(date +%Y%m%d%H%M%S)_==--"
-TEMP_MAIL="/tmp/backup_notify_$$.eml"
+# Build Multipart MIME Email safely via mktemp (0600)
+BOUNDARY="--==_boundary_$(date +%Y%m%d%H%M%S)_$$==--"
+TEMP_MAIL=$(mktemp /tmp/backup_notify.XXXXXX) || exit 1
+chmod 600 "$TEMP_MAIL"
+trap 'rm -f "$TEMP_MAIL" 2>/dev/null' EXIT INT TERM
 
 # HTML Template without the inline log block
 HTML_BODY="<!DOCTYPE html>
 <html lang=\"en\">
 <head>
 <meta charset=\"UTF-8\">
-<title>$SUBJ</title>
+<title>${SUBJ_HTML}</title>
 </head>
 <body style=\"font-family:Arial,sans-serif; background:#222222; margin:0; padding:20px; color:#E0E0E0;\">
 <div style=\"max-width:800px; margin:0 auto; background:#3A3A3A; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.5); overflow:hidden; border:1px solid #555;\">
   <div style=\"background:${STATUS_COLOR}; color:#fff; padding:16px; text-align:center; border-bottom:2px solid rgba(255,255,255,.1);\">
-    <h1 style=\"margin:0; font-size:18px; font-weight:bold;\">$SUBJ</h1>
+    <h1 style=\"margin:0; font-size:18px; font-weight:bold;\">${SUBJ_HTML}</h1>
     <p style=\"margin:4px 0 0 0; font-size:12px; opacity:0.9;\">${HOSTNAME}</p>
   </div>
   

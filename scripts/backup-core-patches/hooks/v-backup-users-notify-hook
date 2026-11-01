@@ -5,24 +5,48 @@
 HESTIA="/usr/local/hestia"
 source $HESTIA/conf/hestia.conf 2>/dev/null
 
-# Detect admin email: scan user configs for ROLE='admin', fallback to hestia.conf
+html_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    s="${s//\"/&quot;}"
+    s="${s//\'/&#39;}"
+    printf '%s' "$s"
+}
+
+# Detect admin email: prefer active non-suspended ROLE='admin', fallback to hestia.conf
 ADMIN_EMAIL=""
 for user_conf in "$HESTIA/data/users"/*/user.conf; do
     [ -f "$user_conf" ] || continue
-    if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+    if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null && ! grep -q "^SUSPENDED='yes'" "$user_conf" 2>/dev/null; then
         ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
         [ -n "$ADMIN_EMAIL" ] && break
     fi
 done
 if [ -z "$ADMIN_EMAIL" ]; then
+    for user_conf in "$HESTIA/data/users"/*/user.conf; do
+        [ -f "$user_conf" ] || continue
+        if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null; then
+            ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+            [ -n "$ADMIN_EMAIL" ] && break
+        fi
+    done
+fi
+if [ -z "$ADMIN_EMAIL" ]; then
     ADMIN_EMAIL=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
 fi
+ADMIN_EMAIL=$(printf '%s' "$ADMIN_EMAIL" | tr -d '\r\n')
 
-HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+RAW_HOSTNAME=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+RAW_HOSTNAME=$(printf '%s' "$RAW_HOSTNAME" | tr -d '\r\n')
+HOSTNAME=$(html_escape "$RAW_HOSTNAME")
 TODAY=$(date +"%Y-%m-%d")
+YESTERDAY=$(date -d "yesterday" +"%Y-%m-%d" 2>/dev/null || echo "$TODAY")
+REPORT_DATE="$TODAY"
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-MAIL_FROM="${MAIL_FROM:-root@$HOSTNAME}"
-MAIL_FROM_NAME="${MAIL_FROM_NAME:-HestiaCP Backup}"
+MAIL_FROM=$(printf '%s' "${MAIL_FROM:-root@$RAW_HOSTNAME}" | tr -d '\r\n')
+MAIL_FROM_NAME=$(printf '%s' "${MAIL_FROM_NAME:-HestiaCP Backup}" | tr -d '\r\n')
 LOG_FILE="/usr/local/hestia/log/backup.log"
 
 upload_global_log_to_b2() {
@@ -36,9 +60,6 @@ upload_global_log_to_b2() {
     [ -n "$B2_KEYID" ] || return 0
     [ -n "$B2_KEY" ] || return 0
 
-    b2 clear-account >/dev/null 2>&1 || true
-    b2 authorize-account "$B2_KEYID" "$B2_KEY" >/dev/null 2>&1 || return 0
-
     local b2_year
     local b2_month
     local b2_log_name
@@ -51,71 +72,76 @@ upload_global_log_to_b2() {
 
     echo "$(date +"%Y-%m-%d %H:%M:%S") Upload global backup log to B2: ${b2_log_path}" >> "$LOG_FILE"
     for attempt in 1 2 3; do
-        if b2 upload-file --no-progress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1; then
+        if B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file upload --no-progress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1 || \
+           B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 upload-file --noProgress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1; then
             break
         fi
-        [ "$attempt" -lt 3 ] && {
-            sleep 5
-            b2 clear-account >/dev/null 2>&1 || true
-            b2 authorize-account "$B2_KEYID" "$B2_KEY" >/dev/null 2>&1 || true
-        }
+        [ "$attempt" -lt 3 ] && sleep 5
     done
 }
 
-TOTAL_SIZE=0
-TOTAL_TIME=0
-BACKUP_ROWS=""
-SUCCESS_COUNT=0
-FAIL_COUNT=0
+collect_backups_for_date() {
+    local target_date="$1"
+    TOTAL_SIZE=0
+    TOTAL_TIME=0
+    BACKUP_ROWS=""
+    SUCCESS_COUNT=0
+    FAIL_COUNT=0
 
-# Iterate through all users to find today's backups
-for USER_DIR in $HESTIA/data/users/*; do
-    [ ! -d "$USER_DIR" ] && continue
-    USER=$(basename "$USER_DIR")
-    CONF="$USER_DIR/backup.conf"
-    
-    [ ! -f "$CONF" ] && continue
+    for USER_DIR in "$HESTIA/data/users"/*; do
+        [ ! -d "$USER_DIR" ] && continue
+        USER=$(basename "$USER_DIR")
+        USER_HTML=$(html_escape "$USER")
+        CONF="$USER_DIR/backup.conf"
+        [ ! -f "$CONF" ] && continue
 
-    # Parse today's backup for this user if it exists
-    LATEST=$(grep "DATE='$TODAY'" "$CONF" | tail -n 1)
-    if [ -n "$LATEST" ]; then
-        # Parse fields securely
-        B_TYPE=$(echo "$LATEST" | grep -o "TYPE='[^']*'" | cut -d"'" -f2)
-        B_SIZE=$(echo "$LATEST" | grep -o "SIZE='[^']*'" | cut -d"'" -f2)
-        B_TIME=$(echo "$LATEST" | grep -o "RUNTIME='[^']*'" | cut -d"'" -f2)
-        
-        TOTAL_SIZE=$((TOTAL_SIZE + B_SIZE))
-        TOTAL_TIME=$((TOTAL_TIME + B_TIME))
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        
-        BACKUP_ROWS="${BACKUP_ROWS}<tr>
-            <td style=\"padding:8px 12px; border-bottom:1px solid #555;\"><span style=\"color:#E0E0E0;\">$USER</span></td>
-            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#4CAF50; font-weight:bold;\">SUCCESS</span></td>
-            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#E0E0E0;\">$B_TYPE</span></td>
-            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#E0E0E0;\">${B_SIZE} MB</span></td>
-            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#A0A0A0;\">${B_TIME} min</span></td>
-        </tr>"
+        LATEST=$(grep "DATE='$target_date'" "$CONF" | tail -n 1)
+        if [ -n "$LATEST" ]; then
+            B_TYPE=$(echo "$LATEST" | grep -o "TYPE='[^']*'" | cut -d"'" -f2)
+            B_SIZE=$(echo "$LATEST" | grep -o "SIZE='[^']*'" | cut -d"'" -f2)
+            B_TIME=$(echo "$LATEST" | grep -o "RUNTIME='[^']*'" | cut -d"'" -f2)
+            [[ "$B_SIZE" =~ ^[0-9]+$ ]] || B_SIZE=0
+            [[ "$B_TIME" =~ ^[0-9]+$ ]] || B_TIME=0
+            B_TYPE_HTML=$(html_escape "$B_TYPE")
 
-    else
-        # Did it fail today? Check the log
-        if [ -f "/backup/$USER.log" ]; then
-            # Just verify if log was modified today
-            LOG_DATE=$(stat -c %y "/backup/$USER.log" 2>/dev/null | cut -d' ' -f1)
-            if [ "$LOG_DATE" = "$TODAY" ]; then
-                if grep -qiE "error|fail" "/backup/$USER.log"; then
-                    FAIL_COUNT=$((FAIL_COUNT + 1))
-                    BACKUP_ROWS="${BACKUP_ROWS}<tr>
-                        <td style=\"padding:8px 12px; border-bottom:1px solid #555;\"><span style=\"color:#E0E0E0;\">$USER</span></td>
-                        <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#F44336; font-weight:bold;\">FAILED</span></td>
-                        <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#F44336;\">-</span></td>
-                        <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#F44336;\">-</span></td>
-                        <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#F44336;\">Check Log</span></td>
-                    </tr>"
+            TOTAL_SIZE=$((TOTAL_SIZE + B_SIZE))
+            TOTAL_TIME=$((TOTAL_TIME + B_TIME))
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+
+            BACKUP_ROWS="${BACKUP_ROWS}<tr>
+                <td style=\"padding:8px 12px; border-bottom:1px solid #555;\"><span style=\"color:#E0E0E0;\">${USER_HTML}</span></td>
+                <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#4CAF50; font-weight:bold;\">SUCCESS</span></td>
+                <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#E0E0E0;\">${B_TYPE_HTML}</span></td>
+                <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#E0E0E0;\">${B_SIZE} MB</span></td>
+                <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#A0A0A0;\">${B_TIME} min</span></td>
+            </tr>"
+        else
+            if [ -f "/backup/$USER.log" ]; then
+                LOG_DATE=$(stat -c %y "/backup/$USER.log" 2>/dev/null | cut -d' ' -f1)
+                if [ "$LOG_DATE" = "$target_date" ]; then
+                    if grep -qiE "error|fail" "/backup/$USER.log"; then
+                        FAIL_COUNT=$((FAIL_COUNT + 1))
+                        BACKUP_ROWS="${BACKUP_ROWS}<tr>
+                            <td style=\"padding:8px 12px; border-bottom:1px solid #555;\"><span style=\"color:#E0E0E0;\">${USER_HTML}</span></td>
+                            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#F44336; font-weight:bold;\">FAILED</span></td>
+                            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:center;\"><span style=\"color:#F44336;\">-</span></td>
+                            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#F44336;\">-</span></td>
+                            <td style=\"padding:8px 12px; border-bottom:1px solid #555; text-align:right;\"><span style=\"color:#F44336;\">Check Log</span></td>
+                        </tr>"
+                    fi
                 fi
             fi
         fi
-    fi
-done
+    done
+}
+
+collect_backups_for_date "$TODAY"
+if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$FAIL_COUNT" -eq 0 ] && [ "$YESTERDAY" != "$TODAY" ]; then
+    collect_backups_for_date "$YESTERDAY"
+    [ $((SUCCESS_COUNT + FAIL_COUNT)) -gt 0 ] && REPORT_DATE="$YESTERDAY"
+fi
+
+upload_global_log_to_b2
 
 [ "$SUCCESS_COUNT" -eq 0 ] && [ "$FAIL_COUNT" -eq 0 ] && exit 0
 
@@ -136,7 +162,7 @@ HTML_BODY="<!DOCTYPE html>
 <body style=\"font-family:Arial,sans-serif; background:#222222; margin:0; padding:20px; color:#E0E0E0;\">
 <div style=\"max-width:800px; margin:0 auto; background:#3A3A3A; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.5); overflow:hidden; border:1px solid #555;\">
   <div style=\"background:${GLOBAL_COLOR}; color:#fff; padding:16px; text-align:center; border-bottom:2px solid rgba(255,255,255,.1);\">
-    <h1 style=\"margin:0; font-size:18px; font-weight:bold;\">Global Backup Report ($TODAY)</h1>
+    <h1 style=\"margin:0; font-size:18px; font-weight:bold;\">Global Backup Report ($REPORT_DATE)</h1>
     <p style=\"margin:4px 0 0 0; font-size:12px; opacity:0.9;\">${HOSTNAME}</p>
   </div>
   
@@ -181,14 +207,14 @@ HTML_BODY="<!DOCTYPE html>
 </body>
 </html>"
 
-upload_global_log_to_b2
-
 [ -z "$ADMIN_EMAIL" ] && exit 0
 
-BOUNDARY="--==_boundary_$(date +%Y%m%d%H%M%S)_==--"
-TEMP_MAIL="/tmp/backup_global_notify_$$.eml"
+BOUNDARY="--==_boundary_$(date +%Y%m%d%H%M%S)_$$==--"
+TEMP_MAIL=$(mktemp /tmp/backup_global_notify.XXXXXX) || exit 1
+chmod 600 "$TEMP_MAIL"
+trap 'rm -f "$TEMP_MAIL" 2>/dev/null' EXIT INT TERM
 
-SUBJ="Global Backup Report - $HOSTNAME - $GLOBAL_STATUS"
+SUBJ="Global Backup Report - $RAW_HOSTNAME - $GLOBAL_STATUS"
 
 # Construct raw email with attachment
 (

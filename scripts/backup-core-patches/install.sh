@@ -48,9 +48,10 @@ ln -sf "$SCRIPT_DIR/hooks/v-backup-users-retention-hook" "$HESTIA_BIN/v-backup-u
 chmod +x "$SCRIPT_DIR/hooks/v-backup-users-retention-hook"
 if [ ! -f "$RETENTION_CONF" ]; then
     cp "$SCRIPT_DIR/config/backup-retention.conf.sample" "$RETENTION_CONF"
-    chmod 644 "$RETENTION_CONF"
+    chmod 600 "$RETENTION_CONF"
     echo "  -> Installed optional retention config: $RETENTION_CONF"
 else
+    chmod 600 "$RETENTION_CONF" 2>/dev/null || true
     echo "  -> Retention config already exists (skipped): $RETENTION_CONF"
 fi
 echo "  -> Installed optional native retention hook: v-prune-backups"

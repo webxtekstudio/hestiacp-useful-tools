@@ -111,11 +111,20 @@ if [ -n "$ADMIN_EMAIL_OVERRIDE" ]; then
 else
     for user_conf in "$HESTIA/data/users"/*/user.conf; do
         [ -f "$user_conf" ] || continue
-        if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+        if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null && ! grep -q "^SUSPENDED='yes'" "$user_conf" 2>/dev/null; then
             ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
-            break
+            [ -n "$ADMIN_EMAIL" ] && break
         fi
     done
+    if [ -z "$ADMIN_EMAIL" ]; then
+        for user_conf in "$HESTIA/data/users"/*/user.conf; do
+            [ -f "$user_conf" ] || continue
+            if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null; then
+                ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+                [ -n "$ADMIN_EMAIL" ] && break
+            fi
+        done
+    fi
 fi
 
 if [ -z "$ADMIN_EMAIL" ]; then
@@ -420,10 +429,11 @@ if [ "$CLEAN_OLD_KERNELS" = "TRUE" ] || [ "$CLEAN_OLD_KERNELS" = "true" ]; then
 fi
 
 if [ "$CLEAN_PHP_SESSIONS" = "TRUE" ] || [ "$CLEAN_PHP_SESSIONS" = "true" ]; then
+    [[ "$PHP_SESSIONS_RETENTION_DAYS" =~ ^[0-9]+$ ]] || PHP_SESSIONS_RETENTION_DAYS=1
     echo -n "[$(date)] : PHP sessions (>${PHP_SESSIONS_RETENTION_DAYS}d)... "
     sess_cleaned_kb=0
     sess_deleted_count=0
-    if [ -d "/var/lib/php/sessions" ]; then
+    if [ -d "/var/lib/php/sessions" ] && [ ! -L "/var/lib/php/sessions" ]; then
         before_kb=$(measure_cleanup "/var/lib/php/sessions")
         c=$(find /var/lib/php/sessions -maxdepth 1 -type f -mtime +${PHP_SESSIONS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
         after_kb=$(measure_cleanup "/var/lib/php/sessions")
@@ -437,7 +447,7 @@ if [ "$CLEAN_PHP_SESSIONS" = "TRUE" ] || [ "$CLEAN_PHP_SESSIONS" = "true" ]; the
         u_name=$(basename "$u_dir")
         id "$u_name" >/dev/null 2>&1 || continue
         u_home=$(getent passwd "$u_name" | cut -d: -f6)
-        [ -n "$u_home" ] && [ -d "$u_home/tmp" ] && [ ! -L "$u_home/tmp" ] || continue
+        [ -n "$u_home" ] && [ ! -L "$u_home" ] && [ -d "$u_home/tmp" ] && [ ! -L "$u_home/tmp" ] || continue
         before_kb=$(measure_cleanup "$u_home/tmp")
         c=$(runuser -u "$u_name" -- find "$u_home/tmp" -maxdepth 1 -type f -name 'sess_*' -mtime +${PHP_SESSIONS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
         after_kb=$(measure_cleanup "$u_home/tmp")
@@ -456,32 +466,148 @@ if [ "$CLEAN_PHP_SESSIONS" = "TRUE" ] || [ "$CLEAN_PHP_SESSIONS" = "true" ]; the
 fi
 
 if [ "$CLEAN_SSL_TMP" = "TRUE" ] || [ "$CLEAN_SSL_TMP" = "true" ]; then
+    [[ "$SSL_TMP_RETENTION_DAYS" =~ ^[0-9]+$ ]] || SSL_TMP_RETENTION_DAYS=7
     echo -n "[$(date)] : Expired SSL temp dirs (>${SSL_TMP_RETENTION_DAYS}d)... "
     ssl_tmp_count=0
     ssl_tmp_kb=0
-    for u_dir in "$HESTIA/data/users"/*; do
-        [ -d "$u_dir" ] || continue
-        u_name=$(basename "$u_dir")
-        u_home=$(getent passwd "$u_name" | cut -d: -f6)
-        [ -n "$u_home" ] && [ -d "$u_home/web" ] || continue
-        for priv_dir in "$u_home/web"/*/private; do
-            [ -d "$priv_dir" ] && [ ! -L "$priv_dir" ] || continue
-            for ssl_td in "$priv_dir"/tmp.??????????; do
-                [ -d "$ssl_td" ] && [ ! -L "$ssl_td" ] || continue
-                td_base=$(basename "$ssl_td")
-                [[ "$td_base" =~ ^tmp\.[A-Za-z0-9]{10}$ ]] || continue
-                [ -n "$(find "$ssl_td" -maxdepth 0 -mtime +${SSL_TMP_RETENTION_DAYS} 2>/dev/null)" ] || continue
-                # Only remove flat mktemp certificate staging directories (never nested project trees)
-                if ! find "$ssl_td" -mindepth 2 -print -quit 2>/dev/null | grep -q .; then
-                    td_kb=$(measure_cleanup "$ssl_td")
-                    if rm -rf "$ssl_td" 2>/dev/null; then
-                        ssl_tmp_count=$((ssl_tmp_count + 1))
-                        ssl_tmp_kb=$((ssl_tmp_kb + td_kb))
-                    fi
-                fi
-            done
-        done
-    done
+    if command -v python3 >/dev/null 2>&1 && [ -d "$HESTIA/data/users" ]; then
+        read -r ssl_tmp_count ssl_tmp_kb < <(
+            python3 - "$HESTIA/data/users" "$SSL_TMP_RETENTION_DAYS" << 'PYEOF' 2>/dev/null || echo "0 0"
+import os
+import pwd
+import re
+import stat
+import sys
+import time
+
+users_dir = sys.argv[1]
+retention_days = int(sys.argv[2])
+cutoff_age = retention_days * 86400
+now = time.time()
+tmp_re = re.compile(r"^tmp\.[A-Za-z0-9]{10}$")
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+deleted_dirs = 0
+freed_bytes = 0
+
+try:
+    user_names = sorted(os.listdir(users_dir))
+except OSError:
+    print("0 0")
+    sys.exit(0)
+
+for u_name in user_names:
+    u_meta = os.path.join(users_dir, u_name)
+    if not os.path.isdir(u_meta) or os.path.islink(u_meta):
+        continue
+    try:
+        u_home = pwd.getpwnam(u_name).pw_dir
+    except KeyError:
+        continue
+    if not u_home or not u_home.startswith("/"):
+        continue
+
+    try:
+        home_fd = os.open(u_home, DIR_FLAGS)
+    except OSError:
+        continue
+    try:
+        try:
+            web_fd = os.open("web", DIR_FLAGS, dir_fd=home_fd)
+        except OSError:
+            continue
+        try:
+            with os.scandir(web_fd) as dom_it:
+                for dom_entry in dom_it:
+                    if not dom_entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        dom_fd = os.open(dom_entry.name, DIR_FLAGS, dir_fd=web_fd)
+                    except OSError:
+                        continue
+                    try:
+                        try:
+                            priv_fd = os.open("private", DIR_FLAGS, dir_fd=dom_fd)
+                        except OSError:
+                            continue
+                        try:
+                            with os.scandir(priv_fd) as priv_it:
+                                for cand in priv_it:
+                                    if not tmp_re.match(cand.name):
+                                        continue
+                                    try:
+                                        cst = cand.stat(follow_symlinks=False)
+                                    except OSError:
+                                        continue
+                                    if not stat.S_ISDIR(cst.st_mode):
+                                        continue
+                                    # Require root-owned mktemp dir (0700) and both mtime + unforgeable ctime expired
+                                    if cst.st_uid != 0 or (cst.st_mode & 0o7777) != 0o700:
+                                        continue
+                                    if (now - cst.st_mtime) <= cutoff_age or (now - cst.st_ctime) <= cutoff_age:
+                                        continue
+                                    try:
+                                        td_fd = os.open(cand.name, DIR_FLAGS, dir_fd=priv_fd)
+                                    except OSError:
+                                        continue
+                                    try:
+                                        fst = os.fstat(td_fd)
+                                        if (fst.st_dev, fst.st_ino) != (cst.st_dev, cst.st_ino):
+                                            continue
+                                        if fst.st_uid != 0 or (fst.st_mode & 0o7777) != 0o700:
+                                            continue
+                                        children = []
+                                        total_sz = 0
+                                        safe_flat = True
+                                        with os.scandir(td_fd) as td_it:
+                                            for ch in td_it:
+                                                try:
+                                                    chst = ch.stat(follow_symlinks=False)
+                                                except OSError:
+                                                    safe_flat = False
+                                                    break
+                                                if not stat.S_ISREG(chst.st_mode) or chst.st_nlink != 1:
+                                                    safe_flat = False
+                                                    break
+                                                total_sz += chst.st_size
+                                                children.append(ch.name)
+                                                if len(children) > 16 or total_sz > 5 * 1024 * 1024:
+                                                    safe_flat = False
+                                                    break
+                                        if not safe_flat:
+                                            continue
+                                        ok_unlink = True
+                                        for ch_name in children:
+                                            try:
+                                                os.unlink(ch_name, dir_fd=td_fd)
+                                            except OSError:
+                                                ok_unlink = False
+                                                break
+                                        if ok_unlink:
+                                            try:
+                                                os.rmdir(cand.name, dir_fd=priv_fd)
+                                                deleted_dirs += 1
+                                                freed_bytes += max(total_sz, 4096)
+                                            except OSError:
+                                                pass
+                                    finally:
+                                        os.close(td_fd)
+                        finally:
+                            os.close(priv_fd)
+                    finally:
+                        os.close(dom_fd)
+        finally:
+            os.close(web_fd)
+    finally:
+        os.close(home_fd)
+
+freed_kb = (freed_bytes + 1023) // 1024 if freed_bytes > 0 else 0
+print(f"{deleted_dirs} {freed_kb}")
+PYEOF
+        )
+        ssl_tmp_count=${ssl_tmp_count:-0}
+        ssl_tmp_kb=${ssl_tmp_kb:-0}
+    fi
     if [ "$ssl_tmp_kb" -gt 0 ]; then
         add_cleaned_space "$ssl_tmp_kb"
         cleaned_formatted=$(convert_space $ssl_tmp_kb)
@@ -493,19 +619,21 @@ if [ "$CLEAN_SSL_TMP" = "TRUE" ] || [ "$CLEAN_SSL_TMP" = "true" ]; then
 fi
 
 if [ "$CLEAN_ORPHAN_BACKUP_TMP" = "TRUE" ] || [ "$CLEAN_ORPHAN_BACKUP_TMP" = "true" ]; then
+    [[ "$ORPHAN_BACKUP_TMP_DAYS" =~ ^[0-9]+$ ]] || ORPHAN_BACKUP_TMP_DAYS=2
     echo -n "[$(date)] : Orphaned /backup/tmp.* dirs (>${ORPHAN_BACKUP_TMP_DAYS}d)... "
-    if pgrep -f '/usr/local/hestia/bin/v-backup-user' >/dev/null 2>&1; then
-        echo "SKIP (backup currently running)"
+    if pgrep -f '(^|/)(v-backup-user|v-backup-users|v-restore-user)([[:space:]]|$)' >/dev/null 2>&1; then
+        echo "SKIP (backup/restore currently running)"
         TASKS_SKIPPED+=("Orphaned backup temp dirs")
     else
         bkp_tmp_count=0
         bkp_tmp_kb=0
-        if [ -d "/backup" ] && [ ! -L "/backup" ]; then
+        if [ -d "/backup" ] && [ ! -L "/backup" ] && [ "$(stat -c '%u' /backup 2>/dev/null)" = "0" ]; then
             for b_td in /backup/tmp.??????????; do
                 [ -d "$b_td" ] && [ ! -L "$b_td" ] || continue
+                [ "$(stat -c '%u' "$b_td" 2>/dev/null)" = "0" ] || continue
                 td_base=$(basename "$b_td")
                 [[ "$td_base" =~ ^tmp\.[A-Za-z0-9]{10}$ ]] || continue
-                [ -n "$(find "$b_td" -maxdepth 0 -mtime +${ORPHAN_BACKUP_TMP_DAYS} 2>/dev/null)" ] || continue
+                [ -n "$(find "$b_td" -maxdepth 0 -mtime +${ORPHAN_BACKUP_TMP_DAYS} -ctime +${ORPHAN_BACKUP_TMP_DAYS} 2>/dev/null)" ] || continue
                 td_kb=$(measure_cleanup "$b_td")
                 if rm -rf "$b_td" 2>/dev/null; then
                     bkp_tmp_count=$((bkp_tmp_count + 1))
@@ -530,7 +658,22 @@ if [ "$CLEAN_HST_BACKUPS" = "TRUE" ] || [ "$CLEAN_HST_BACKUPS" = "true" ]; then
     hst_del_count=0
     hst_del_kb=0
     if [ -d "/root/hst_backups" ] && [ ! -L "/root/hst_backups" ] && [[ "$keep_hst" =~ ^[0-9]+$ ]]; then
-        mapfile -t hst_dirs < <(find /root/hst_backups -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' 2>/dev/null | sort -r)
+        # HestiaCP names /root/hst_backups snapshots DDMMYYYYHHMM ($(date +%d%m%Y%H%M)).
+        # Normalize DDMMYYYYHHMM -> YYYYMMDDHHMM before descending sort so newest snapshots are kept.
+        mapfile -t hst_dirs < <(
+            for d in /root/hst_backups/[0-9]*; do
+                [ -d "$d" ] && [ ! -L "$d" ] || continue
+                bn=$(basename "$d")
+                if [[ "$bn" =~ ^(0[1-9]|[12][0-9]|3[01])(0[1-9]|1[0-2])(20[0-9]{2})([0-9]{4})$ ]]; then
+                    skey="${BASH_REMATCH[3]}${BASH_REMATCH[2]}${BASH_REMATCH[1]}${BASH_REMATCH[4]}"
+                elif [[ "$bn" =~ ^(20[0-9]{2})(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])([0-9]{4,6})$ ]]; then
+                    skey="$bn"
+                else
+                    skey=$(date -d "@$(stat -c '%Y' "$d" 2>/dev/null || echo 0)" +%Y%m%d%H%M 2>/dev/null || echo "000000000000")
+                fi
+                printf '%s|%s\n' "$skey" "$d"
+            done | sort -t'|' -k1,1r | cut -d'|' -f2-
+        )
         if [ "${#hst_dirs[@]}" -gt "$keep_hst" ]; then
             for (( i=keep_hst; i<${#hst_dirs[@]}; i++ )); do
                 old_hst="${hst_dirs[$i]}"
@@ -897,22 +1040,37 @@ else
     log_event "$E_UPDATE" "System Cleanup Completed with Failures - Cleaned: $cleaned_space_formatted"
 fi
 
+html_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    s="${s//\"/&quot;}"
+    s="${s//\'/&#39;}"
+    printf '%s' "$s"
+}
+
 send_html_email() {
     local status="$1"
     local admin_email="$2"
     [ -z "$admin_email" ] && return 1
+    admin_email=$(printf '%s' "$admin_email" | tr -d '\r\n')
     
-    local hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+    local raw_hostname
+    raw_hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+    raw_hostname=$(printf '%s' "$raw_hostname" | tr -d '\r\n')
+    local hostname
+    hostname=$(html_escape "$raw_hostname")
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
     
     local email_cleaned_formatted=$(convert_space $TOTAL_CLEANED_KB)
     
     if [ "$status" = "SUCCESS" ]; then
-        local subject="Clean Garbage Report - $hostname - SUCCESS"
+        local subject="Clean Garbage Report - $raw_hostname - SUCCESS"
         local status_color="#4CAF50"
         local status_text="[OK] SUCCESS"
     else
-        local subject="Clean Garbage Report - $hostname - FAILED"
+        local subject="Clean Garbage Report - $raw_hostname - FAILED"
         local status_color="#F44336"
         local status_text="[FAIL] CONTAINS ERRORS"
     fi
@@ -922,20 +1080,24 @@ send_html_email() {
     local skipped_count=${#TASKS_SKIPPED[@]}
     
     local success_list=""
+    local escaped_task
     for task in "${TASKS_SUCCESS[@]}"; do
-        success_list="${success_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#4CAF50; font-weight:bold;\">[OK]</span> <span style=\"color:#E0E0E0;\">$task</span></td></tr>"
+        escaped_task=$(html_escape "$task")
+        success_list="${success_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#4CAF50; font-weight:bold;\">[OK]</span> <span style=\"color:#E0E0E0;\">${escaped_task}</span></td></tr>"
     done
     [ -z "$success_list" ] && success_list="<tr><td style=\"padding:6px 12px; color:#A0A0A0;\">None</td></tr>"
     
     local failed_list=""
     for task in "${TASKS_FAILED[@]}"; do
-        failed_list="${failed_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#F44336; font-weight:bold;\">[FAIL]</span> <span style=\"color:#E0E0E0;\">$task</span></td></tr>"
+        escaped_task=$(html_escape "$task")
+        failed_list="${failed_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#F44336; font-weight:bold;\">[FAIL]</span> <span style=\"color:#E0E0E0;\">${escaped_task}</span></td></tr>"
     done
     [ -z "$failed_list" ] && failed_list="<tr><td style=\"padding:6px 12px; color:#A0A0A0;\">None</td></tr>"
     
     local skipped_list=""
     for task in "${TASKS_SKIPPED[@]}"; do
-        skipped_list="${skipped_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#FF9800; font-weight:bold;\">[SKIP]</span> <span style=\"color:#E0E0E0;\">$task</span></td></tr>"
+        escaped_task=$(html_escape "$task")
+        skipped_list="${skipped_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#FF9800; font-weight:bold;\">[SKIP]</span> <span style=\"color:#E0E0E0;\">${escaped_task}</span></td></tr>"
     done
     [ -z "$skipped_list" ] && skipped_list="<tr><td style=\"padding:6px 12px; color:#A0A0A0;\">None</td></tr>"
     
@@ -1016,7 +1178,7 @@ send_html_email() {
 </html>"
 
     local temp_html
-    temp_html=$(mktemp /tmp/garbage_email.XXXXXX)
+    temp_html=$(mktemp /tmp/garbage_email.XXXXXX) || return 1
     chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     
@@ -1024,13 +1186,13 @@ send_html_email() {
     [ ! -f "$SENDMAIL" ] && SENDMAIL="/usr/local/hestia/web/inc/mail-wrapper.php"
     
     if [ -f "$SENDMAIL" ]; then
-        cat "$temp_html" | $SENDMAIL -s "$subject" "$admin_email" "yes" 2>/dev/null
+        cat "$temp_html" | "$SENDMAIL" -s "$subject" "$admin_email" "yes" 2>/dev/null
     else
-(
+        (
             echo "Subject: $subject"
-    echo "MIME-Version: 1.0"
+            echo "MIME-Version: 1.0"
             echo "Content-Type: text/html; charset=UTF-8"
-    echo
+            echo
             cat "$temp_html"
         ) | /usr/sbin/sendmail "$admin_email" 2>/dev/null
     fi

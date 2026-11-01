@@ -290,11 +290,20 @@ send_email_report() {
         local user_conf
         for user_conf in "$HESTIA/data/users"/*/user.conf; do
             [ -f "$user_conf" ] || continue
-            if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+            if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null && ! grep -q "^SUSPENDED='yes'" "$user_conf" 2>/dev/null; then
                 target_email=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
                 [ -n "$target_email" ] && break
             fi
         done
+        if [ -z "$target_email" ]; then
+            for user_conf in "$HESTIA/data/users"/*/user.conf; do
+                [ -f "$user_conf" ] || continue
+                if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null; then
+                    target_email=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+                    [ -n "$target_email" ] && break
+                fi
+            done
+        fi
         if [ -z "$target_email" ] && [ -f "$HESTIA/conf/hestia.conf" ]; then
             target_email=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
         fi
@@ -303,9 +312,14 @@ send_email_report() {
             return 1
         fi
     fi
+    target_email=$(printf '%s' "$target_email" | tr -d '\r\n')
 
-    local hostname=$(hostname -f 2>/dev/null || echo "Server")
-    local subject="HestiaCP Security Audit - ${SCORE}/100 - $hostname"
+    local raw_hostname
+    raw_hostname=$(hostname -f 2>/dev/null || echo "Server")
+    raw_hostname=$(printf '%s' "$raw_hostname" | tr -d '\r\n')
+    local hostname
+    hostname=$(html_escape "$raw_hostname")
+    local subject="HestiaCP Security Audit - ${SCORE}/100 - $raw_hostname"
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
     local status_color="#4CAF50"
@@ -314,6 +328,7 @@ send_email_report() {
     [ "$grade" = "E" ] || [ "$grade" = "F" ] && status_color="#F44336"
 
     local modules_list=""
+    local esc_sec esc_msg esc_sev
     for row in "${RAW_RESULTS[@]}"; do
         IFS=$'\t' read -r r_id r_sec r_sev r_msg r_pts <<< "$row"
         if [ "$r_sev" = "CRITICAL" ] || [ "$r_sev" = "FAIL" ] || [ "$r_sev" = "WARN" ]; then
@@ -321,7 +336,10 @@ send_email_report() {
             [ "$r_sev" = "CRITICAL" ] && sev_color="#F44336"
             [ "$r_sev" = "FAIL" ] && sev_color="#F44336"
             [ "$r_sev" = "WARN" ] && sev_color="#FF9800"
-            modules_list="${modules_list}<tr><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#E0E0E0;\"><b style=\"color:${sev_color};\">[$r_sev]</b> $r_sec</td><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#A0A0A0;\">$r_msg</td></tr>"
+            esc_sev=$(html_escape "$r_sev")
+            esc_sec=$(html_escape "$r_sec")
+            esc_msg=$(html_escape "$r_msg")
+            modules_list="${modules_list}<tr><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#E0E0E0;\"><b style=\"color:${sev_color};\">[${esc_sev}]</b> ${esc_sec}</td><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#A0A0A0;\">${esc_msg}</td></tr>"
         fi
     done
 
@@ -387,16 +405,17 @@ send_email_report() {
 </html>"
 
     local temp_html
-    temp_html=$(mktemp /tmp/security_audit_email.XXXXXX)
+    temp_html=$(mktemp /tmp/security_audit_email.XXXXXX) || return 1
     chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     
     local SENDMAIL="$HESTIA/web/inc/mail-wrapper.php"
+    local mail_rc=1
     
     # Try using PHPMailer from HestiaCP directly to ensure DKIM/formatting is perfect
     if [ -f "$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php" ]; then
         local temp_php
-        temp_php=$(mktemp /tmp/send_sec_audit_email.XXXXXX)
+        temp_php=$(mktemp /tmp/send_sec_audit_email.XXXXXX) || { rm -f "$temp_html"; return 1; }
         chmod 600 "$temp_php"
         cat > "$temp_php" << 'EOFPHP'
 <?php
@@ -427,25 +446,37 @@ try {
         $mail->addAttachment($logFile, 'security_audit.log');
     }
     $mail->send();
-} catch (Exception $e) {}
+} catch (Exception $e) {
+    fwrite(STDERR, $e->getMessage() . "\n");
+    exit(1);
+}
 ?>
 EOFPHP
         HESTIA="$HESTIA" \
-        AUDIT_HOSTNAME="$hostname" \
+        AUDIT_HOSTNAME="$raw_hostname" \
         AUDIT_TARGET_EMAIL="$target_email" \
         AUDIT_SUBJECT="$subject" \
         AUDIT_TEMP_HTML="$temp_html" \
         AUDIT_LOG_FILE="$LOG_FILE" \
         php "$temp_php" 2>/dev/null
+        mail_rc=$?
         rm -f "$temp_php" 2>/dev/null
     elif [ -f "$SENDMAIL" ]; then
         cat "$temp_html" | "$SENDMAIL" -s "$subject" "$target_email" "yes" 2>/dev/null
+        mail_rc=$?
     else
         { echo "Subject: $subject"; echo "Content-Type: text/html; charset=UTF-8"; echo ""; cat "$temp_html"; } | /usr/sbin/sendmail "$target_email" 2>/dev/null
+        mail_rc=$?
     fi
     
     rm -f "$temp_html" 2>/dev/null
-    echo -e " ${GREEN}[OK] Email report sent to $target_email${NC}"
+    if [ "$mail_rc" -eq 0 ]; then
+        echo -e " ${GREEN}[OK] Email report sent to $target_email${NC}"
+        return 0
+    else
+        echo -e " ${RED}[FAIL] Failed to send email report to $target_email${NC}"
+        return 1
+    fi
 }
 
 write_json_report() {

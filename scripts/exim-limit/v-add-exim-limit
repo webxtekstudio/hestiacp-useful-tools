@@ -14,15 +14,24 @@ BAK_DIR="/var/backups/hestiacp-useful-tools"
 install -d -m 0700 "$BAK_DIR"
 BACKUP_FILE="$BAK_DIR/exim4.conf.template.bak.$(date +%Y%m%d-%H%M%S)"
 
-# Get admin email from Hestia users, then fall back to system contact/root.
+# Get admin email from active non-suspended Hestia admin user, then fall back to system contact/root.
 ADMIN_EMAIL=""
 for user_conf in "$HESTIA/data/users"/*/user.conf; do
     [ -f "$user_conf" ] || continue
-    if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+    if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null && ! grep -q "^SUSPENDED='yes'" "$user_conf" 2>/dev/null; then
         ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
         [ -n "$ADMIN_EMAIL" ] && break
     fi
 done
+if [ -z "$ADMIN_EMAIL" ]; then
+    for user_conf in "$HESTIA/data/users"/*/user.conf; do
+        [ -f "$user_conf" ] || continue
+        if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null; then
+            ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+            [ -n "$ADMIN_EMAIL" ] && break
+        fi
+    done
+fi
 if [ -z "$ADMIN_EMAIL" ]; then
     ADMIN_EMAIL=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
 fi

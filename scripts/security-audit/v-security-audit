@@ -58,7 +58,11 @@ EOF
     exit 0
 }
 
-MODE=""
+RUN_SYSTEM=false
+RUN_BACKEND=false
+RUN_FRONTEND=false
+RUN_PENTEST=false
+RUN_ALL=false
 TARGET_USER=""
 TARGET_DOMAIN=""
 TARGET_URL=""
@@ -69,41 +73,45 @@ parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --system)
-                MODE="system"
+                RUN_SYSTEM=true
                 shift
                 ;;
             --backend)
-                MODE="backend"
+                RUN_BACKEND=true
                 shift
-                if [ $# -gt 0 ] && [[ ! "$1" == --* ]]; then
+                if [ $# -gt 0 ] && [[ ! "$1" == -* ]]; then
                     TARGET_USER="$1"
                     shift
-                    if [ $# -gt 0 ] && [[ ! "$1" == --* ]]; then
+                    if [ $# -gt 0 ] && [[ ! "$1" == -* ]]; then
                         TARGET_DOMAIN="$1"
                         shift
                     fi
                 fi
                 ;;
             --frontend)
-                MODE="frontend"
+                RUN_FRONTEND=true
                 shift
-                if [ $# -gt 0 ] && [[ ! "$1" == --* ]]; then
+                if [ $# -gt 0 ] && [[ ! "$1" == -* ]]; then
                     TARGET_URL="$1"
                     shift
                 fi
                 ;;
             --pentest)
-                MODE="pentest"
+                RUN_PENTEST=true
                 shift
-                if [ $# -gt 0 ] && [[ ! "$1" == --* ]]; then
+                if [ $# -gt 0 ] && [[ ! "$1" == -* ]]; then
                     TARGET_URL="$1"
                     shift
                 fi
                 ;;
             --all)
-                MODE="all"
+                RUN_ALL=true
+                RUN_SYSTEM=true
+                RUN_BACKEND=true
+                RUN_FRONTEND=true
+                RUN_PENTEST=true
                 shift
-                if [ $# -gt 0 ] && [[ ! "$1" == --* ]]; then
+                if [ $# -gt 0 ] && [[ ! "$1" == -* ]]; then
                     TARGET_USER="$1"
                     shift
                 fi
@@ -158,7 +166,7 @@ parse_args() {
         esac
     done
 
-    if [ -z "$MODE" ]; then
+    if ! $RUN_SYSTEM && ! $RUN_BACKEND && ! $RUN_FRONTEND && ! $RUN_PENTEST; then
         echo "Error: No scan mode specified. Use --system, --backend, --frontend, --pentest, or --all."
         exit 1
     fi
@@ -173,14 +181,28 @@ main() {
         disable_colors
     fi
 
-    local mode_label
-    case "$MODE" in
-        system) mode_label="SYSTEM AUDIT" ;;
-        backend) mode_label="BACKEND AUDIT" ;;
-        frontend) mode_label="FRONTEND AUDIT" ;;
-        pentest) mode_label="PENTEST (self-attack simulation)" ;;
-        all) mode_label="FULL AUDIT (system + backend + frontend + pentest)" ;;
-    esac
+    local mode_label=""
+    local selected_layers=()
+    $RUN_SYSTEM   && selected_layers+=("system")
+    $RUN_BACKEND  && selected_layers+=("backend")
+    $RUN_FRONTEND && selected_layers+=("frontend")
+    $RUN_PENTEST  && selected_layers+=("pentest")
+
+    if $RUN_ALL || [ "${#selected_layers[@]}" -eq 4 ]; then
+        mode_label="FULL AUDIT (system + backend + frontend + pentest)"
+    elif [ "${#selected_layers[@]}" -eq 1 ]; then
+        case "${selected_layers[0]}" in
+            system) mode_label="SYSTEM AUDIT" ;;
+            backend) mode_label="BACKEND AUDIT" ;;
+            frontend) mode_label="FRONTEND AUDIT" ;;
+            pentest) mode_label="PENTEST (self-attack simulation)" ;;
+        esac
+    else
+        local joined_layers
+        joined_layers=$(IFS='+'; echo "${selected_layers[*]}")
+        joined_layers="${joined_layers//+/ + }"
+        mode_label="COMBINED AUDIT (${joined_layers})"
+    fi
     if [ -n "$TARGET_USER" ]; then
         mode_label="${mode_label} [user: ${TARGET_USER}]"
     fi
@@ -188,31 +210,30 @@ main() {
     init_logging "$mode_label"
     print_banner "$mode_label"
 
-    case "$MODE" in
-        system)
-            run_system_checks
-            ;;
-        backend)
-            run_backend_checks "$TARGET_USER" "$TARGET_DOMAIN"
-            ;;
-        frontend)
+    if $RUN_SYSTEM; then
+        run_system_checks
+    fi
+    if $RUN_BACKEND; then
+        run_backend_checks "$TARGET_USER" "$TARGET_DOMAIN"
+    fi
+    if $RUN_FRONTEND; then
+        if [ -n "$TARGET_URL" ]; then
             run_frontend_checks "$TARGET_URL"
-            ;;
-        pentest)
+        elif [ -n "$TARGET_USER" ]; then
+            run_frontend_checks "$TARGET_USER"
+        else
+            run_frontend_checks ""
+        fi
+    fi
+    if $RUN_PENTEST; then
+        if [ -n "$TARGET_URL" ]; then
             run_pentest_checks "$TARGET_URL"
-            ;;
-        all)
-            run_system_checks
-            run_backend_checks "$TARGET_USER" "$TARGET_DOMAIN"
-            if [ -n "$TARGET_USER" ]; then
-                run_frontend_checks "$TARGET_USER"
-                run_pentest_checks "$TARGET_USER"
-            else
-                run_frontend_checks ""
-                run_pentest_checks ""
-            fi
-            ;;
-    esac
+        elif [ -n "$TARGET_USER" ]; then
+            run_pentest_checks "$TARGET_USER"
+        else
+            run_pentest_checks ""
+        fi
+    fi
 
     print_summary
 }

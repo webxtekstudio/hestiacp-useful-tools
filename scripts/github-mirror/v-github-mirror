@@ -46,21 +46,31 @@ chmod 640 "$LOG_FILE"
 
 # Initialize HestiaCP environment
 source /etc/profile
+cd / || exit 1
 HESTIA=/usr/local/hestia
 if [ -f "$HESTIA/func/main.sh" ]; then
     source $HESTIA/func/main.sh 2>/dev/null
     source $HESTIA/conf/hestia.conf 2>/dev/null
 fi
 
-# Detect Admin Email
+# Detect Admin Email (prefer active, non-suspended admin user)
 ADMIN_EMAIL=""
-# Try to find admin email from Hestia configuration by scanning users
 if [ -z "$ADMIN_EMAIL" ]; then
     for user_conf in "$HESTIA/data/users"/*/user.conf; do
         [ -f "$user_conf" ] || continue
-        if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+        if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null && ! grep -q "^SUSPENDED='yes'" "$user_conf" 2>/dev/null; then
             ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
-            break
+            [ -n "$ADMIN_EMAIL" ] && break
+        fi
+    done
+fi
+# Fallback to any admin user if all active checks were empty
+if [ -z "$ADMIN_EMAIL" ]; then
+    for user_conf in "$HESTIA/data/users"/*/user.conf; do
+        [ -f "$user_conf" ] || continue
+        if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null; then
+            ADMIN_EMAIL=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+            [ -n "$ADMIN_EMAIL" ] && break
         fi
     done
 fi
@@ -73,8 +83,9 @@ if [ -z "$ADMIN_EMAIL" ]; then
     ADMIN_EMAIL="root"
 fi
 
-STAGE_BASE="/var/tmp/hestiacp-github-mirror"
+STAGE_BASE="/var/lib/hestiacp-github-mirror"
 GIT_NET_SSH="ssh -o BatchMode=yes -o ConnectTimeout=30 -o StrictHostKeyChecking=accept-new"
+FATAL_HANDLED="false"
 
 _cleanup_mirror_stage() {
     rm -rf "$STAGE_BASE"/stage.$$.* 2>/dev/null || true
@@ -85,6 +96,7 @@ _send_fatal_email_mirror() {
     local exit_code="$1"
     local line="$2"
     [ "$exit_code" -eq 0 ] 2>/dev/null && return 0
+    [ "$FATAL_HANDLED" = "true" ] && return 0
     [ -z "$ADMIN_EMAIL" ] && return 0
     local hostname
     hostname=$(hostname -f 2>/dev/null || echo "HestiaCP Server")
@@ -144,20 +156,35 @@ convert_space() {
     fi
 }
 
+html_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    s="${s//\"/&quot;}"
+    s="${s//\'/&#39;}"
+    printf '%s' "$s"
+}
+
 send_html_email() {
     local status="$1"
     local admin_email="$2"
     [ -z "$admin_email" ] && return 1
+    admin_email=$(printf '%s' "$admin_email" | tr -d '\r\n')
     
-    local hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+    local raw_hostname
+    raw_hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+    raw_hostname=$(printf '%s' "$raw_hostname" | tr -d '\r\n')
+    local hostname
+    hostname=$(html_escape "$raw_hostname")
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
     
     if [ "$status" = "SUCCESS" ]; then
-        local subject="GitHub Mirror Report - $hostname - SUCCESS"
+        local subject="GitHub Mirror Report - $raw_hostname - SUCCESS"
         local status_color="#4CAF50"
         local status_text="[OK] SUCCESS"
     else
-        local subject="GitHub Mirror Report - $hostname - FAILED"
+        local subject="GitHub Mirror Report - $raw_hostname - FAILED"
         local status_color="#F44336"
         local status_text="[FAIL] CONTAINS ERRORS"
     fi
@@ -166,14 +193,17 @@ send_html_email() {
     local failed_count=${#REPOS_FAILED[@]}
     
     local success_list=""
+    local escaped_repo
     for repo in "${REPOS_SUCCESS[@]}"; do
-        success_list="${success_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#4CAF50; font-weight:bold;\">[OK]</span> <span style=\"color:#E0E0E0;\">$repo</span></td></tr>"
+        escaped_repo=$(html_escape "$repo")
+        success_list="${success_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#4CAF50; font-weight:bold;\">[OK]</span> <span style=\"color:#E0E0E0;\">${escaped_repo}</span></td></tr>"
     done
     [ -z "$success_list" ] && success_list="<tr><td style=\"padding:6px 12px; color:#A0A0A0;\">None</td></tr>"
     
     local failed_list=""
     for repo in "${REPOS_FAILED[@]}"; do
-        failed_list="${failed_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#F44336; font-weight:bold;\">[FAIL]</span> <span style=\"color:#E0E0E0;\">$repo</span></td></tr>"
+        escaped_repo=$(html_escape "$repo")
+        failed_list="${failed_list}<tr><td style=\"padding:6px 12px; border-bottom:1px solid #555;\"><span style=\"color:#F44336; font-weight:bold;\">[FAIL]</span> <span style=\"color:#E0E0E0;\">${escaped_repo}</span></td></tr>"
     done
     [ -z "$failed_list" ] && failed_list="<tr><td style=\"padding:6px 12px; color:#A0A0A0;\">None</td></tr>"
     
@@ -225,7 +255,7 @@ send_html_email() {
 </html>"
 
     local temp_html
-    temp_html=$(mktemp /tmp/github_mirror_email.XXXXXX)
+    temp_html=$(mktemp /tmp/github_mirror_email.XXXXXX) || return 1
     chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     
@@ -233,7 +263,7 @@ send_html_email() {
     [ ! -f "$SENDMAIL" ] && SENDMAIL="/usr/local/hestia/web/inc/mail-wrapper.php"
     
     if [ -f "$SENDMAIL" ]; then
-        cat "$temp_html" | $SENDMAIL -s "$subject" "$admin_email" "yes" 2>/dev/null
+        cat "$temp_html" | "$SENDMAIL" -s "$subject" "$admin_email" "yes" 2>/dev/null
     else
         (
             echo "Subject: $subject"
@@ -317,10 +347,92 @@ resolve_remote_ref() {
             LAST_GIT_ERR="Remote branch or tag '$branch' not found"
             return 1
         fi
+        LAST_GIT_ERR="${uout:-$out}"
+        return 1
     fi
 
     LAST_GIT_ERR="$out"
     return 1
+}
+
+# Descriptor-pinned O_NOFOLLOW legacy repair for repos previously cloned as root (UID 0).
+# Rejects any intermediate symlink and never touches HestiaCP root-protected domain dirs.
+_repair_legacy_root_repo_ownership() {
+    local user_home="$1"
+    local dest_rel="$2"
+    local user="$3"
+    local target_uid target_gid
+    target_uid=$(id -u "$user" 2>/dev/null) || return 1
+    target_gid=$(id -g "$user" 2>/dev/null) || return 1
+
+    python3 - "$user_home" "$dest_rel" "$target_uid" "$target_gid" << 'PYEOF' 2>/dev/null
+import os
+import stat
+import sys
+
+user_home, dest_rel, uid_s, gid_s = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+uid, gid = int(uid_s), int(gid_s)
+SKIP_TOP = {"logs", "stats", "document_errors"}
+
+parts = [p for p in dest_rel.split("/") if p]
+if not parts or any(p in (".", "..") for p in parts):
+    sys.exit(1)
+
+cur_fd = os.open(user_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in parts:
+        nxt_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=cur_fd)
+        os.close(cur_fd)
+        cur_fd = nxt_fd
+
+    git_st = os.stat(".git", dir_fd=cur_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(git_st.st_mode) or git_st.st_uid != 0:
+        sys.exit(0)
+
+    if os.fstat(cur_fd).st_uid == 0:
+        os.fchown(cur_fd, uid, gid)
+
+    def walk_fd(dfd, top=False):
+        with os.scandir(dfd) as it:
+            for entry in it:
+                if top and entry.name in SKIP_TOP:
+                    continue
+                try:
+                    est = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(est.st_mode):
+                    if est.st_uid == 0:
+                        try:
+                            os.chown(entry.name, uid, gid, dir_fd=dfd, follow_symlinks=False)
+                        except OSError:
+                            pass
+                elif stat.S_ISDIR(est.st_mode):
+                    try:
+                        cfd = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dfd)
+                    except OSError:
+                        continue
+                    try:
+                        if os.fstat(cfd).st_uid == 0:
+                            os.fchown(cfd, uid, gid)
+                        walk_fd(cfd, False)
+                    finally:
+                        os.close(cfd)
+                elif stat.S_ISREG(est.st_mode):
+                    try:
+                        ffd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+                    except OSError:
+                        continue
+                    try:
+                        if os.fstat(ffd).st_uid == 0:
+                            os.fchown(ffd, uid, gid)
+                    finally:
+                        os.close(ffd)
+
+    walk_fd(cur_fd, True)
+finally:
+    os.close(cur_fd)
+PYEOF
 }
 
 sync_overwrite_existing() {
@@ -331,13 +443,11 @@ sync_overwrite_existing() {
     local safe_repo="$5"
     local branch="$6"
     local dest="$7"
-    local real_dest local_head stage_git real_objs out rc
+    local dest_rel="$8"
+    local local_head stage_git out rc
 
-    if ! runuser -u "$user" -- test -w "$dest/.git" 2>/dev/null; then
-        real_dest=$(realpath -m "$dest" 2>/dev/null || true)
-        if [[ "$real_dest" == "${user_home%/}/"* ]] && [ ! -L "$dest" ]; then
-            chown -RP "$user:$user_group" "$dest" 2>/dev/null || true
-        fi
+    if [ "$(stat -c '%u' "$dest/.git" 2>/dev/null)" = "0" ]; then
+        _repair_legacy_root_repo_ownership "$user_home" "$dest_rel" "$user" || true
     fi
 
     if ! resolve_remote_ref "$user" "$user_home" "$repo" "$branch"; then
@@ -362,22 +472,14 @@ sync_overwrite_existing() {
         return 0
     fi
 
-    install -d -m 0711 -o root -g root "$STAGE_BASE"
+    # Stage fetch into an isolated bare repo without objects/info/alternates so root git
+    # never reads or follows tenant-controlled object stores.
+    install -d -m 0711 -o root -g root "$STAGE_BASE" || return 1
     stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
     git init --bare -q "$stage_git"
 
-    real_objs=$(runuser -u "$user" -- realpath -e "$dest/.git/objects" 2>/dev/null || true)
-    if [[ "$real_objs" == "${user_home%/}/"* ]] && [ -d "$real_objs" ] && [ ! -L "$dest/.git/objects" ]; then
-        printf '%s\n' "$real_objs" > "$stage_git/objects/info/alternates"
-    fi
-
     out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git --git-dir="$stage_git" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/mirror/target" 2>&1)
     rc=$?
-    if [ "$rc" -ne 0 ] && [ -f "$stage_git/objects/info/alternates" ]; then
-        rm -f "$stage_git/objects/info/alternates"
-        out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git --git-dir="$stage_git" -c core.hooksPath=/dev/null fetch --no-tags "$repo" "+${REMOTE_REF}:refs/mirror/target" 2>&1)
-        rc=$?
-    fi
     log_git_output "$out"
     if [ "$rc" -ne 0 ]; then
         rm -rf "$stage_git"
@@ -411,7 +513,7 @@ clone_repo_staged() {
 
     [ "$shallow_mode" = "shallow" ] && depth_args=(--depth 1)
 
-    install -d -m 0711 -o root -g root "$STAGE_BASE"
+    install -d -m 0711 -o root -g root "$STAGE_BASE" || return 1
     stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
 
     out=$(GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$GIT_NET_SSH" git -c core.hooksPath=/dev/null clone --bare -b "$branch" "${depth_args[@]}" "$repo" "$stage_git" 2>&1)
@@ -439,6 +541,8 @@ clone_repo_staged() {
             runuser -u "$user" -- git -C "$target_dir" -c core.hooksPath=/dev/null remote set-url origin "$safe_repo" >/dev/null 2>&1 || true
             return 0
         fi
+        log_git_output "${uout:-$out}"
+        return 1
     fi
 
     log_git_output "$out"
@@ -465,32 +569,35 @@ fi
 if [ ! -f "$CONFIG_FILE" ]; then
     msg="ERROR: Config file $CONFIG_FILE not found."
     log "$msg"
-    # Can't send email if we don't know who to send to, but we have ADMIN_EMAIL now.
     REPOS_FAILED+=("Config: $msg")
     send_html_email "FAILED" "$ADMIN_EMAIL"
+    FATAL_HANDLED="true"
     exit 1
 fi
+
+[[ "$DAILY_BACKUPS_COUNT" =~ ^[0-9]+$ ]] || DAILY_BACKUPS_COUNT=7
+[[ "$WEEKLY_BACKUPS_COUNT" =~ ^[0-9]+$ ]] || WEEKLY_BACKUPS_COUNT=4
+[[ "$MONTHLY_BACKUPS_COUNT" =~ ^[0-9]+$ ]] || MONTHLY_BACKUPS_COUNT=3
 
 log "Starting GitHub Mirror process..."
 
 # Read config file line by line
 # Format: USER|REPO_URL|BRANCH|DESTINATION_PATH|RETENTION_MODE|RETENTION_COUNT
 while IFS='|' read -r user repo branch dest_path retention_mode retention_count || [ -n "$user" ]; do
-    # Skip empty lines and comments
-    [[ $user =~ ^#.* ]] && continue
-    [[ -z $user ]] && continue
+    # Strip whitespace/CR first so CRLF or indented comment lines are skipped cleanly
+    user=$(printf '%s' "$user" | tr -d '[:space:]')
+    [[ -z "$user" ]] && continue
+    [[ "$user" =~ ^# ]] && continue
 
-    # Strip whitespace from variables
-    user=$(echo "$user" | tr -d '[:space:]')
-    repo=$(echo "$repo" | tr -d '[:space:]')
-    branch=$(echo "$branch" | tr -d '[:space:]')
-    dest_path=$(echo "$dest_path" | tr -d '[:space:]')
-    retention_mode=$(echo "$retention_mode" | tr -d '[:space:]')
-    retention_count=$(echo "$retention_count" | tr -d '[:space:]')
+    repo=$(printf '%s' "$repo" | tr -d '[:space:]')
+    branch=$(printf '%s' "$branch" | tr -d '[:space:]')
+    dest_path=$(printf '%s' "$dest_path" | tr -d '[:space:]')
+    retention_mode=$(printf '%s' "$retention_mode" | tr -d '[:space:]')
+    retention_count=$(printf '%s' "$retention_count" | tr -d '[:space:]')
 
-    # Default values
+    # Default values & strict integer validation
     retention_mode=${retention_mode:-"overwrite"}
-    retention_count=${retention_count:-1}
+    [[ "$retention_count" =~ ^[1-9][0-9]*$ ]] || retention_count=1
     safe_repo=$(sanitize_repo_url "$repo")
 
     # Validate User
@@ -534,10 +641,10 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
     if [ "$retention_mode" == "overwrite" ]; then
         # === OVERWRITE MODE ===
         if [ -d "$BASE_DEST_PATH/.git" ]; then
-            if sync_overwrite_existing "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$BASE_DEST_PATH"; then
+            if sync_overwrite_existing "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$BASE_DEST_PATH" "$dest_path"; then
                 log "SUCCESS: Updated $safe_repo."
-                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
-                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --format="%h")
+                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --date=format:"%Y-%m-%d %H:%M" --format="%cd")
+                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --format="%h")
                 REPOS_SUCCESS+=("$user/$safe_repo (Updated: $last_commit - $short_hash)")
             else
                 error_msg="Failed to update $safe_repo"
@@ -548,8 +655,8 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
             log "Cloning $safe_repo into $BASE_DEST_PATH..."
             if clone_repo_staged "$user" "$user_group" "$USER_HOME" "$repo" "$safe_repo" "$branch" "$BASE_DEST_PATH" "full"; then
                 log "SUCCESS: Cloned $safe_repo."
-                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --date=format:"%Y-%m-%d %H:%M" --format="%cd")
-                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --format="%h")
+                last_commit=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --date=format:"%Y-%m-%d %H:%M" --format="%cd")
+                short_hash=$(runuser -u "$user" -- git -C "$BASE_DEST_PATH" -c core.hooksPath=/dev/null log -1 --no-show-signature --format="%h")
                 REPOS_SUCCESS+=("$user/$safe_repo (Cloned: $last_commit - $short_hash)")
             else
                 error_msg="Failed to clone $safe_repo"
@@ -569,27 +676,35 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
             runuser -u "$user" -- rm -rf "$VERSION_DIR/.git"
             REPOS_SUCCESS+=("$user/$safe_repo (Backup)")
             
+            # Match ONLY exact <basename>_YYYYMMDD_HHMMSS directories (never unrelated prefix siblings)
+            dest_parent=$(dirname "${BASE_DEST_PATH}_x")
+            dest_base=$(basename "$BASE_DEST_PATH")
+            BACKUPS=()
+            while IFS= read -r -d '' candidate_dir; do
+                candidate_base=$(basename "$candidate_dir")
+                if [[ "$candidate_base" == "${dest_base}_"* ]]; then
+                    suffix="${candidate_base#"${dest_base}_"}"
+                    if [[ "$suffix" =~ ^[0-9]{8}_[0-9]{6}$ ]]; then
+                        BACKUPS+=("$candidate_dir")
+                    fi
+                fi
+            done < <(find "$dest_parent" -mindepth 1 -maxdepth 1 -type d -name "${dest_base}_*" -print0 2>/dev/null | sort -z)
+
             # --- Retention Cleanup Logic ---
             if [ "$retention_mode" == "backup" ]; then
                 # SMART RETENTION (Daily/Weekly/Monthly)
                 log "Running smart retention cleanup..."
                 
-                # Get all backup directories sorted by name (which implies date order for YYYYMMDD)
-                BACKUPS=$(find "$(dirname "${BASE_DEST_PATH}_x")" -maxdepth 1 -type d -name "$(basename "${BASE_DEST_PATH}")_*" -print0 2>/dev/null | sort -z | tr '\0' '\n' | sed '/^$/d')
-                
-                # We need to parse dates from directory names to apply logic
-                # Format: name_YYYYMMDD_HHMMSS
-                # Simple approach: Keep all dailies for last N days, keep weekly for last M weeks, etc.
-                
                 CURRENT_DATE_SEC=$(date +%s)
                 
-                # Arrays to keep track of what to keep
+                # Always keep the newly created backup snapshot
                 declare -A KEEP_LIST=()
+                KEEP_LIST["$VERSION_DIR"]=1
                 
-                for backup in $BACKUPS; do
+                for backup in "${BACKUPS[@]}"; do
                     dirname=$(basename "$backup")
-                    # Extract date part: YYYYMMDD
-                    date_str=$(echo "$dirname" | grep -oE '[0-9]{8}' | head -n1)
+                    suffix="${dirname#"${dest_base}_"}"
+                    date_str="${suffix%%_*}"
                     
                     if [ -z "$date_str" ]; then continue; fi
                     
@@ -621,18 +736,24 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                 done
                 
                 # Cleanup phase
-                for backup in $BACKUPS; do
+                for backup in "${BACKUPS[@]}"; do
                     if [ -z "${KEEP_LIST["$backup"]}" ]; then
                         log "Deleting old backup: $(basename "$backup")"
                         runuser -u "$user" -- rm -rf "$backup"
                     fi
                 done
+                unset KEEP_LIST
                 
             else
-                # SIMPLE RETENTION (Keep last N)
+                # SIMPLE RETENTION (Keep last N exact timestamped directories)
                 log "Cleaning up old versions (keeping last $retention_count)..."
-                find "$(dirname "${BASE_DEST_PATH}_x")" -maxdepth 1 -type d -name "$(basename "${BASE_DEST_PATH}")_*" -print0 2>/dev/null \
-                    | sort -rz | tail -z -n +$((retention_count + 1)) | xargs -0 -r runuser -u "$user" -- rm -rf
+                total_versions=${#BACKUPS[@]}
+                if [ "$total_versions" -gt "$retention_count" ]; then
+                    prune_until=$((total_versions - retention_count))
+                    for (( idx=0; idx<prune_until; idx++ )); do
+                        runuser -u "$user" -- rm -rf "${BACKUPS[$idx]}"
+                    done
+                fi
             fi
         else
             error_msg="Failed to clone version $TIMESTAMP"

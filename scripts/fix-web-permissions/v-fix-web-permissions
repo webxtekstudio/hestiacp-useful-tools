@@ -698,11 +698,20 @@ if [ "$SEND_EMAIL" = true ]; then
     admin_email=""
     for user_conf in /usr/local/hestia/data/users/*/user.conf; do
         [ -f "$user_conf" ] || continue
-        if grep -q "ROLE='admin'" "$user_conf" 2>/dev/null; then
+        if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null && ! grep -q "^SUSPENDED='yes'" "$user_conf" 2>/dev/null; then
             admin_email=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
             [ -n "$admin_email" ] && break
         fi
     done
+    if [ -z "$admin_email" ]; then
+        for user_conf in /usr/local/hestia/data/users/*/user.conf; do
+            [ -f "$user_conf" ] || continue
+            if grep -q "^ROLE='admin'" "$user_conf" 2>/dev/null; then
+                admin_email=$(grep "^CONTACT=" "$user_conf" 2>/dev/null | cut -d"'" -f2)
+                [ -n "$admin_email" ] && break
+            fi
+        done
+    fi
     if [ -z "$admin_email" ]; then
         admin_email=$(grep "^CONTACT=" /usr/local/hestia/conf/hestia.conf 2>/dev/null | cut -d"'" -f2)
     fi
