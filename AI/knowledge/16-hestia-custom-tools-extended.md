@@ -125,3 +125,46 @@ All paths align with `01-hestia-system-paths.md`:
 - `/etc/ssh/sshd_config` — SSH configuration
 - `/home/[USER]/web/[DOMAIN]/public_html/` — document roots
 - `/home/[USER]/conf/web/` — per-user web configs
+
+---
+
+## v-harden-server
+
+6-pillar server hardening, IPv6 firewall parity guard (`hestia-ipv6-guard.service`), and CrowdSec IPS manager (`127.0.0.1:8099` LAPI + `crowdsec-firewall-bouncer-nftables` with SSH port anti-lockout exemption).
+
+| Component | Path | Description |
+| :--- | :--- | :--- |
+| **Script** | `/usr/local/hestia/bin/v-harden-server` | Symlink to repo script |
+| **Source** | `/root/hestiacp-useful-tools/scripts/server-hardening/v-harden-server` | Repo source |
+| **Log File** | `/var/log/hestia/server-hardening.log` | Hardening & heal execution log |
+| **Sysctl Config** | `/etc/sysctl.d/99-hestiacp-hardening.conf` | Kernel & network hardening |
+| **SSH Config** | `/etc/ssh/sshd_config.d/00-hardening.conf` | SSH key-only auth & `MaxAuthTries 3` |
+
+### Usage
+
+```bash
+v-harden-server --status          # Check all 6 pillars (Kernel, SSH, PHP, Fail2Ban, IPv6 Guard, CrowdSec)
+v-harden-server --all             # Apply all 6 hardening pillars idempotently
+v-harden-server --cron-heal       # Daily post-update heal (IPv6 firewall mirror, Fail2Ban & CrowdSec SSH rule)
+v-harden-server --unban <IP>      # Unban an IP across CrowdSec, HestiaCP firewall, and all Fail2Ban jails
+```
+
+---
+
+## v-github-mirror (Zero-Trust Pull-Only Architecture)
+
+Clones or updates configured Git repositories into user `private/` directories so HestiaCP user backups (`v-backup-users`) include up-to-date repository snapshots without granting any HestiaCP user access to GitHub credentials or network Git remotes.
+
+| Component | Path | Description |
+| :--- | :--- | :--- |
+| **Script** | `/usr/local/hestia/bin/v-github-mirror` | Symlink to repo script |
+| **Config** | `/etc/hestiacp-github-mirror.conf` | Mirror definitions (`0600 root:root`) |
+| **Read-Only Token** | `/etc/hestiacp-github-mirror.token` | Fine-Grained Read-Only PAT (`0400`/`0600 root:root`) |
+| **Staging Dir** | `/var/lib/hestiacp-github-mirror` | Temporary `root`-owned bare staging directory (`0711`) |
+| **Log File** | `/var/log/hestia/github-mirror.log` | Execution log (`0640`) |
+
+### Security Model
+
+1. **Pull-Only Root Staging:** Network `git ls-remote` / `git fetch` / `git clone --bare` runs exclusively as `root` inside `/var/lib/hestiacp-github-mirror` using `/etc/hestiacp-github-mirror.token` (`Contents: Read-only` Fine-Grained PAT injected via transient `GIT_CONFIG_VALUE_0` HTTP header, never written to `.git/config` or command-line URLs).
+2. **Offline Tenant Repositories:** Local fetches/resets inside `/home/<user>/...` run as the unprivileged HestiaCP user with `protocol.allow=never`, `GIT_SSH_COMMAND=/bin/false`, and `core.hooksPath=/dev/null`.
+3. **Sanitized `.git/config` (`0700`):** Before and after each sync, `_sanitize_user_git_repo` atomically overwrites the tenant's `.git/config` (removing all `remote "origin"` URLs, hooks, filters, and `fsmonitor` directives) and locks the mirror directory to `0700 <user>:<user>`.

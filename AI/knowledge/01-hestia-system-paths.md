@@ -125,13 +125,17 @@ This reference document maps the verified system paths for HestiaCP running on D
 | **Backup Retention** | `/usr/local/hestia/bin/v-prune-backups` | Optional classic backup retention command |
 | **Backup Retention Config** | `/etc/hestiacp-backup-retention.conf` | Retention policy for classic backups |
 | **Remote Backup Config** | `/usr/local/hestia/conf/b2.backup.conf` | Native Hestia B2 remote backup configuration when B2 is enabled |
-| **GitHub Mirror** | `/usr/local/hestia/bin/v-github-mirror` | Git sync script |
-| **GitHub Config** | `/etc/hestiacp-github-mirror.conf` | Git mirror configuration |
+| **Backup APT Hook** | `/etc/apt/apt.conf.d/99hestia-custom-patches` | `DPkg::Post-Invoke` hook that auto-reapplies `backup-core-patches` after HestiaCP APT updates |
+| **GitHub Mirror** | `/usr/local/hestia/bin/v-github-mirror` | Zero-Trust root-staged Git sync script |
+| **GitHub Config** | `/etc/hestiacp-github-mirror.conf` | Git mirror configuration (`0600 root:root`) |
+| **GitHub Token** | `/etc/hestiacp-github-mirror.token` | Optional Fine-Grained Read-Only PAT (`0400`/`0600 root:root`) for HTTPS pull-only sync |
 | **GitHub Log** | `/var/log/hestia/github-mirror.log` | Execution logs |
+| **Server Hardening** | `/usr/local/hestia/bin/v-harden-server` | 6-pillar server hardener, IPv6 firewall guard & CrowdSec IPS manager |
 | **Security Audit** | `/usr/local/hestia/bin/v-security-audit` | Security scanning suite (4 layers) |
 | **Audit Logs** | `/var/log/hestia/security-audit/` | Audit execution logs |
 | **Fix Permissions** | `/usr/local/hestia/bin/v-fix-web-permissions` | CMS-aware permission fixer |
 | **Fix Perms Log** | `/var/log/hestia/fix-permissions/` | Permission change logs |
+| **Script Backup Vault** | `/var/backups/hestiacp-useful-tools/` | Centralized `0700` backup vault (max 3 per script, zero `.bak` files in live bin/conf dirs) |
 | **Exim Limit** | `/usr/local/hestia/bin/v-exim-limit` | Email rate limiting |
 | **Sync Backups** | `/usr/local/hestia/bin/v-sync-backups` | Backup synchronization |
 

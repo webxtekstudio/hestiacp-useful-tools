@@ -28,6 +28,7 @@ This means you must verify the live machine before concluding how backups are st
 | **Retention Command** | `/usr/local/hestia/bin/v-prune-backups` |
 | **Retention Config** | `/etc/hestiacp-backup-retention.conf` |
 | **B2 Config** | `/usr/local/hestia/conf/b2.backup.conf` |
+| **APT Persistence Hook** | `/etc/apt/apt.conf.d/99hestia-custom-patches` |
 
 ## 3. What `backup-core-patches` Changes
 
@@ -36,8 +37,10 @@ When installed, the patch layer keeps the native Hestia workflow but extends it:
 - local archives may be moved into `/backup/YYYY/MM_MONTH/USER/`
 - Hestia-compatible symlinks can remain at the root `/backup/`
 - the global backup batch log may be uploaded to remote storage
+- single-user retries (`v-backup-user <user>`) append `Upload to B2: ... (SINGLE-USER RETRY: <user>)` to `/var/log/hestia/backup.log` so automated monitors can see recovered uploads
 - retention can be applied per backend without replacing the native backup batch
 - remote paths may be organized by year and month
+- `/etc/apt/apt.conf.d/99hestia-custom-patches` (`DPkg::Post-Invoke`) automatically re-applies core patches if an APT upgrade of the `hestia` package overwrites `/usr/local/hestia/bin/v-backup-user` or `/usr/local/hestia/func/backup.sh`
 
 Implication:
 - a valid remote upload log is real backup evidence
@@ -123,6 +126,15 @@ Do not classify an archive as restorable merely because an upload log exists. Re
 ### Empty `/backup/` directory
 
 When `BACKUP_SYSTEM` is set to a remote-only backend (e.g., `b2` without `local`), the post-backup hook uploads the tarball and then cleans up the local copy. The `/backup/` directory being empty is **normal and expected** — it does NOT mean backups have failed.
+
+### Single-user retry & Backblaze B2 CLI v4 syntax
+
+- If a single user's B2 upload fails transiently during the weekly batch, retry only that user with:
+  ```bash
+  sudo -n /usr/local/hestia/bin/v-backup-user <user>
+  ```
+- When `backup-core-patches` (`hestia-custom-b2-v5.3-retry`) is active, standalone `v-backup-user <user>` runs append `Upload to B2: ... (SINGLE-USER RETRY: <user>)` to `/var/log/hestia/backup.log`. If an earlier upload error for `<user>` is marked `REMEDIATED:` or followed by a newer `Upload to B2: .../<user>/...` (`SINGLE-USER RETRY: <user>`), treat that user's backup as recovered/OK.
+- Backblaze B2 CLI v4 uses `B2_APPLICATION_KEY_ID` / `B2_APPLICATION_KEY` environment variables with `b2 file upload <bucket> <local_file> <remote_path>` and `b2 ls b2://<bucket>/<prefix>`. Never recommend deprecated B2 CLI v3 subcommands (`b2 authorize-account` or `b2 upload-file`).
 
 ### Check whether the batch is stuck
 
