@@ -64,11 +64,11 @@ check_permissions() {
         result_pass "B40" "No world-readable log files [${domain}]"
     fi
 
-    local user_ini
-    user_ini=$(find "$docroot" -maxdepth 3 -name ".user.ini" 2>/dev/null)
-    if [ -n "$user_ini" ]; then
+    local user_ini_count
+    user_ini_count=$(find -P "$docroot" -maxdepth 3 -name ".user.ini" -type f 2>/dev/null | wc -l)
+    if [ "$user_ini_count" -gt 0 ]; then
         local malicious_ini
-        malicious_ini=$(grep -lE 'auto_prepend_file|auto_append_file' $user_ini 2>/dev/null | wc -l)
+        malicious_ini=$(find -P "$docroot" -maxdepth 3 -name ".user.ini" -type f -exec grep -lE 'auto_prepend_file|auto_append_file' -- {} + 2>/dev/null | wc -l)
         if [ "$malicious_ini" -gt 0 ]; then
             result_critical "B41" "${malicious_ini} .user.ini with auto_prepend/append (malware injection) [${domain}]"
         else
@@ -138,17 +138,17 @@ check_permissions() {
         result_pass "B47" "No PHP error logs in public_html [${domain}]"
     fi
 
-    local htpasswd_files
-    htpasswd_files=$(find "$docroot" -maxdepth 3 -name ".htpasswd" -type f 2>/dev/null)
-    if [ -n "$htpasswd_files" ]; then
-        local htpasswd_perms_bad=0
-        for hp in $htpasswd_files; do
-            local hp_perms
-            hp_perms=$(stat -c '%a' "$hp" 2>/dev/null)
-            if is_more_permissive_than "$hp_perms" "640"; then
-                htpasswd_perms_bad=$((htpasswd_perms_bad + 1))
-            fi
-        done
+    local htpasswd_found=0
+    local htpasswd_perms_bad=0
+    while IFS= read -r -d '' hp; do
+        htpasswd_found=$((htpasswd_found + 1))
+        local hp_perms
+        hp_perms=$(stat -c '%a' "$hp" 2>/dev/null)
+        if is_more_permissive_than "$hp_perms" "640"; then
+            htpasswd_perms_bad=$((htpasswd_perms_bad + 1))
+        fi
+    done < <(find -P "$docroot" -maxdepth 3 -name ".htpasswd" -type f -print0 2>/dev/null)
+    if [ "$htpasswd_found" -gt 0 ]; then
         if [ "$htpasswd_perms_bad" -gt 0 ]; then
             result_fail "B48" "${htpasswd_perms_bad} .htpasswd file(s) with excessive permissions [${domain}]"
         else

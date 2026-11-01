@@ -327,18 +327,22 @@ if [ "$MODE" = "whitelist" ]; then
     fi
     mkdir -p /etc/fail2ban/jail.d
     existing_ips="127.0.0.1/8 ::1"
-    if [ -f "$CUSTOM_F2B_WL" ]; then
-        existing_ips=$(awk -F= '/^ignoreip/{print $2}' "$CUSTOM_F2B_WL" | xargs || echo "127.0.0.1/8 ::1")
+    if [ -f "$CUSTOM_F2B_WL" ] && [ ! -L "$CUSTOM_F2B_WL" ]; then
+        parsed_ips=$(awk -F= '/^[[:space:]]*ignoreip[[:space:]]*=/{sub(/^[[:space:]]+/, "", $2); sub(/[[:space:]]+$/, "", $2); gsub(/[[:space:]]+/, " ", $2); print $2; exit}' "$CUSTOM_F2B_WL")
+        [ -n "$parsed_ips" ] && existing_ips="$parsed_ips"
     fi
-    if ! echo " $existing_ips " | grep -qF " $WHITELIST_TARGET "; then
+    if ! printf ' %s ' "$existing_ips" | grep -Fq -- " $WHITELIST_TARGET "; then
         existing_ips="$existing_ips $WHITELIST_TARGET"
     fi
-    cat << EOF > "$CUSTOM_F2B_WL"
+    tmp_wl=$(umask 077 && mktemp /etc/fail2ban/jail.d/.99-hestia-whitelist.XXXXXX)
+    cat << EOF > "$tmp_wl"
 # Managed by v-harden-server (hestiacp-useful-tools)
 [DEFAULT]
 ignoreip = $existing_ips
 EOF
-    chmod 0644 "$CUSTOM_F2B_WL"
+    chown root:root "$tmp_wl"
+    chmod 0644 "$tmp_wl"
+    mv -f "$tmp_wl" "$CUSTOM_F2B_WL"
     if command -v fail2ban-client >/dev/null 2>&1 && systemctl is-active --quiet fail2ban; then
         for jail in $(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' '); do
             fail2ban-client set "$jail" addignoreip "$WHITELIST_TARGET" >/dev/null 2>&1 || true
@@ -491,7 +495,7 @@ apply_base_pillars() {
     # --- Pillar 1: Kernel Sysctl Hardening ---
     local sysctl_changed=false
     if write_file_if_changed "$SYSCTL_FILE" 0644 << 'EOF'
-# HestiaCP Kernel Network & Memory Hardening
+# HestiaCP Kernel Network, Memory & Filesystem Hardening
 # Managed by: https://github.com/webxtekstudio/hestiacp-useful-tools (v-harden-server)
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.rp_filter = 1
@@ -509,11 +513,15 @@ net.ipv6.conf.default.accept_source_route = 0
 net.ipv4.icmp_echo_ignore_broadcasts = 1
 kernel.panic = 10
 fs.suid_dumpable = 0
+fs.protected_symlinks = 1
+fs.protected_hardlinks = 1
+fs.protected_regular = 2
+fs.protected_fifos = 2
 EOF
     then
         sysctl_changed=true
     fi
-    if [ "$sysctl_changed" = true ] || [ "$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo 0)" != "1" ] || [ "$(sysctl -n fs.suid_dumpable 2>/dev/null || echo 1)" != "0" ]; then
+    if [ "$sysctl_changed" = true ] || [ "$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo 0)" != "1" ] || [ "$(sysctl -n fs.suid_dumpable 2>/dev/null || echo 1)" != "0" ] || [ "$(sysctl -n fs.protected_symlinks 2>/dev/null || echo 0)" != "1" ]; then
         sysctl --system >/dev/null 2>&1 || sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
     fi
     echo -e "  -> ${GREEN}[Pillar 1]${NC} Kernel sysctl hardening active ($SYSCTL_FILE)"

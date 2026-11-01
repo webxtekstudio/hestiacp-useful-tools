@@ -950,16 +950,43 @@ if [ "$CLEAN_MAIL_QUEUE" = "TRUE" ] || [ "$CLEAN_MAIL_QUEUE" = "true" ]; then
 fi
 
 if [ "$CLEAN_SPAM_MAIL" = "TRUE" ] || [ "$CLEAN_SPAM_MAIL" = "true" ]; then
+    [[ "$SPAM_MAIL_RETENTION_DAYS" =~ ^[0-9]+$ ]] || SPAM_MAIL_RETENTION_DAYS=365
     echo -n "[$(date)] : Spam/Junk emails (>${SPAM_MAIL_RETENTION_DAYS}d)... "
     spam_deleted=0
-    for mail_dir in /home/*/mail/*/*; do
-        [ -d "$mail_dir" ] || continue
-        for spam_folder in "$mail_dir/.Junk/cur" "$mail_dir/.Spam/cur" "$mail_dir/.Junk/new" "$mail_dir/.Spam/new"; do
-            if [ -d "$spam_folder" ]; then
-                count=$(find "$spam_folder" -type f -mtime +${SPAM_MAIL_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
-                spam_deleted=$((spam_deleted + count))
-            fi
-        done
+    for u_dir in "$HESTIA/data/users"/*; do
+        [ -d "$u_dir" ] && [ ! -L "$u_dir" ] || continue
+        u_name=$(basename "$u_dir")
+        [[ "$u_name" =~ ^[a-zA-Z0-9._-]+$ ]] || continue
+        id -u "$u_name" >/dev/null 2>&1 || continue
+        u_home=$(getent passwd "$u_name" | cut -d: -f6)
+        [ -n "$u_home" ] && [ -d "$u_home" ] && [ ! -L "$u_home" ] || continue
+        [ -d "$u_home/mail" ] && [ ! -L "$u_home/mail" ] || continue
+        mail_owner=$(stat -c '%U' "$u_home/mail" 2>/dev/null || echo "")
+        if [ "$mail_owner" != "mail" ] && [ "$mail_owner" != "$u_name" ]; then
+            continue
+        fi
+        c=$(runuser -u "$mail_owner" -- sh -c '
+            home_mail="$1"
+            days="$2"
+            total=0
+            [ -d "$home_mail" ] && [ ! -L "$home_mail" ] || { echo 0; exit 0; }
+            for dom_dir in "$home_mail"/*; do
+                [ -d "$dom_dir" ] && [ ! -L "$dom_dir" ] || continue
+                for mbox_dir in "$dom_dir"/*; do
+                    [ -d "$mbox_dir" ] && [ ! -L "$mbox_dir" ] || continue
+                    for parent_spam in "$mbox_dir/.Junk" "$mbox_dir/.Spam"; do
+                        [ -d "$parent_spam" ] && [ ! -L "$parent_spam" ] || continue
+                        for sub in "$parent_spam/cur" "$parent_spam/new"; do
+                            [ -d "$sub" ] && [ ! -L "$sub" ] || continue
+                            n=$(find -P "$sub" -type f -mtime +"$days" -delete -print 2>/dev/null | wc -l)
+                            total=$((total + n))
+                        done
+                    done
+                done
+            done
+            echo "$total"
+        ' _ "$u_home/mail" "$SPAM_MAIL_RETENTION_DAYS" 2>/dev/null || echo "0")
+        [[ "$c" =~ ^[0-9]+$ ]] && spam_deleted=$((spam_deleted + c))
     done
     echo "OK ($spam_deleted emails)"
     TASKS_SUCCESS+=("Spam mail cleanup")
@@ -971,22 +998,53 @@ echo "--- USER CLEANUP ---"
 USER_TRASH_RETENTION_DAYS=$(convert_retention_to_days "$USER_TRASH_RETENTION")
 
 if [ "$CLEAN_USER_TRASH" = "TRUE" ] || [ "$CLEAN_USER_TRASH" = "true" ]; then
+    [[ "$USER_TRASH_RETENTION_DAYS" =~ ^[0-9]+$ ]] || USER_TRASH_RETENTION_DAYS=365
     echo -n "[$(date)] : User trash (>${USER_TRASH_RETENTION_DAYS}d)... "
     trash_cleaned=0
     trash_size_kb=0
-    for trash_dir in /home/*/.local/share/Trash /root/.local/share/Trash; do
-        if [ -d "$trash_dir/files" ]; then
-            size_before=$(du -sk "$trash_dir" 2>/dev/null | cut -f1)
-            find "$trash_dir/files" -type f -mtime +${USER_TRASH_RETENTION_DAYS} -delete 2>/dev/null
-            find "$trash_dir/info" -type f -mtime +${USER_TRASH_RETENTION_DAYS} -delete 2>/dev/null
-            find "$trash_dir" -type d -empty -delete 2>/dev/null
-            size_after=$(du -sk "$trash_dir" 2>/dev/null | cut -f1)
-            if [ -n "$size_before" ] && [ -n "$size_after" ] && [ "$size_before" -gt "$size_after" ] 2>/dev/null; then
-                trash_size_kb=$((trash_size_kb + size_before - size_after))
+    for u_dir in "$HESTIA/data/users"/*; do
+        [ -d "$u_dir" ] && [ ! -L "$u_dir" ] || continue
+        u_name=$(basename "$u_dir")
+        [[ "$u_name" =~ ^[a-zA-Z0-9._-]+$ ]] || continue
+        id -u "$u_name" >/dev/null 2>&1 || continue
+        u_home=$(getent passwd "$u_name" | cut -d: -f6)
+        [ -n "$u_home" ] && [ -d "$u_home" ] && [ ! -L "$u_home" ] || continue
+        res=$(runuser -u "$u_name" -- sh -c '
+            tdir="$1/.local/share/Trash"
+            days="$2"
+            [ ! -L "$1/.local" ] && [ ! -L "$1/.local/share" ] && [ -d "$tdir" ] && [ ! -L "$tdir" ] || exit 0
+            [ -d "$tdir/files" ] && [ ! -L "$tdir/files" ] || exit 0
+            sb=$(du -skP "$tdir" 2>/dev/null | cut -f1)
+            find -P "$tdir/files" -type f -mtime +"$days" -delete 2>/dev/null || true
+            if [ -d "$tdir/info" ] && [ ! -L "$tdir/info" ]; then
+                find -P "$tdir/info" -type f -mtime +"$days" -delete 2>/dev/null || true
             fi
-            trash_cleaned=$((trash_cleaned + 1))
+            find -P "$tdir/files" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+            sa=$(du -skP "$tdir" 2>/dev/null | cut -f1)
+            echo "1 ${sb:-0} ${sa:-0}"
+        ' _ "$u_home" "$USER_TRASH_RETENTION_DAYS" 2>/dev/null || true)
+        if [ -n "$res" ]; then
+            read -r did_clean size_before size_after <<< "$res"
+            if [ "$did_clean" = "1" ]; then
+                trash_cleaned=$((trash_cleaned + 1))
+                if [[ "$size_before" =~ ^[0-9]+$ ]] && [[ "$size_after" =~ ^[0-9]+$ ]] && [ "$size_before" -gt "$size_after" ]; then
+                    trash_size_kb=$((trash_size_kb + size_before - size_after))
+                fi
+            fi
         fi
     done
+    if [ -d "/root/.local/share/Trash/files" ] && [ ! -L "/root/.local/share/Trash" ] && [ ! -L "/root/.local/share/Trash/files" ]; then
+        size_before=$(du -skP "/root/.local/share/Trash" 2>/dev/null | cut -f1)
+        find -P "/root/.local/share/Trash/files" -type f -mtime +"${USER_TRASH_RETENTION_DAYS}" -delete 2>/dev/null || true
+        [ -d "/root/.local/share/Trash/info" ] && [ ! -L "/root/.local/share/Trash/info" ] && \
+            find -P "/root/.local/share/Trash/info" -type f -mtime +"${USER_TRASH_RETENTION_DAYS}" -delete 2>/dev/null || true
+        find -P "/root/.local/share/Trash/files" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+        size_after=$(du -skP "/root/.local/share/Trash" 2>/dev/null | cut -f1)
+        if [[ "$size_before" =~ ^[0-9]+$ ]] && [[ "$size_after" =~ ^[0-9]+$ ]] && [ "$size_before" -gt "$size_after" ]; then
+            trash_size_kb=$((trash_size_kb + size_before - size_after))
+        fi
+        trash_cleaned=$((trash_cleaned + 1))
+    fi
     if [ "$trash_size_kb" -gt 0 ]; then
         add_cleaned_space "$trash_size_kb"
         trash_formatted=$(convert_space $trash_size_kb)

@@ -75,11 +75,14 @@ html_escape() {
 }
 
 init_logging() {
+    umask 077
     mkdir -p "$LOG_DIR" 2>/dev/null
+    chmod 700 "$LOG_DIR" 2>/dev/null || true
     local timestamp
     timestamp=$(date +%Y%m%d-%H%M%S)
     LOG_FILE="${LOG_DIR}/${timestamp}.log"
     echo "# v-security-audit v${TOOL_VERSION} — $(date)" > "$LOG_FILE"
+    chmod 600 "$LOG_FILE" 2>/dev/null || true
     echo "# Host: $(hostname)" >> "$LOG_FILE"
     echo "# Mode: $1" >> "$LOG_FILE"
     echo "---" >> "$LOG_FILE"

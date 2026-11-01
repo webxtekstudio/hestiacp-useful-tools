@@ -7,22 +7,27 @@
 # keep the root /backup directory clean, while providing symlinks
 # so the Hestia panel still detects the backups natively.
 
-user=$1
-tarball=$2
+user="${1:-}"
+tarball="${2:-}"
 
 if [ -z "$user" ] || [ -z "$tarball" ]; then
     exit 1
 fi
 
+if [[ ! "$user" =~ ^[a-zA-Z0-9._-]+$ ]] || [[ ! "$tarball" =~ ^[a-zA-Z0-9._-]+$ ]] || [[ "$tarball" == *..* ]]; then
+    exit 1
+fi
+
 BACKUP_DIR="/backup"
+[ -d "$BACKUP_DIR" ] && [ ! -L "$BACKUP_DIR" ] || exit 1
 source_tar="$BACKUP_DIR/$tarball"
 
-if [ ! -f "$source_tar" ]; then
-    # If the user uses ONLY cloud backups (no 'local' in BACKUP_SYSTEM), 
-    # Hestia deletes the tarball before this hook runs. We must clean up the orphaned log.
-    [ -f "$BACKUP_DIR/$user.log" ] && rm -f "$BACKUP_DIR/$user.log"
+if [ ! -f "$source_tar" ] || [ -L "$source_tar" ]; then
+    # If the user uses ONLY cloud backups (no 'local' in BACKUP_SYSTEM),
+    # Hestia deletes the tarball before this hook runs. Clean up orphaned logs safely.
+    [ -f "$BACKUP_DIR/$user.log" ] && [ ! -L "$BACKUP_DIR/$user.log" ] && rm -f -- "$BACKUP_DIR/$user.log"
     log_file="${tarball%.tar}.log"
-    [ -f "$BACKUP_DIR/$log_file" ] && rm -f "$BACKUP_DIR/$log_file"
+    [ -f "$BACKUP_DIR/$log_file" ] && [ ! -L "$BACKUP_DIR/$log_file" ] && rm -f -- "$BACKUP_DIR/$log_file"
     exit 0
 fi
 
@@ -31,11 +36,10 @@ current_year=$(date +%Y)
 current_month=$(LC_TIME=C date +%m_%B | tr '[:lower:]' '[:upper:]')
 org_dir="$BACKUP_DIR/$current_year/$current_month/$user"
 
-# Create target directories
+# Create target directories with restricted group access (root:hestiaweb 0750)
 mkdir -p "$org_dir"
-chmod 755 "$BACKUP_DIR/$current_year" 2>/dev/null
-chmod 755 "$BACKUP_DIR/$current_year/$current_month" 2>/dev/null
-chmod 755 "$org_dir" 2>/dev/null
+chown root:hestiaweb "$BACKUP_DIR/$current_year" "$BACKUP_DIR/$current_year/$current_month" "$org_dir" 2>/dev/null || true
+chmod 750 "$BACKUP_DIR/$current_year" "$BACKUP_DIR/$current_year/$current_month" "$org_dir" 2>/dev/null || true
 
 # Move tarball
 mv -f "$source_tar" "$org_dir/"

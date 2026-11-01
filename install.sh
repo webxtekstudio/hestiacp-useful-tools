@@ -236,7 +236,8 @@ if ! echo "$backup_system" | grep -qE "b2|sftp|ftp|rclone" && [ -t 0 ]; then
             echo ""
             read -rp "  Bucket name: " b2_bucket
             read -rp "  Key ID:      " b2_keyid
-            read -rp "  App Key:     " b2_appkey
+            read -rsp "  App Key:     " b2_appkey
+            echo ""
             if [ -n "$b2_bucket" ] && [ -n "$b2_keyid" ] && [ -n "$b2_appkey" ]; then
                 echo ""
                 if v-add-backup-host b2 "$b2_bucket" "$b2_keyid" "$b2_appkey" 9>&- 2>&1; then
@@ -248,6 +249,7 @@ if ! echo "$backup_system" | grep -qE "b2|sftp|ftp|rclone" && [ -t 0 ]; then
             else
                 echo "  Skipped — missing credentials."
             fi
+            unset b2_appkey
             ;;
         3)
             echo ""
@@ -337,8 +339,9 @@ if [ "$SETUP_CRONS" = true ]; then
     echo ""
     echo "--- Setting Up Cron Jobs ---"
 
-    # Ensure log directories exist
-    mkdir -p /var/log/hestia/security-audit
+    # Ensure log directories exist with root-only permissions
+    install -d -m 0700 /var/log/hestia/security-audit
+    install -d -m 0700 /var/log/v-system-report
 
     if [ ! -f "$CRON_FILE" ]; then
         cat > "$CRON_FILE" << 'CRONHEADER'

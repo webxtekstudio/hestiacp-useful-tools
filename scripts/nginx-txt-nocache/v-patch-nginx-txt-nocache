@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
+import fnmatch
 import glob
 import os
 import re
+import stat
 import subprocess
+import tempfile
+
+HESTIA_DIR = "/usr/local/hestia"
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 pipe_patterns = [
     "/usr/local/hestia/data/templates/web/nginx/*.tpl",
     "/usr/local/hestia/data/templates/web/nginx/*.stpl",
     "/usr/local/hestia/data/templates/web/nginx/php-fpm/*.tpl",
     "/usr/local/hestia/data/templates/web/nginx/php-fpm/*.stpl",
-    "/home/*/conf/web/*/nginx*.conf",
 ]
 
 proxy_ext_patterns = [
@@ -30,38 +37,171 @@ def remove_txt_from_csv(match: re.Match) -> str:
     return f"{prefix}{updated_list}{suffix}"
 
 
-nginx_changed = 0
+def patch_root_file_in_dir_fd(dir_fd: int, filename: str, transform_fn) -> bool:
+    ffd = os.open(filename, FILE_FLAGS, dir_fd=dir_fd)
+    try:
+        st = os.fstat(ffd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_nlink != 1:
+            return False
+        with os.fdopen(os.dup(ffd), "r", encoding="utf-8", errors="ignore") as fh:
+            raw = fh.read()
+        updated = transform_fn(raw)
+        if updated == raw:
+            return False
+
+        tmp_name = f".{filename}.nocache.{os.getpid()}"
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        tfd = os.open(
+            tmp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=dir_fd,
+        )
+        try:
+            os.fchown(tfd, st.st_uid, st.st_gid)
+            os.fchmod(tfd, st.st_mode & 0o7777)
+            with os.fdopen(tfd, "w", encoding="utf-8", newline="\n") as out_fh:
+                out_fh.write(updated)
+                out_fh.flush()
+                os.fsync(out_fh.fileno())
+        except Exception:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
+
+        os.replace(tmp_name, filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return True
+    finally:
+        os.close(ffd)
+
+
+def patch_trusted_system_file(path: str, transform_fn) -> bool:
+    parent_dir = os.path.dirname(path)
+    filename = os.path.basename(path)
+    if not parent_dir or not filename or os.path.islink(parent_dir) or os.path.islink(path):
+        return False
+    dir_fd = os.open(parent_dir, DIR_FLAGS)
+    try:
+        dst = os.fstat(dir_fd)
+        if dst.st_uid != 0 or (dst.st_mode & 0o022) != 0:
+            return False
+        return patch_root_file_in_dir_fd(dir_fd, filename, transform_fn)
+    finally:
+        os.close(dir_fd)
+
+
+def patch_hestia_user_nginx_configs() -> int:
+    changed = 0
+    users_meta = os.path.join(HESTIA_DIR, "data", "users")
+    if not os.path.isdir(users_meta) or os.path.islink(users_meta):
+        return 0
+
+    try:
+        home_fd = os.open("/home", DIR_FLAGS)
+    except OSError:
+        return 0
+
+    try:
+        if os.fstat(home_fd).st_uid != 0:
+            return 0
+        for u_name in sorted(os.listdir(users_meta)):
+            if not SAFE_NAME_RE.match(u_name) or ".." in u_name:
+                continue
+            u_conf = os.path.join(users_meta, u_name, "user.conf")
+            if not os.path.isfile(u_conf) or os.path.islink(u_conf):
+                continue
+            try:
+                u_fd = os.open(u_name, DIR_FLAGS, dir_fd=home_fd)
+            except OSError:
+                continue
+            try:
+                try:
+                    conf_fd = os.open("conf", DIR_FLAGS, dir_fd=u_fd)
+                except OSError:
+                    continue
+                try:
+                    cst = os.fstat(conf_fd)
+                    if cst.st_uid != 0 or (cst.st_mode & 0o022) != 0:
+                        continue
+                    try:
+                        web_fd = os.open("web", DIR_FLAGS, dir_fd=conf_fd)
+                    except OSError:
+                        continue
+                    try:
+                        wst = os.fstat(web_fd)
+                        if wst.st_uid != 0 or (wst.st_mode & 0o022) != 0:
+                            continue
+                        with os.scandir(web_fd) as dom_it:
+                            for dom_entry in dom_it:
+                                if not dom_entry.is_dir(follow_symlinks=False):
+                                    continue
+                                if not SAFE_NAME_RE.match(dom_entry.name):
+                                    continue
+                                try:
+                                    dom_fd = os.open(dom_entry.name, DIR_FLAGS, dir_fd=web_fd)
+                                except OSError:
+                                    continue
+                                try:
+                                    dst = os.fstat(dom_fd)
+                                    if dst.st_uid != 0 or (dst.st_mode & 0o022) != 0:
+                                        continue
+                                    with os.scandir(dom_fd) as cfg_it:
+                                        for cfg_entry in cfg_it:
+                                            if not cfg_entry.is_file(follow_symlinks=False):
+                                                continue
+                                            if not fnmatch.fnmatch(cfg_entry.name, "nginx*.conf"):
+                                                continue
+                                            try:
+                                                if patch_root_file_in_dir_fd(
+                                                    dom_fd,
+                                                    cfg_entry.name,
+                                                    lambda raw: raw.replace("|txt|", "|") if "|txt|" in raw else raw,
+                                                ):
+                                                    changed += 1
+                                            except Exception:
+                                                pass
+                                finally:
+                                    os.close(dom_fd)
+                    finally:
+                        os.close(web_fd)
+                finally:
+                    os.close(conf_fd)
+            finally:
+                os.close(u_fd)
+    finally:
+        os.close(home_fd)
+
+    return changed
+
+
+nginx_changed = patch_hestia_user_nginx_configs()
 other_changed = 0
 
 for pat in pipe_patterns:
     for f in glob.glob(pat):
         try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                raw = fh.read()
-            if "|txt|" in raw:
-                updated = raw.replace("|txt|", "|")
-                with open(f, "w", encoding="utf-8", newline="\n") as fh:
-                    fh.write(updated)
-                if f.startswith("/home/"):
-                    nginx_changed += 1
-                else:
-                    other_changed += 1
+            if patch_trusted_system_file(
+                f, lambda raw: raw.replace("|txt|", "|") if "|txt|" in raw else raw
+            ):
+                other_changed += 1
         except Exception:
             pass
 
 for pat in proxy_ext_patterns:
     for f in glob.glob(pat):
-        if not os.path.isfile(f):
-            continue
         try:
-            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
-                raw = fh.read()
-            updated = PROXY_EXT_RE.sub(remove_txt_from_csv, raw)
-            if f.endswith("edit_web.php") and ", txt," in updated:
-                updated = updated.replace(", txt,", ",")
-            if updated != raw:
-                with open(f, "w", encoding="utf-8", newline="\n") as fh:
-                    fh.write(updated)
+            def _transform_proxy(raw: str, target_path: str = f) -> str:
+                updated = PROXY_EXT_RE.sub(remove_txt_from_csv, raw)
+                if target_path.endswith("edit_web.php") and ", txt," in updated:
+                    updated = updated.replace(", txt,", ",")
+                return updated
+
+            if patch_trusted_system_file(f, _transform_proxy):
                 other_changed += 1
         except Exception:
             pass
@@ -70,4 +210,3 @@ if nginx_changed > 0:
     check = subprocess.run(["nginx", "-t"], capture_output=True)
     if check.returncode == 0:
         subprocess.run(["systemctl", "reload", "nginx"], check=False)
-

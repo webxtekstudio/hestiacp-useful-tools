@@ -104,20 +104,25 @@ check_file_exposure() {
         result_pass "B12" "No standalone DB managers exposed [${domain}]"
     fi
 
-    # Automated Symlink Bypass Testing
-    local symlink_test="${docroot}/.symlink_test_audit"
-    CLEANUP_FILES+=("$symlink_test")
-    if ln -s /etc/passwd "$symlink_test" 2>/dev/null; then
-        local symlink_resp
-        symlink_resp=$(curl -s -m 5 "http://${domain}/.symlink_test_audit" 2>/dev/null | head -50)
-        if echo "$symlink_resp" | grep -q "root:x:0:0"; then
-            result_critical "B24" "Symlink bypass allowed! Web server follows symlinks to /etc/passwd [${domain}]"
+    # Automated Symlink Bypass Testing (run as tenant user, never as root or against /etc/passwd)
+    local rand_tok
+    rand_tok=$(head -c 8 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    [ -z "$rand_tok" ] && rand_tok="$$"
+    local symlink_name=".symlink_test_audit_${rand_tok}"
+    local symlink_test="${docroot}/${symlink_name}"
+    if command -v runuser >/dev/null 2>&1 && id -u "$user" >/dev/null 2>&1 && [ ! -L "$docroot" ] && \
+       runuser -u "$user" -- ln -s /etc/hostname "$symlink_test" 2>/dev/null; then
+        local expected_host symlink_resp
+        expected_host=$(cat /etc/hostname 2>/dev/null | tr -d '\r\n')
+        symlink_resp=$(curl -s -m 5 "http://${domain}/${symlink_name}" 2>/dev/null | head -5 | tr -d '\r\n')
+        runuser -u "$user" -- rm -f "$symlink_test" 2>/dev/null || rm -f "$symlink_test" 2>/dev/null
+        if [ -n "$expected_host" ] && [ "$symlink_resp" = "$expected_host" ]; then
+            result_critical "B24" "Symlink bypass allowed! Web server follows tenant symlinks outside docroot [${domain}]"
         else
             result_pass "B24" "Symlink resolution outside docroot is blocked [${domain}]"
         fi
-        rm -f "$symlink_test"
     else
-        result_info "B24" "Could not create symlink to test FollowSymLinks enforcement [${domain}]"
+        result_info "B24" "Could not create tenant symlink to test FollowSymLinks enforcement [${domain}]"
     fi
 }
 

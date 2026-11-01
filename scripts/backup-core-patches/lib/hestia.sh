@@ -253,31 +253,38 @@ PATCH_EOF
 patch_delete_command() {
     local script="$HESTIA/bin/v-delete-user-backup"
     [ ! -f "$script" ] && return 1
-    grep -q "hestia-backup-symlink-handler" "$script" 2>/dev/null && return 0
+    grep -q "hestia-backup-symlink-handler-v2" "$script" 2>/dev/null && return 0
 
+    if grep -q "hestia-backup-symlink-handler" "$script" 2>/dev/null && [ -f "${script}.original" ]; then
+        cp "${script}.original" "$script" 2>/dev/null || true
+    fi
     [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
-    local temp=$(mktemp /tmp/patch-delete.XXXXXX)
+    local temp
+    temp=$(umask 077 && mktemp /tmp/patch-delete.XXXXXX) || return 1
     local line_num=$(grep -n 'rm -f "$backup_folder/$2"' "$script" | cut -d: -f1 | head -1)
 
     if [ -n "$line_num" ]; then
         sed -n "1,$((line_num-1))p" "$script" > "$temp"
         cat >> "$temp" << 'PATCH_EOF'
-		# hestia-backup-symlink-handler
+		# hestia-backup-symlink-handler-v2
 		backup_file_path="$backup_folder/$2"
 		if [ -L "$backup_file_path" ]; then
+			real_root=$(readlink -f "$backup_folder" 2>/dev/null)
 			real_file=$(readlink -f "$backup_file_path" 2>/dev/null)
-			rm -f "$backup_file_path"
-			[ -n "$real_file" ] && [ -f "$real_file" ] && rm -f "$real_file" "${real_file%.tar}.log" 2>/dev/null
+			rm -f -- "$backup_file_path"
+			if [ -n "$real_file" ] && [ -n "$real_root" ] && [[ "$real_file" == "${real_root%/}/"* ]] && [ -f "$real_file" ]; then
+				rm -f -- "$real_file" "${real_file%.tar}.log" 2>/dev/null
+			fi
 		else
-			rm -f "$backup_file_path"
+			rm -f -- "$backup_file_path"
 		fi
 PATCH_EOF
         sed -n "$((line_num+1)),\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-backup-symlink-handler" "$temp" 2>/dev/null; then
+        if grep -q "hestia-backup-symlink-handler-v2" "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
-            _log "[$(date)] : Patched v-delete-user-backup (symlink-aware)"
+            _log "[$(date)] : Patched v-delete-user-backup (symlink-aware v2)"
             return 0
         fi
     fi

@@ -69,9 +69,9 @@ check_wordpress() {
         result_pass "B65" "WordPress REST API security hardening MU-plugin present [${domain}]"
     fi
 
-    if command -v wp >/dev/null 2>&1; then
+    if command -v wp >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1 && id -u "$user" >/dev/null 2>&1; then
         local suspicious_admins
-        suspicious_admins=$(wp user list --path="$docroot" --role=administrator --fields=user_login,user_email --allow-root 2>/dev/null | grep -iE "@nx\.invalid|@wp2shell|wp2shell|locatesuid23|wordpress-svc\.internal" || true)
+        suspicious_admins=$(timeout 15 runuser -u "$user" -- wp user list --path="$docroot" --skip-plugins --skip-themes --role=administrator --fields=user_login,user_email 2>/dev/null | grep -iE "@nx\.invalid|@wp2shell|wp2shell|locatesuid23|wordpress-svc\.internal" || true)
         if [ -n "$suspicious_admins" ]; then
             result_fail "B66" "Suspicious administrator account(s) detected [${domain}]"
         fi

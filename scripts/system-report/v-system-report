@@ -135,10 +135,9 @@ declare -A module_health_score
 declare -A module_health_level
 
 setup_logging() {
-    if [ ! -d "$LOG_DIR" ]; then
-        mkdir -p "$LOG_DIR"
-        chmod 755 "$LOG_DIR"
-    fi
+    umask 077
+    mkdir -p "$LOG_DIR"
+    chmod 700 "$LOG_DIR"
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
     LOG_FILE="$LOG_DIR/$timestamp-v-system-report.log"
     {
@@ -152,6 +151,7 @@ setup_logging() {
         echo "================================================"
         echo ""
     } > "$LOG_FILE"
+    chmod 600 "$LOG_FILE" 2>/dev/null || true
 }
 
 log_message() {
@@ -653,10 +653,10 @@ check_fail2ban_status() {
                 log_message "${GREEN}[OK] Active jails: $(echo $jail_list | tr ' ' ', ')${NC}"
                 
                 for jail in $jail_list; do
-                    jail=$(echo "$jail" | xargs)
-                    [ -z "$jail" ] && continue
+                    jail=$(printf '%s' "$jail" | tr -d '[:space:]')
+                    [[ "$jail" =~ ^[A-Za-z0-9._-]+$ ]] || continue
                     
-                    local jail_status=$(run_with_timeout 3 "fail2ban-client status $jail 2>/dev/null" || echo "")
+                    local jail_status=$(timeout 3 fail2ban-client status "$jail" 2>/dev/null || echo "")
                     if [ -n "$jail_status" ]; then
                         local jail_banned=0
                         local ip_section_start=$(echo "$jail_status" | grep -n "Banned IP list:" | cut -d: -f1)
@@ -859,20 +859,26 @@ check_ssl_status() {
     local cert_files=()
     local seen_certs=()
     
-    [ -f "/usr/local/hestia/ssl/certificate.crt" ] && cert_files+=("/usr/local/hestia/ssl/certificate.crt")
+    [ -f "/usr/local/hestia/ssl/certificate.crt" ] && [ ! -L "/usr/local/hestia/ssl/certificate.crt" ] && cert_files+=("/usr/local/hestia/ssl/certificate.crt")
     
-    for user_home in /home/*/; do
-        [ -d "$user_home" ] || continue
+    for user_conf in "${HESTIA:-/usr/local/hestia}/data/users"/*/user.conf; do
+        [ -f "$user_conf" ] || continue
+        local u_name
+        u_name=$(basename "$(dirname "$user_conf")")
+        [[ "$u_name" =~ ^[a-zA-Z0-9._-]+$ ]] || continue
+        local user_home="/home/$u_name"
+        [ -d "$user_home" ] && [ ! -L "$user_home" ] || continue
         
-        if [ -d "$user_home/conf/web" ]; then
+        if [ -d "$user_home/conf" ] && [ ! -L "$user_home/conf" ] && [ "$(stat -c '%u' "$user_home/conf" 2>/dev/null)" = "0" ] && \
+           [ -d "$user_home/conf/web" ] && [ ! -L "$user_home/conf/web" ] && [ "$(stat -c '%u' "$user_home/conf/web" 2>/dev/null)" = "0" ]; then
             for domain_dir in "$user_home/conf/web"/*/; do
-                [ -d "$domain_dir" ] || continue
+                [ -d "$domain_dir" ] && [ ! -L "${domain_dir%/}" ] && [ "$(stat -c '%u' "$domain_dir" 2>/dev/null)" = "0" ] || continue
                 
-                if [ -d "$domain_dir/ssl" ]; then
+                if [ -d "$domain_dir/ssl" ] && [ ! -L "$domain_dir/ssl" ] && [ "$(stat -c '%u' "$domain_dir/ssl" 2>/dev/null)" = "0" ]; then
                     for cert_file in "$domain_dir/ssl"/*.crt "$domain_dir/ssl"/*.pem; do
-                        if [ -f "$cert_file" ] && [[ ! "$cert_file" =~ \.key$ ]]; then
-                            local cert_hash=$(md5sum "$cert_file" 2>/dev/null | cut -d' ' -f1)
-                            if [[ ! " ${seen_certs[@]} " =~ " ${cert_hash} " ]]; then
+                        if [ -f "$cert_file" ] && [ ! -L "$cert_file" ] && [[ ! "$cert_file" =~ \.key$ ]]; then
+                            local cert_hash=$(md5sum -- "$cert_file" 2>/dev/null | cut -d' ' -f1)
+                            if [[ ! " ${seen_certs[*]} " =~ " ${cert_hash} " ]]; then
                                 cert_files+=("$cert_file")
                                 seen_certs+=("$cert_hash")
                             fi
@@ -881,9 +887,9 @@ check_ssl_status() {
                 fi
                 
                 for cert_file in "$domain_dir"*.crt "$domain_dir"*.pem; do
-                    if [ -f "$cert_file" ] && [[ ! "$cert_file" =~ \.key$ ]] && [[ ! "$cert_file" =~ \.pub$ ]]; then
-                        local cert_hash=$(md5sum "$cert_file" 2>/dev/null | cut -d' ' -f1)
-                        if [[ ! " ${seen_certs[@]} " =~ " ${cert_hash} " ]]; then
+                    if [ -f "$cert_file" ] && [ ! -L "$cert_file" ] && [[ ! "$cert_file" =~ \.key$ ]] && [[ ! "$cert_file" =~ \.pub$ ]]; then
+                        local cert_hash=$(md5sum -- "$cert_file" 2>/dev/null | cut -d' ' -f1)
+                        if [[ ! " ${seen_certs[*]} " =~ " ${cert_hash} " ]]; then
                             cert_files+=("$cert_file")
                             seen_certs+=("$cert_hash")
                         fi
@@ -903,15 +909,15 @@ check_ssl_status() {
     fi
     
     for cert_file in "${cert_files[@]}"; do
-        local cert_name=$(basename "$cert_file")
-        local expiry_date=$(run_with_timeout 3 "openssl x509 -in \"$cert_file\" -noout -enddate 2>/dev/null | cut -d= -f2")
+        local cert_name=$(basename -- "$cert_file")
+        local expiry_date=$(timeout 3 openssl x509 -in "$cert_file" -noout -enddate 2>/dev/null | cut -d= -f2)
         
         if [ -n "$expiry_date" ]; then
             local expiry_ts=$(date -d "$expiry_date" +%s 2>/dev/null)
             local current_ts=$(date +%s)
             local days_until_expiry=$(( (expiry_ts - current_ts) / 86400 ))
             
-            local cert_valid=$(run_with_timeout 3 "openssl x509 -in \"$cert_file\" -noout -checkend 0 2>&1")
+            local cert_valid=$(timeout 3 openssl x509 -in "$cert_file" -noout -checkend 0 2>&1)
             local is_valid=1
             if echo "$cert_valid" | grep -q "Certificate will not expire"; then
                 is_valid=0
@@ -1728,25 +1734,31 @@ check_database_health() {
         return 0
     fi
     
-    local databases=$($DB_CMD -N -e "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys');" 2>/dev/null)
+    local databases=$($DB_CMD -N -B -e "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys');" 2>/dev/null)
+    local total_dbs=0
     
-    for db in $databases; do
+    while IFS= read -r db; do
         [ -z "$db" ] && continue
+        total_dbs=$((total_dbs + 1))
+        local db_sql="${db//\\/\\\\}"
+        db_sql="${db_sql//\'/\'\'}"
+        local db_ident="${db//\`/\`\`}"
         
-        local tables=$($DB_CMD -N -e "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='$db' AND ENGINE='MyISAM';" 2>/dev/null)
-        for table in $tables; do
+        local tables=$($DB_CMD -N -B -e "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='${db_sql}' AND ENGINE='MyISAM';" 2>/dev/null)
+        while IFS= read -r table; do
             [ -z "$table" ] && continue
-            local check_result=$($DB_CMD -N -e "CHECK TABLE \`$db\`.\`$table\`;" 2>/dev/null | grep -c "corrupt\|error" || echo "0")
+            local table_ident="${table//\`/\`\`}"
+            local check_result=$($DB_CMD -N -e "CHECK TABLE \`${db_ident}\`.\`${table_ident}\`;" 2>/dev/null | grep -ciE "corrupt|error|damaged" || echo "0")
             if [ "$check_result" -gt 0 ] 2>/dev/null; then
                 ((corrupted_tables++))
             fi
-        done
+        done <<< "$tables"
         
-        local large_table_count=$($DB_CMD -N -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='$db' AND DATA_LENGTH > 1073741824;" 2>/dev/null || echo "0")
+        local large_table_count=$($DB_CMD -N -B -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='${db_sql}' AND DATA_LENGTH > 1073741824;" 2>/dev/null || echo "0")
         large_table_count=$(echo "$large_table_count" | tr -d '\n\r ' | sed 's/^0*//')
         [ -z "$large_table_count" ] || ! [[ "$large_table_count" =~ ^[0-9]+$ ]] && large_table_count=0
         large_tables=$((large_tables + large_table_count))
-    done
+    done <<< "$databases"
     
     if [ "$corrupted_tables" -gt 0 ] 2>/dev/null; then
         log_message "${RED}[FAIL] Corrupted database tables: $corrupted_tables${NC}"
@@ -1761,7 +1773,6 @@ check_database_health() {
         ((low_issues++))
     fi
     
-    local total_dbs=$(echo "$databases" | wc -l)
     log_message "${GREEN}[OK] Databases checked: $total_dbs${NC}"
     
     if [ $issues -gt 0 ]; then
@@ -2079,15 +2090,32 @@ check_system_uptime() {
     fi
 }
 
+_sysreport_html_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    s="${s//\"/&quot;}"
+    s="${s//\'/&#39;}"
+    printf '%s' "$s"
+}
+
 send_html_email() {
-    local admin_email="$1"
+    local admin_email
+    admin_email=$(printf '%s' "$1" | tr -d '\r\n')
     [ -z "$admin_email" ] && return 1
     
-    local hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+    local hostname
+    hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
+    hostname=$(printf '%s' "$hostname" | tr -d '\r\n')
+    local hostname_html
+    hostname_html=$(_sysreport_html_escape "$hostname")
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
     local mail_from
-    local mail_from_name="${MAIL_FROM_NAME:-HestiaCP System Report}"
+    local mail_from_name
+    mail_from_name=$(printf '%s' "${MAIL_FROM_NAME:-HestiaCP System Report}" | tr -d '\r\n')
     mail_from=$(get_mail_from_address "$hostname")
+    mail_from=$(printf '%s' "$mail_from" | tr -d '\r\n')
     
     local total_issues=$((high_issues + medium_issues + low_issues))
     
@@ -2104,30 +2132,38 @@ send_html_email() {
         local status_text="[OK] ALL SYSTEMS OK"
         local subject="HestiaCP System Report - $hostname - OK"
     fi
+    subject=$(printf '%s' "$subject" | tr -d '\r\n')
     
     local modules_list=""
     for module in "${!detailed_report[@]}"; do
         local health_level="${module_health_level[$module]}"
         local health_score="${module_health_score[$module]}"
         local details="${detailed_report[$module]}"
+        local module_html details_html score_html
+        module_html=$(_sysreport_html_escape "$module")
+        details_html=$(_sysreport_html_escape "$details")
+        score_html=$(_sysreport_html_escape "$health_score")
         
         local module_color="#4CAF50"
         [ "$health_level" = "CRITICAL" ] && module_color="#F44336"
         [ "$health_level" = "POOR" ] && module_color="#FF9800"
         [ "$health_level" = "FAIR" ] && module_color="#FFC107"
         
-        modules_list="${modules_list}<tr><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#E0E0E0;\"><b style=\"color:${module_color};\">$module</b> <span style=\"color:#666; font-size:11px;\">($health_score/100)</span></td><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#A0A0A0;\">$details</td></tr>"
+        modules_list="${modules_list}<tr><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#E0E0E0;\"><b style=\"color:${module_color};\">${module_html}</b> <span style=\"color:#666; font-size:11px;\">(${score_html}/100)</span></td><td style=\"padding:8px 12px; border-bottom:1px solid #555; color:#A0A0A0;\">${details_html}</td></tr>"
     done
     
     local critical_info=""
     if [ -n "${detailed_report[services]}" ]; then
-        critical_info="${critical_info}<p style=\"margin:10px 0; padding:10px; background:#2C2C2C; border-left:3px solid ${status_color}; color:#E0E0E0;\"><b>Services:</b> ${detailed_report[services]}</p>"
+        local svc_html=$(_sysreport_html_escape "${detailed_report[services]}")
+        critical_info="${critical_info}<p style=\"margin:10px 0; padding:10px; background:#2C2C2C; border-left:3px solid ${status_color}; color:#E0E0E0;\"><b>Services:</b> ${svc_html}</p>"
     fi
     if [ -n "${detailed_report[fail2ban]}" ]; then
-        critical_info="${critical_info}<p style=\"margin:10px 0; padding:10px; background:#2C2C2C; border-left:3px solid ${status_color}; color:#E0E0E0;\"><b>Fail2Ban:</b> ${detailed_report[fail2ban]}</p>"
+        local f2b_html=$(_sysreport_html_escape "${detailed_report[fail2ban]}")
+        critical_info="${critical_info}<p style=\"margin:10px 0; padding:10px; background:#2C2C2C; border-left:3px solid ${status_color}; color:#E0E0E0;\"><b>Fail2Ban:</b> ${f2b_html}</p>"
     fi
     if [ -n "${detailed_report[system_resources]}" ]; then
-        critical_info="${critical_info}<p style=\"margin:10px 0; padding:10px; background:#2C2C2C; border-left:3px solid ${status_color}; color:#E0E0E0;\"><b>Resources:</b> ${detailed_report[system_resources]}</p>"
+        local res_html=$(_sysreport_html_escape "${detailed_report[system_resources]}")
+        critical_info="${critical_info}<p style=\"margin:10px 0; padding:10px; background:#2C2C2C; border-left:3px solid ${status_color}; color:#E0E0E0;\"><b>Resources:</b> ${res_html}</p>"
     fi
     
     local html_body="<!DOCTYPE html>
@@ -2140,7 +2176,7 @@ send_html_email() {
 <div style=\"max-width:800px; margin:0 auto; background:#3A3A3A; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.5); overflow:hidden; border:1px solid #555;\">
   <div style=\"background:${status_color}; color:#fff; padding:16px; text-align:center; border-bottom:2px solid rgba(255,255,255,.1);\">
     <h1 style=\"margin:0; font-size:20px; font-weight:bold;\">HestiaCP System Report</h1>
-    <p style=\"margin:4px 0 0 0; font-size:12px; opacity:0.9;\">${hostname}</p>
+    <p style=\"margin:4px 0 0 0; font-size:12px; opacity:0.9;\">${hostname_html}</p>
   </div>
   <div style=\"padding:20px;\">
     <table cellspacing=\"0\" cellpadding=\"0\" style=\"width:100%; border-collapse:collapse; margin-bottom:20px; background:#2C2C2C; border:1px solid #555;\">
@@ -2183,22 +2219,33 @@ send_html_email() {
     <p style=\"margin-top:10px; font-size:11px; color:#666;\">Report generated on: ${timestamp}</p>
   </div>
   <div style=\"background:#2C2C2C; padding:12px; text-align:center; font-size:11px; color:#A0A0A0; border-top:1px solid #555;\">
-    ${hostname} - ${timestamp}
+    ${hostname_html} - ${timestamp}
   </div>
 </div>
 </body>
 </html>"
 
-    local temp_html="/tmp/system_report_email_$$.html"
-    echo "$html_body" > "$temp_html"
+    local tmp_dir
+    tmp_dir=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/v-system-report.XXXXXX") || return 1
+    local temp_html="$tmp_dir/report.html"
+    if ! printf '%s\n' "$html_body" > "$temp_html"; then
+        rm -rf "$tmp_dir" 2>/dev/null
+        return 1
+    fi
     
     local SENDMAIL="$HESTIA/web/inc/mail-wrapper.php"
     [ ! -f "$SENDMAIL" ] && SENDMAIL="/usr/local/hestia/web/inc/mail-wrapper.php"
     
     if [ -f "$SENDMAIL" ] && [ -f "$LOG_FILE" ]; then
         if [ -f "$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php" ]; then
-            local temp_php="/tmp/send_report_email_$$.php"
-            cat > "$temp_php" << 'EOFPHP'
+            HESTIA="$HESTIA" \
+            REPORT_MAIL_FROM="$mail_from" \
+            REPORT_MAIL_FROM_NAME="$mail_from_name" \
+            REPORT_ADMIN_EMAIL="$admin_email" \
+            REPORT_SUBJECT="$subject" \
+            REPORT_TEMP_HTML="$temp_html" \
+            REPORT_LOG_FILE="$LOG_FILE" \
+            php << 'EOFPHP' 2>/dev/null
 <?php
 $hestia = getenv('HESTIA') ?: '/usr/local/hestia';
 require_once $hestia . '/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php';
@@ -2217,6 +2264,7 @@ $logFile = (string) getenv('REPORT_LOG_FILE');
 
 $mail = new PHPMailer(true);
 try {
+    $mail->CharSet = 'UTF-8';
     $mail->isMail();
     $mail->setFrom($mailFrom, $mailFromName);
     $mail->Sender = $mailFrom;
@@ -2231,21 +2279,12 @@ try {
 } catch (Exception $e) {
     echo "ERROR: " . $mail->ErrorInfo;
 }
-?>
 EOFPHP
-            HESTIA="$HESTIA" \
-            REPORT_MAIL_FROM="$mail_from" \
-            REPORT_MAIL_FROM_NAME="$mail_from_name" \
-            REPORT_ADMIN_EMAIL="$admin_email" \
-            REPORT_SUBJECT="$subject" \
-            REPORT_TEMP_HTML="$temp_html" \
-            REPORT_LOG_FILE="$LOG_FILE" \
-            php "$temp_php" 2>/dev/null
-            rm -f "$temp_php" 2>/dev/null
         else
-            cat "$temp_html" | $SENDMAIL -s "$subject" "$admin_email" "yes" 2>/dev/null
+            cat "$temp_html" | "$SENDMAIL" -s "$subject" "$admin_email" "yes" 2>/dev/null
         fi
     else
+        local boundary="BOUNDARY_$(date +%Y%m%d%H%M%S)_$$"
         if [ -f "$LOG_FILE" ]; then
             (
                 echo "Subject: $subject"
@@ -2253,22 +2292,22 @@ EOFPHP
                 echo "From: $mail_from_name <$mail_from>"
                 echo "Reply-To: $mail_from"
                 echo "To: $admin_email"
-                echo "Content-Type: multipart/mixed; boundary=\"BOUNDARY123\""
+                echo "Content-Type: multipart/mixed; boundary=\"$boundary\""
                 echo
-                echo "--BOUNDARY123"
+                echo "--$boundary"
                 echo "Content-Type: text/html; charset=UTF-8"
                 echo "Content-Transfer-Encoding: 7bit"
                 echo
                 cat "$temp_html"
                 echo
-                echo "--BOUNDARY123"
+                echo "--$boundary"
                 echo "Content-Type: text/plain; name=\"system_report.log\""
                 echo "Content-Disposition: attachment; filename=\"system_report.log\""
                 echo "Content-Transfer-Encoding: base64"
                 echo
                 base64 < "$LOG_FILE" 2>/dev/null || cat "$LOG_FILE"
                 echo
-                echo "--BOUNDARY123--"
+                echo "--$boundary--"
             ) | /usr/sbin/sendmail -f "$mail_from" -t 2>/dev/null
         else
             (
@@ -2284,7 +2323,7 @@ EOFPHP
         fi
     fi
     
-    rm -f "$temp_html" 2>/dev/null
+    rm -rf "$tmp_dir" 2>/dev/null
     return 0
 }
 

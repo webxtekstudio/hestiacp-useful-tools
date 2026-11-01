@@ -99,11 +99,15 @@ done
 
 # --- Option: Unban IP --------------------------------------------------------
 if [ -n "$UNBAN_IP" ]; then
+    if ! python3 -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "$UNBAN_IP" >/dev/null 2>&1; then
+        echo -e "${RED}ERROR: Invalid IPv4/IPv6 address: $UNBAN_IP${NC}" >&2
+        exit 1
+    fi
     echo -e "${BLUE}=== Unbanning IP: $UNBAN_IP ===${NC}"
     for jail in dovecot-iptables exim-iptables recidive; do
         if fail2ban-client status "$jail" &>/dev/null; then
-            if fail2ban-client status "$jail" | grep -q "$UNBAN_IP"; then
-                fail2ban-client set "$jail" unbanip "$UNBAN_IP" && \
+            if fail2ban-client status "$jail" | grep -Fq -- "$UNBAN_IP"; then
+                fail2ban-client set "$jail" unbanip -- "$UNBAN_IP" && \
                     echo -e "  -> ${GREEN}[UNBANNED]${NC} Removed $UNBAN_IP from $jail"
             else
                 echo -e "  -> [INFO] $UNBAN_IP is not banned in $jail"

@@ -90,6 +90,7 @@ log_warn() { echo -e "  ${RED}[WARN]${NC} $1"; }
 log_skip() { echo -e "  ${YELLOW}[SKIP]${NC} $1"; SKIPPED_TOTAL=$((SKIPPED_TOTAL + 1)); }
 
 init_log() {
+    umask 077
     mkdir -p "$LOG_DIR" 2>/dev/null
     chmod 700 "$LOG_DIR" 2>/dev/null
     LOG_FILE="$LOG_DIR/$(date +%Y%m%d-%H%M%S).log"
@@ -101,6 +102,7 @@ init_log() {
         echo "# Format: ACTION | TYPE | PATH | BEFORE | AFTER"
         echo "#=========================================="
     } > "$LOG_FILE"
+    chmod 600 "$LOG_FILE" 2>/dev/null || true
 }
 
 log_change() {
@@ -114,7 +116,7 @@ log_change() {
 
 snapshot_perms() {
     local pubhtml="$1"
-    find "$pubhtml" -maxdepth 5 \( -type f -o -type d \) -printf '%m %U:%G %p\n' 2>/dev/null | sort -k3
+    find -P "$pubhtml" -maxdepth 5 \( -type f -o -type d \) -printf '%m %U:%G %p\n' 2>/dev/null | sort -k3
 }
 
 record_diff() {
@@ -146,66 +148,412 @@ record_diff() {
     echo "# Total changes: $changes_found" >> "$LOG_FILE"
 }
 
-is_more_permissive_than() {
-    local actual="$1"
-    local threshold="$2"
-    local actual_dec=$(printf "%d" "0$actual" 2>/dev/null)
-    local threshold_dec=$(printf "%d" "0$threshold" 2>/dev/null)
-    [ "$actual_dec" -gt "$threshold_dec" ] 2>/dev/null && return 0
-    return 1
+CURRENT_USER=""
+CURRENT_DOMAIN=""
+CURRENT_WEBDIR=""
+
+validate_hestia_user() {
+    local u="$1"
+    [[ "$u" =~ ^[a-zA-Z0-9._-]+$ ]] || return 1
+    [ "$u" != "root" ] || return 1
+    [ -f "$HESTIA/data/users/$u/user.conf" ] && [ ! -L "$HESTIA/data/users/$u/user.conf" ] || return 1
+    local uid
+    uid=$(id -u "$u" 2>/dev/null) || return 1
+    [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ge 500 ] || return 1
+    return 0
+}
+
+validate_domain_name() {
+    local d="$1"
+    [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || return 1
+    [[ "$d" != *..* ]] || return 1
+    return 0
+}
+
+# Descriptor-pinned filesystem engine: walks /home -> $user -> web -> $domain -> rel_path
+# opening EVERY path component with O_NOFOLLOW and applying fchmod/fchown on open file descriptors.
+_py_fs_op() {
+    local op="$1"
+    local user="$2"
+    local domain="$3"
+    local rel_path="$4"
+    local target_perm="${5:-755}"
+    local file_perm="${6:-644}"
+    local mode_flag="live"
+    [ "$DRY_RUN" = true ] && mode_flag="dry"
+    [ "$AUDIT_ONLY" = true ] && mode_flag="audit"
+
+    python3 - "$op" "$user" "$domain" "$rel_path" "$target_perm" "$file_perm" "$mode_flag" << 'PYEOF' 2>/dev/null
+import fnmatch
+import grp
+import os
+import pwd
+import stat
+import sys
+
+op, user, domain, rel_path, target_perm_s, file_perm_s, mode_flag = sys.argv[1:8]
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW
+
+try:
+    pw = pwd.getpwnam(user)
+    uid = pw.pw_uid
+    gid = pw.pw_gid
+    if uid < 500:
+        sys.exit(2)
+except KeyError:
+    sys.exit(2)
+
+target_mode = int(target_perm_s, 8)
+file_mode = int(file_perm_s, 8)
+
+
+def open_webdir_fd() -> int:
+    home_fd = os.open("/home", DIR_FLAGS)
+    try:
+        if os.fstat(home_fd).st_uid != 0:
+            raise PermissionError("/home not owned by root")
+        user_fd = os.open(user, DIR_FLAGS, dir_fd=home_fd)
+    finally:
+        os.close(home_fd)
+    try:
+        if os.fstat(user_fd).st_uid not in (0, uid):
+            raise PermissionError("Unexpected user home owner")
+        web_fd = os.open("web", DIR_FLAGS, dir_fd=user_fd)
+    finally:
+        os.close(user_fd)
+    try:
+        if os.fstat(web_fd).st_uid not in (0, uid):
+            raise PermissionError("Unexpected web dir owner")
+        dom_fd = os.open(domain, DIR_FLAGS, dir_fd=web_fd)
+    finally:
+        os.close(web_fd)
+    if os.fstat(dom_fd).st_uid not in (0, uid):
+        os.close(dom_fd)
+        raise PermissionError("Unexpected domain dir owner")
+    return dom_fd
+
+
+def split_rel(p: str):
+    parts = [seg for seg in p.split("/") if seg]
+    if any(seg in (".", "..") for seg in parts):
+        raise PermissionError("Path traversal refused")
+    return parts
+
+
+def open_parent_and_leaf(root_fd: int, parts):
+    cur = os.dup(root_fd)
+    try:
+        for seg in parts[:-1]:
+            nxt = os.open(seg, DIR_FLAGS, dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        return cur, parts[-1]
+    except Exception:
+        os.close(cur)
+        raise
+
+
+def fmt_oct(m: int) -> str:
+    return f"{m & 0o7777:03o}"
+
+
+def owner_str(st) -> str:
+    try:
+        u = pwd.getpwuid(st.st_uid).pw_name
+    except KeyError:
+        u = str(st.st_uid)
+    try:
+        g = grp.getgrgid(st.st_gid).gr_name
+    except KeyError:
+        g = str(st.st_gid)
+    return f"{u}:{g}"
+
+
+def is_more_permissive(cur: int, thresh: int) -> bool:
+    cur &= 0o7777
+    thresh &= 0o7777
+    return cur > thresh or (cur & ~thresh) != 0
+
+
+try:
+    web_fd = open_webdir_fd()
+except OSError:
+    print("MISSING")
+    sys.exit(0)
+
+try:
+    parts = split_rel(rel_path)
+    if not parts:
+        print("MISSING")
+        sys.exit(0)
+
+    if op in ("harden_file", "harden_exec"):
+        try:
+            parent_fd, leaf = open_parent_and_leaf(web_fd, parts)
+        except OSError:
+            print("MISSING")
+            sys.exit(0)
+        try:
+            try:
+                ffd = os.open(leaf, FILE_FLAGS, dir_fd=parent_fd)
+            except OSError:
+                print("MISSING")
+                sys.exit(0)
+            try:
+                st = os.fstat(ffd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    print("MISSING")
+                    sys.exit(0)
+                cur = st.st_mode & 0o7777
+                need = (cur != 0o755) if op == "harden_exec" else is_more_permissive(cur, target_mode)
+                desired = 0o755 if op == "harden_exec" else target_mode
+                if need:
+                    if mode_flag == "live":
+                        os.fchmod(ffd, desired)
+                        print(f"FIX\t{fmt_oct(cur)}\t{fmt_oct(desired)}")
+                    elif mode_flag == "dry":
+                        print(f"DRY\t{fmt_oct(cur)}\t{fmt_oct(desired)}")
+                    else:
+                        print(f"WARN\t{fmt_oct(cur)}\t{fmt_oct(desired)}")
+                else:
+                    print("OK")
+            finally:
+                os.close(ffd)
+        finally:
+            os.close(parent_fd)
+
+    elif op == "harden_dir":
+        cur_fd = os.dup(web_fd)
+        try:
+            for seg in parts:
+                nxt = os.open(seg, DIR_FLAGS, dir_fd=cur_fd)
+                os.close(cur_fd)
+                cur_fd = nxt
+            st = os.fstat(cur_fd)
+            cur = st.st_mode & 0o7777
+            if is_more_permissive(cur, target_mode):
+                if mode_flag == "live":
+                    os.fchmod(cur_fd, target_mode)
+                    print(f"FIX\t{fmt_oct(cur)}\t{fmt_oct(target_mode)}")
+                elif mode_flag == "dry":
+                    print(f"DRY\t{fmt_oct(cur)}\t{fmt_oct(target_mode)}")
+                else:
+                    print(f"WARN\t{fmt_oct(cur)}\t{fmt_oct(target_mode)}")
+            else:
+                print("OK")
+        except OSError:
+            print("MISSING")
+        finally:
+            os.close(cur_fd)
+
+    elif op == "restore_writable":
+        cur_fd = os.dup(web_fd)
+        try:
+            for seg in parts:
+                nxt = os.open(seg, DIR_FLAGS, dir_fd=cur_fd)
+                os.close(cur_fd)
+                cur_fd = nxt
+            st = os.fstat(cur_fd)
+            if mode_flag == "dry":
+                print("DRY")
+            elif mode_flag == "audit":
+                ow = owner_str(st)
+                if ow != f"{user}:{user}":
+                    print(f"WARN\t{ow}")
+                else:
+                    print("OK")
+            else:
+                def walk_writable(dfd: int):
+                    os.fchown(dfd, uid, gid)
+                    os.fchmod(dfd, target_mode)
+                    with os.scandir(dfd) as it:
+                        for entry in it:
+                            try:
+                                est = entry.stat(follow_symlinks=False)
+                            except OSError:
+                                continue
+                            if stat.S_ISLNK(est.st_mode):
+                                if est.st_uid == 0:
+                                    try:
+                                        os.chown(entry.name, uid, gid, dir_fd=dfd, follow_symlinks=False)
+                                    except OSError:
+                                        pass
+                            elif stat.S_ISDIR(est.st_mode):
+                                try:
+                                    cfd = os.open(entry.name, DIR_FLAGS, dir_fd=dfd)
+                                except OSError:
+                                    continue
+                                try:
+                                    walk_writable(cfd)
+                                finally:
+                                    os.close(cfd)
+                            elif stat.S_ISREG(est.st_mode) and est.st_nlink == 1:
+                                try:
+                                    ffd = os.open(entry.name, FILE_FLAGS, dir_fd=dfd)
+                                except OSError:
+                                    continue
+                                try:
+                                    fst = os.fstat(ffd)
+                                    if stat.S_ISREG(fst.st_mode) and fst.st_nlink == 1:
+                                        os.fchown(ffd, uid, gid)
+                                        if (fst.st_mode & 0o022) != 0:
+                                            os.fchmod(ffd, 0o664)
+                                finally:
+                                    os.close(ffd)
+
+                walk_writable(cur_fd)
+                print("FIX")
+        except OSError:
+            print("MISSING")
+        finally:
+            os.close(cur_fd)
+
+    elif op == "baseline_domain":
+        try:
+            pub_fd = os.open("public_html", DIR_FLAGS, dir_fd=web_fd)
+        except OSError:
+            print("ERR_PUBHTML")
+            sys.exit(0)
+        try:
+            pub_st = os.fstat(pub_fd)
+            cur_owner = owner_str(pub_st)
+            exp_owner = f"{user}:{user}"
+            owner_mismatch = (pub_st.st_uid != uid or pub_st.st_gid != gid)
+            bad_dirs = 0
+            overperm_files = 0
+            EXCL_DIRS = {"cgi-bin", ".well-known"}
+            EXCL_FILE_NAMES = {"wp-config.php", ".htaccess", ".env", "artisan"}
+            EXCL_EXTS = (".cgi", ".pl", ".sh")
+
+            def walk_baseline(dfd: int, in_excluded_dir: bool):
+                global bad_dirs, overperm_files, owner_mismatch
+                st_d = os.fstat(dfd)
+                if st_d.st_uid != uid or st_d.st_gid != gid:
+                    owner_mismatch = True
+                    if mode_flag == "live":
+                        os.fchown(dfd, uid, gid)
+                if not in_excluded_dir and (st_d.st_mode & 0o002) != 0:
+                    bad_dirs += 1
+                    if mode_flag == "live":
+                        os.fchmod(dfd, target_mode)
+                with os.scandir(dfd) as it:
+                    for entry in it:
+                        try:
+                            est = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if stat.S_ISLNK(est.st_mode):
+                            if est.st_uid == 0:
+                                owner_mismatch = True
+                                if mode_flag == "live":
+                                    try:
+                                        os.chown(entry.name, uid, gid, dir_fd=dfd, follow_symlinks=False)
+                                    except OSError:
+                                        pass
+                        elif stat.S_ISDIR(est.st_mode):
+                            child_excl = in_excluded_dir or (entry.name in EXCL_DIRS)
+                            try:
+                                cfd = os.open(entry.name, DIR_FLAGS, dir_fd=dfd)
+                            except OSError:
+                                continue
+                            try:
+                                walk_baseline(cfd, child_excl)
+                            finally:
+                                os.close(cfd)
+                        elif stat.S_ISREG(est.st_mode) and est.st_nlink == 1:
+                            skip_perm = (
+                                in_excluded_dir
+                                or entry.name in EXCL_FILE_NAMES
+                                or entry.name.endswith(EXCL_EXTS)
+                            )
+                            entry_bad_owner = (est.st_uid != uid or est.st_gid != gid)
+                            if entry_bad_owner:
+                                owner_mismatch = True
+                            need_perm = (not skip_perm) and ((est.st_mode & 0o022) != 0)
+                            need_chown = (mode_flag == "live") and entry_bad_owner
+                            if need_perm or need_chown:
+                                try:
+                                    ffd = os.open(entry.name, FILE_FLAGS, dir_fd=dfd)
+                                except OSError:
+                                    continue
+                                try:
+                                    fst = os.fstat(ffd)
+                                    if stat.S_ISREG(fst.st_mode) and fst.st_nlink == 1:
+                                        if need_chown:
+                                            os.fchown(ffd, uid, gid)
+                                        if not skip_perm and (fst.st_mode & 0o022) != 0:
+                                            overperm_files += 1
+                                            if mode_flag == "live":
+                                                os.fchmod(ffd, file_mode)
+                                finally:
+                                    os.close(ffd)
+
+            walk_baseline(pub_fd, False)
+            print(f"OK\t{cur_owner}\t{exp_owner}\t{1 if owner_mismatch else 0}\t{bad_dirs}\t{overperm_files}")
+        finally:
+            os.close(pub_fd)
+finally:
+    os.close(web_fd)
+PYEOF
+}
+
+_rel_to_webdir() {
+    local target="$1"
+    [ -n "$CURRENT_WEBDIR" ] || return 1
+    case "$target" in
+        "$CURRENT_WEBDIR"/*)
+            printf '%s' "${target#"$CURRENT_WEBDIR"/}"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 harden_file() {
     local fpath="$1"
     local target_perm="$2"
     local label="$3"
-    [ ! -f "$fpath" ] || [ -L "$fpath" ] && return
-    local current=$(stat -c '%a' "$fpath" 2>/dev/null)
-    if is_more_permissive_than "$current" "$target_perm"; then
-        if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
-            chmod "$target_perm" "$fpath" 2>/dev/null
-            log_fix "$label hardened: $current → $target_perm"
-        elif [ "$DRY_RUN" = true ]; then
-            log_dry "Would harden $label: $current → $target_perm"
-        else
-            log_warn "$label too permissive: $current (should be ≤$target_perm)"
-        fi
-    fi
+    local rel res status cur target
+    rel=$(_rel_to_webdir "$fpath") || return 0
+    res=$(_py_fs_op "harden_file" "$CURRENT_USER" "$CURRENT_DOMAIN" "$rel" "$target_perm") || return 0
+    IFS=$'\t' read -r status cur target <<< "$res"
+    case "$status" in
+        FIX)  log_fix "$label hardened: $cur → $target" ;;
+        DRY)  log_dry "Would harden $label: $cur → $target" ;;
+        WARN) log_warn "$label too permissive: $cur (should be ≤$target)" ;;
+    esac
 }
 
 harden_dir() {
     local dpath="$1"
     local target_perm="$2"
     local label="$3"
-    [ ! -d "$dpath" ] || [ -L "$dpath" ] && return
-    local current=$(stat -c '%a' "$dpath" 2>/dev/null)
-    if is_more_permissive_than "$current" "$target_perm"; then
-        if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
-            chmod "$target_perm" "$dpath" 2>/dev/null
-            log_fix "$label hardened: $current → $target_perm"
-        elif [ "$DRY_RUN" = true ]; then
-            log_dry "Would harden $label: $current → $target_perm"
-        else
-            log_warn "$label too permissive: $current (should be ≤$target_perm)"
-        fi
-    fi
+    local rel res status cur target
+    rel=$(_rel_to_webdir "$dpath") || return 0
+    res=$(_py_fs_op "harden_dir" "$CURRENT_USER" "$CURRENT_DOMAIN" "$rel" "$target_perm") || return 0
+    IFS=$'\t' read -r status cur target <<< "$res"
+    case "$status" in
+        FIX)  log_fix "$label hardened: $cur → $target" ;;
+        DRY)  log_dry "Would harden $label: $cur → $target" ;;
+        WARN) log_warn "$label too permissive: $cur (should be ≤$target)" ;;
+    esac
 }
 
 harden_executable() {
     local fpath="$1"
     local label="$2"
-    [ ! -f "$fpath" ] || [ -L "$fpath" ] && return
-    local current=$(stat -c '%a' "$fpath" 2>/dev/null)
-    if [ "$current" != "755" ]; then
-        if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
-            chmod 755 "$fpath" 2>/dev/null
-            log_fix "$label executable: $current → 755"
-        elif [ "$DRY_RUN" = true ]; then
-            log_dry "Would fix $label executable: $current → 755"
-        else
-            log_warn "$label not executable: $current (should be 755)"
-        fi
-    fi
+    local rel res status cur target
+    rel=$(_rel_to_webdir "$fpath") || return 0
+    res=$(_py_fs_op "harden_exec" "$CURRENT_USER" "$CURRENT_DOMAIN" "$rel" "755") || return 0
+    IFS=$'\t' read -r status cur target <<< "$res"
+    case "$status" in
+        FIX)  log_fix "$label executable: $cur → 755" ;;
+        DRY)  log_dry "Would fix $label executable: $cur → 755" ;;
+        WARN) log_warn "$label not executable: $cur (should be 755)" ;;
+    esac
 }
 
 restore_writable() {
@@ -213,18 +561,15 @@ restore_writable() {
     local label="$2"
     local user="$3"
     local dir_perm="${4:-755}"
-    [ ! -d "$target" ] || [ -L "$target" ] && return
-    if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
-        chown -RP -h "$user:$user" "$target" 2>/dev/null
-        find -P "$target" -not -type l -type d -exec chmod "$dir_perm" {} + 2>/dev/null
-        find -P "$target" -not -type l -type f -perm /022 -exec chmod 664 {} + 2>/dev/null
-        log_fix "$label writable restored ($dir_perm dirs, owner $user:$user)"
-    elif [ "$DRY_RUN" = true ]; then
-        log_dry "Would restore $label writable dir"
-    else
-        local owner=$(stat -c '%U:%G' "$target" 2>/dev/null)
-        [ "$owner" != "$user:$user" ] && log_warn "$label wrong owner: $owner"
-    fi
+    local rel res status ow
+    rel=$(_rel_to_webdir "$target") || return 0
+    res=$(_py_fs_op "restore_writable" "$user" "$CURRENT_DOMAIN" "$rel" "$dir_perm") || return 0
+    IFS=$'\t' read -r status ow <<< "$res"
+    case "$status" in
+        FIX)  log_fix "$label writable restored ($dir_perm dirs, owner $user:$user)" ;;
+        DRY)  log_dry "Would restore $label writable dir" ;;
+        WARN) log_warn "$label wrong owner: $ow" ;;
+    esac
 }
 
 detect_cms() {
@@ -259,12 +604,31 @@ detect_cms() {
 fix_domain() {
     local user="$1"
     local domain="$2"
+
+    if ! validate_hestia_user "$user"; then
+        log_warn "Invalid or unregistered HestiaCP user: $user"
+        return 1
+    fi
+    if ! validate_domain_name "$domain"; then
+        log_warn "Invalid domain name: $domain"
+        return 1
+    fi
+    if [ -f "$HESTIA/data/users/$user/web.conf" ] && ! grep -Fq "DOMAIN='$domain'" "$HESTIA/data/users/$user/web.conf" 2>/dev/null; then
+        log_warn "$domain: not registered in $HESTIA/data/users/$user/web.conf"
+        return 1
+    fi
+
     local webdir="/home/$user/web/$domain"
     local pubhtml="$webdir/public_html"
     local changes=0
 
-    if [ ! -d "$webdir" ]; then
-        log_warn "$domain: web directory not found ($webdir)"
+    if [ ! -d "/home/$user" ] || [ -L "/home/$user" ] || [ ! -d "/home/$user/web" ] || [ -L "/home/$user/web" ]; then
+        log_warn "$domain: /home/$user/web missing or contains a symlink"
+        return 1
+    fi
+
+    if [ ! -d "$webdir" ] || [ -L "$webdir" ]; then
+        log_warn "$domain: web directory not found or is a symlink ($webdir)"
         return 1
     fi
 
@@ -272,6 +636,10 @@ fix_domain() {
         log_warn "$domain: public_html not found or is a symlink"
         return 1
     fi
+
+    CURRENT_USER="$user"
+    CURRENT_DOMAIN="$domain"
+    CURRENT_WEBDIR="$webdir"
 
     if [ -f "$pubhtml/.no-fix-permissions" ]; then
         log_skip "$domain: .no-fix-permissions sentinel found — skipping (custom permissions)"
@@ -309,43 +677,43 @@ fix_domain() {
         fi
     fi
 
-    local tmp_before=$(mktemp)
-    local tmp_after=$(mktemp)
+    local tmp_before=""
+    local tmp_after=""
     if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
-        snapshot_perms "$pubhtml" > "$tmp_before"
+        tmp_before=$(umask 077 && mktemp "${TMPDIR:-/tmp}/v-fix-web-perms-before.XXXXXX") || tmp_before=""
+        tmp_after=$(umask 077 && mktemp "${TMPDIR:-/tmp}/v-fix-web-perms-after.XXXXXX") || tmp_after=""
+        [ -n "$tmp_before" ] && snapshot_perms "$pubhtml" > "$tmp_before"
     fi
 
-    local current_owner=$(stat -c '%U:%G' "$pubhtml" 2>/dev/null)
-    local expected_owner="$user:$user"
+    local base_res b_status current_owner expected_owner owner_mismatch bad_dirs overperm_files
+    base_res=$(_py_fs_op "baseline_domain" "$user" "$domain" "public_html" "$DIR_PERM" "$FILE_PERM")
+    IFS=$'\t' read -r b_status current_owner expected_owner owner_mismatch bad_dirs overperm_files <<< "$base_res"
+    if [ "$b_status" != "OK" ]; then
+        log_warn "$domain: descriptor-pinned inspection refused path ($b_status)"
+        [ -n "$tmp_before" ] && rm -f "$tmp_before" 2>/dev/null
+        [ -n "$tmp_after" ] && rm -f "$tmp_after" 2>/dev/null
+        return 1
+    fi
 
-    if [ "$current_owner" != "$expected_owner" ]; then
+    if [ "$owner_mismatch" = "1" ]; then
         if [ "$AUDIT_ONLY" = true ]; then
             log_warn "WRONG OWNER: $current_owner (expected $expected_owner)"
         elif [ "$DRY_RUN" = true ]; then
             log_dry "Would fix ownership: $current_owner → $expected_owner"
         else
-            chown -RP -h "$user:$user" "$pubhtml" 2>/dev/null
-            if [ $? -eq 0 ]; then
-                log_fix "Ownership: $current_owner → $expected_owner"
-                changes=$((changes + 1))
-            else
-                log_warn "Failed to fix ownership on $pubhtml"
-            fi
+            log_fix "Ownership: $current_owner → $expected_owner"
+            changes=$((changes + 1))
         fi
     else
         [ "$AUDIT_ONLY" = true ] && log_ok "Ownership: $current_owner"
     fi
 
-    local EXCLUDE_DIRS="-not -path '*/cgi-bin/*' -not -path '*/.well-known/*'"
-
-    local bad_dirs=$(eval "find -P '$pubhtml' -not -type l -type d -perm /002 $EXCLUDE_DIRS 2>/dev/null" | wc -l)
-    if [ "$bad_dirs" -gt 0 ]; then
+    if [ "${bad_dirs:-0}" -gt 0 ]; then
         if [ "$AUDIT_ONLY" = true ]; then
             log_warn "Directories with world-write bit: $bad_dirs"
         elif [ "$DRY_RUN" = true ]; then
             log_dry "Would fix $bad_dirs world-writable directories → $DIR_PERM"
         else
-            eval "find -P '$pubhtml' -not -type l -type d -perm /002 $EXCLUDE_DIRS -exec chmod '$DIR_PERM' {} + 2>/dev/null"
             log_fix "Directories: $bad_dirs world-writable fixed → $DIR_PERM"
             changes=$((changes + 1))
         fi
@@ -353,15 +721,12 @@ fix_domain() {
         [ "$AUDIT_ONLY" = true ] && log_ok "No world-writable directories"
     fi
 
-    local EXCLUDE_FILES="! -name 'wp-config.php' ! -name '.htaccess' ! -name '.env' ! -name 'artisan' ! -name '*.cgi' ! -name '*.pl' ! -name '*.sh'"
-    local overperm_files=$(eval "find -P '$pubhtml' -not -type l -type f -perm /022 $EXCLUDE_FILES $EXCLUDE_DIRS 2>/dev/null" | wc -l)
-    if [ "$overperm_files" -gt 0 ]; then
+    if [ "${overperm_files:-0}" -gt 0 ]; then
         if [ "$AUDIT_ONLY" = true ]; then
             log_warn "Files with group/world write bit: $overperm_files"
         elif [ "$DRY_RUN" = true ]; then
             log_dry "Would fix $overperm_files over-permissive files → $FILE_PERM"
         else
-            eval "find -P '$pubhtml' -not -type l -type f -perm /022 $EXCLUDE_FILES $EXCLUDE_DIRS -exec chmod '$FILE_PERM' {} + 2>/dev/null"
             log_fix "Files: $overperm_files over-permissive fixed → $FILE_PERM"
             changes=$((changes + 1))
         fi
@@ -389,11 +754,12 @@ fix_domain() {
 
     security_scan "$pubhtml" "$user" "$cms"
 
-    if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
+    if [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ] && [ -n "$tmp_before" ] && [ -n "$tmp_after" ]; then
         snapshot_perms "$pubhtml" > "$tmp_after"
         record_diff "$user" "$domain" "$tmp_before" "$tmp_after"
     fi
-    rm -f "$tmp_before" "$tmp_after" 2>/dev/null
+    [ -n "$tmp_before" ] && rm -f "$tmp_before" 2>/dev/null
+    [ -n "$tmp_after" ] && rm -f "$tmp_after" 2>/dev/null
 
     if [ "$changes" -eq 0 ] && [ "$AUDIT_ONLY" != true ] && [ "$DRY_RUN" != true ]; then
         log_ok "No changes needed"
@@ -554,20 +920,27 @@ security_scan() {
 
 get_user_domains() {
     local user="$1"
+    validate_hestia_user "$user" || return 0
     local web_conf="$HESTIA/data/users/$user/web.conf"
-    if [ -f "$web_conf" ]; then
-        grep "^DOMAIN=" "$web_conf" | cut -d"'" -f2
-    else
-        ls /home/"$user"/web/ 2>/dev/null
+    if [ -f "$web_conf" ] && [ ! -L "$web_conf" ]; then
+        local d
+        while IFS= read -r d; do
+            validate_domain_name "$d" && printf '%s\n' "$d"
+        done < <(awk -F"'" '/^DOMAIN=/{print $2}' "$web_conf" 2>/dev/null)
     fi
 }
 
 get_all_users() {
+    local u u_conf
     if [ -x "$HESTIA/bin/v-list-users" ]; then
-        "$HESTIA/bin/v-list-users" list 2>/dev/null
+        while IFS= read -r u; do
+            validate_hestia_user "$u" && printf '%s\n' "$u"
+        done < <("$HESTIA/bin/v-list-users" list 2>/dev/null)
     else
-        ls /home/ 2>/dev/null | while read dir; do
-            [ -d "/home/$dir/web" ] && echo "$dir"
+        for u_conf in "$HESTIA/data/users"/*/user.conf; do
+            [ -f "$u_conf" ] && [ ! -L "$u_conf" ] || continue
+            u=$(basename "$(dirname "$u_conf")")
+            validate_hestia_user "$u" && printf '%s\n' "$u"
         done
     fi
 }

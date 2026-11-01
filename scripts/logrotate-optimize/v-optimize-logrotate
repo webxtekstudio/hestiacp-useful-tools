@@ -36,7 +36,7 @@ ROTATE_COUNT=14
 ROTATE_FREQ="daily"
 DRY_RUN=false
 FORCE_ROTATE=true
-BACKUP_DIR="/etc/logrotate.d/.backups"
+BACKUP_DIR="/var/backups/hestiacp-useful-tools/logrotate-optimize"
 
 # --- Parse arguments ---------------------------------------------------------
 for arg in "$@"; do
@@ -99,11 +99,11 @@ backup_config() {
     local conf="$1"
     if [ ! -f "$conf" ]; then return; fi
 
-    mkdir -p "$BACKUP_DIR"
+    install -d -m 0700 "$BACKUP_DIR"
     local basename
     basename=$(basename "$conf")
     local backup_file="$BACKUP_DIR/${basename}.bak.$(date +%Y%m%d-%H%M%S)"
-    cp "$conf" "$backup_file"
+    install -m 0600 "$conf" "$backup_file"
     echo "  -> [BACKUP] $conf -> $backup_file"
 }
 

@@ -646,9 +646,9 @@ sync_overwrite_existing() {
         return 1
     fi
 
-    chown -RP "$user:$user_group" "$stage_git"
-    chmod -R u=rwX,go= "$stage_git"
-    out=$(_run_user_local_fetch_or_clone "$user" -C "$dest" fetch --no-tags "$stage_git" "+refs/mirror/target:refs/remotes/origin/$branch" 2>&1)
+    chown -RP "root:$user_group" "$stage_git"
+    chmod -R u=rwX,g=rX,o= "$stage_git"
+    out=$(_run_user_local_fetch_or_clone "$user" -c "safe.directory=$stage_git" -C "$dest" fetch --no-tags "$stage_git" "+refs/mirror/target:refs/remotes/origin/$branch" 2>&1)
     rc=$?
     log_git_output "$out"
     rm -rf "$stage_git"
@@ -697,9 +697,9 @@ clone_repo_staged() {
     fi
 
     log_git_output "$out"
-    chown -RP "$user:$user_group" "$stage_git"
-    chmod -R u=rwX,go= "$stage_git"
-    out=$(_run_user_local_fetch_or_clone "$user" clone --no-local -b "$branch" "$stage_git" "$target_dir" 2>&1)
+    chown -RP "root:$user_group" "$stage_git"
+    chmod -R u=rwX,g=rX,o= "$stage_git"
+    out=$(_run_user_local_fetch_or_clone "$user" -c "safe.directory=$stage_git" clone --no-local -b "$branch" "$stage_git" "$target_dir" 2>&1)
     rc=$?
     log_git_output "$out"
     rm -rf "$stage_git"

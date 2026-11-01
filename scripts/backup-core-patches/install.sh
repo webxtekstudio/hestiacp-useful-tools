@@ -29,23 +29,25 @@ if [ -d "$HESTIA_BIN/lib" ] && [ -f "$HESTIA_BIN/lib/core.sh" ] && [ -f "$HESTIA
     echo "  -> Cleaned up orphaned Arch v1 backup library ($HESTIA_BIN/lib)."
 fi
 
-# 2. Install the new local organization hook
-ln -sf "$SCRIPT_DIR/hooks/v-backup-user-hook" "$HESTIA_BIN/v-backup-user-hook"
-chmod +x "$SCRIPT_DIR/hooks/v-backup-user-hook"
+install_root_bin() {
+    local src="$1"
+    local dst="$2"
+    rm -f "$dst"
+    install -o root -g root -m 0755 "$src" "$dst"
+}
+
+# 2. Install the local organization hook (root-owned copy, never a symlink into non-root checkout)
+install_root_bin "$SCRIPT_DIR/hooks/v-backup-user-hook" "$HESTIA_BIN/v-backup-user-hook"
 echo "  -> Installed backup organization hook: v-backup-user-hook"
 
-# 2.1 Install the new notification hooks
-ln -sf "$SCRIPT_DIR/hooks/v-backup-user-notify-hook" "$HESTIA_BIN/v-backup-user-notify-hook"
-chmod +x "$SCRIPT_DIR/hooks/v-backup-user-notify-hook"
-ln -sf "$SCRIPT_DIR/hooks/v-backup-users-notify-hook" "$HESTIA_BIN/v-backup-users-notify-hook"
-chmod +x "$SCRIPT_DIR/hooks/v-backup-users-notify-hook"
+# 2.1 Install the HTML notification hooks
+install_root_bin "$SCRIPT_DIR/hooks/v-backup-user-notify-hook" "$HESTIA_BIN/v-backup-user-notify-hook"
+install_root_bin "$SCRIPT_DIR/hooks/v-backup-users-notify-hook" "$HESTIA_BIN/v-backup-users-notify-hook"
 echo "  -> Installed HTML notification hooks"
 
 # 2.2 Install optional retention command and native v-backup-users hook
-ln -sf "$SCRIPT_DIR/bin/v-prune-backups" "$HESTIA_BIN/v-prune-backups"
-chmod +x "$SCRIPT_DIR/bin/v-prune-backups"
-ln -sf "$SCRIPT_DIR/hooks/v-backup-users-retention-hook" "$HESTIA_BIN/v-backup-users-retention-hook"
-chmod +x "$SCRIPT_DIR/hooks/v-backup-users-retention-hook"
+install_root_bin "$SCRIPT_DIR/bin/v-prune-backups" "$HESTIA_BIN/v-prune-backups"
+install_root_bin "$SCRIPT_DIR/hooks/v-backup-users-retention-hook" "$HESTIA_BIN/v-backup-users-retention-hook"
 if [ ! -f "$RETENTION_CONF" ]; then
     cp "$SCRIPT_DIR/config/backup-retention.conf.sample" "$RETENTION_CONF"
     chmod 600 "$RETENTION_CONF"
