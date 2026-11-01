@@ -63,6 +63,37 @@ if [ -f "$LIB_DIR/hestia.sh" ]; then
     apply_hestia_patches
 fi
 
+# 3.1 Ensure APT DPkg::Post-Invoke hook re-applies patches automatically after HestiaCP updates
+APT_HOOK_FILE="/etc/apt/apt.conf.d/99hestia-custom-patches"
+REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../.." 2>/dev/null || (cd "$SCRIPT_DIR/../.." && pwd))"
+if [ -d "/etc/apt/apt.conf.d" ] && [ -f "$REPO_ROOT/install.sh" ] && [ ! -L "$REPO_ROOT/install.sh" ]; then
+    repo_perm="$(stat -c '%a' "$REPO_ROOT" 2>/dev/null || echo '777')"
+    inst_perm="$(stat -c '%a' "$REPO_ROOT/install.sh" 2>/dev/null || echo '777')"
+    if [[ "$REPO_ROOT" =~ ^/[A-Za-z0-9_./-]+$ ]] && \
+       [[ "$REPO_ROOT" != /tmp/* && "$REPO_ROOT" != /var/tmp/* && "$REPO_ROOT" != /dev/shm/* ]] && \
+       [ -O "$REPO_ROOT" ] && [ -O "$REPO_ROOT/install.sh" ] && \
+       [[ ! "$repo_perm" =~ [2367].$ && ! "$repo_perm" =~ [2367]$ ]] && \
+       [[ ! "$inst_perm" =~ [2367].$ && ! "$inst_perm" =~ [2367]$ ]]; then
+        tmp_apt_hook="$(mktemp /etc/apt/apt.conf.d/.99hestia-custom-patches.XXXXXX)"
+        cat > "$tmp_apt_hook" << APT_EOF
+// Managed by hestiacp-useful-tools (backup-core-patches)
+// Automatically re-applies HestiaCP custom patches after apt/dpkg package updates
+DPkg::Post-Invoke { "if [ -f '$REPO_ROOT/install.sh' ] && [ ! -L '$REPO_ROOT/install.sh' ] && [ -O '$REPO_ROOT' ] && [ -O '$REPO_ROOT/install.sh' ]; then /bin/bash '$REPO_ROOT/install.sh' </dev/null >/dev/null 2>&1 || true; fi"; };
+APT_EOF
+        chown root:root "$tmp_apt_hook"
+        chmod 0644 "$tmp_apt_hook"
+        if [ -f "$APT_HOOK_FILE" ] && cmp -s "$tmp_apt_hook" "$APT_HOOK_FILE"; then
+            rm -f "$tmp_apt_hook"
+            echo "  -> APT post-invoke hook already up to date: $APT_HOOK_FILE"
+        else
+            mv -f "$tmp_apt_hook" "$APT_HOOK_FILE"
+            echo "  -> Installed APT post-invoke auto-heal hook: $APT_HOOK_FILE"
+        fi
+    else
+        echo "  -> [WARN] Skipped APT hook ($APT_HOOK_FILE): repo path '$REPO_ROOT' must be root-owned and non-world/group-writable"
+    fi
+fi
+
 # 4. Check remote backup status and guide user
 echo ""
 b2_conf="$HESTIA/conf/b2.backup.conf"
