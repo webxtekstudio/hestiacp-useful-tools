@@ -22,15 +22,16 @@ if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-security-audit" "$target_bin"
     cp "$target_bin" "$BAK_DIR/v-security-audit.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/v-security-audit.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp --remove-destination "$SCRIPT_DIR/v-security-audit" "$target_bin"
-chmod +x "$target_bin"
+rm -f "$target_bin"
+install -o root -g root -m 0755 "$SCRIPT_DIR/v-security-audit" "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
 # Library modules — atomic swap into place so concurrent runs never see partial lib/
 tmp_lib="${target_lib}.tmp.$$"
 rm -rf "$tmp_lib"
 mkdir -p "$tmp_lib"
-cp -a "$SCRIPT_DIR/lib/." "$tmp_lib/"
+cp -r --no-preserve=ownership "$SCRIPT_DIR/lib/." "$tmp_lib/"
+chown -R root:root "$tmp_lib"
 chmod -R u=rwX,go=rX "$tmp_lib"
 rm -rf "$target_lib"
 mv "$tmp_lib" "$target_lib"

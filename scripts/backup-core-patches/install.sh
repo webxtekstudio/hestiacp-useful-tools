@@ -68,19 +68,37 @@ fi
 # 3.1 Ensure APT DPkg::Post-Invoke hook re-applies patches automatically after HestiaCP updates
 APT_HOOK_FILE="/etc/apt/apt.conf.d/99hestia-custom-patches"
 REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../.." 2>/dev/null || (cd "$SCRIPT_DIR/../.." && pwd))"
+
+repo_tree_is_root_safe() {
+    local target="$1"
+    [[ "$target" =~ ^/[A-Za-z0-9_./-]+$ ]] || return 1
+    [[ "$target" != /tmp/* && "$target" != /var/tmp/* && "$target" != /dev/shm/* ]] || return 1
+    [ -d "$target" ] && [ -f "$target/install.sh" ] && [ ! -L "$target/install.sh" ] || return 1
+
+    # Verify every ancestor directory from / up to $target is root-owned and not group/world-writable
+    local cur="$target"
+    while true; do
+        [ ! -L "$cur" ] && [ -O "$cur" ] || return 1
+        local p
+        p="$(stat -c '%a' "$cur" 2>/dev/null || echo '777')"
+        [[ ! "$p" =~ [2367].$ && ! "$p" =~ [2367]$ ]] || return 1
+        [ "$cur" = "/" ] && break
+        cur="$(dirname "$cur")"
+    done
+
+    # Verify no file or subdirectory inside $target is non-root-owned or group/world-writable
+    local unsafe
+    unsafe="$(find -P "$target" \( ! -user 0 -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null || echo 'err')"
+    [ -z "$unsafe" ]
+}
+
 if [ -d "/etc/apt/apt.conf.d" ] && [ -f "$REPO_ROOT/install.sh" ] && [ ! -L "$REPO_ROOT/install.sh" ]; then
-    repo_perm="$(stat -c '%a' "$REPO_ROOT" 2>/dev/null || echo '777')"
-    inst_perm="$(stat -c '%a' "$REPO_ROOT/install.sh" 2>/dev/null || echo '777')"
-    if [[ "$REPO_ROOT" =~ ^/[A-Za-z0-9_./-]+$ ]] && \
-       [[ "$REPO_ROOT" != /tmp/* && "$REPO_ROOT" != /var/tmp/* && "$REPO_ROOT" != /dev/shm/* ]] && \
-       [ -O "$REPO_ROOT" ] && [ -O "$REPO_ROOT/install.sh" ] && \
-       [[ ! "$repo_perm" =~ [2367].$ && ! "$repo_perm" =~ [2367]$ ]] && \
-       [[ ! "$inst_perm" =~ [2367].$ && ! "$inst_perm" =~ [2367]$ ]]; then
+    if repo_tree_is_root_safe "$REPO_ROOT"; then
         tmp_apt_hook="$(mktemp /etc/apt/apt.conf.d/.99hestia-custom-patches.XXXXXX)"
         cat > "$tmp_apt_hook" << APT_EOF
 // Managed by hestiacp-useful-tools (backup-core-patches)
 // Automatically re-applies HestiaCP custom patches after apt/dpkg package updates
-DPkg::Post-Invoke { "if [ -f '$REPO_ROOT/install.sh' ] && [ ! -L '$REPO_ROOT/install.sh' ] && [ -O '$REPO_ROOT' ] && [ -O '$REPO_ROOT/install.sh' ]; then /bin/bash '$REPO_ROOT/install.sh' </dev/null >/dev/null 2>&1 || true; fi"; };
+DPkg::Post-Invoke { "if [ -d '$REPO_ROOT' ] && [ -f '$REPO_ROOT/install.sh' ] && [ ! -L '$REPO_ROOT/install.sh' ] && [ -O '$REPO_ROOT' ] && [ -O '$REPO_ROOT/install.sh' ] && ! find -P '$REPO_ROOT' ! -user 0 -print -quit -o ! -type l -perm /022 -print -quit 2>/dev/null | grep -q .; then /bin/bash '$REPO_ROOT/install.sh' </dev/null >/dev/null 2>&1 || true; fi"; };
 APT_EOF
         chown root:root "$tmp_apt_hook"
         chmod 0644 "$tmp_apt_hook"
@@ -92,7 +110,7 @@ APT_EOF
             echo "  -> Installed APT post-invoke auto-heal hook: $APT_HOOK_FILE"
         fi
     else
-        echo "  -> [WARN] Skipped APT hook ($APT_HOOK_FILE): repo path '$REPO_ROOT' must be root-owned and non-world/group-writable"
+        echo "  -> [WARN] Skipped APT hook ($APT_HOOK_FILE): repo tree '$REPO_ROOT' and its ancestors must be root-owned and non-world/group-writable"
     fi
 fi
 
