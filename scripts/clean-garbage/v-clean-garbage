@@ -22,6 +22,9 @@ SERVICE_LOGS_RETENTION_DAYS=30
 PHP_SESSIONS_RETENTION_DAYS=1
 CORE_DUMPS_RETENTION_DAYS=1
 LOCK_FILES_RETENTION_DAYS=1
+SSL_TMP_RETENTION_DAYS=7
+ORPHAN_BACKUP_TMP_DAYS=2
+HST_BACKUPS_KEEP_COUNT=2
 
 #------------------------------------------
 # MAIL RETENTION PERIODS
@@ -40,6 +43,9 @@ CLEAN_OLD_KERNELS="TRUE"
 CLEAN_PHP_SESSIONS="TRUE"
 CLEAN_CORE_DUMPS="TRUE"
 CLEAN_LOCK_FILES="TRUE"
+CLEAN_SSL_TMP="TRUE"
+CLEAN_ORPHAN_BACKUP_TMP="TRUE"
+CLEAN_HST_BACKUPS="TRUE"
 
 #------------------------------------------
 # SERVICE LOGS CLEANUP (TRUE/FALSE)
@@ -415,22 +421,136 @@ fi
 
 if [ "$CLEAN_PHP_SESSIONS" = "TRUE" ] || [ "$CLEAN_PHP_SESSIONS" = "true" ]; then
     echo -n "[$(date)] : PHP sessions (>${PHP_SESSIONS_RETENTION_DAYS}d)... "
+    sess_cleaned_kb=0
+    sess_deleted_count=0
     if [ -d "/var/lib/php/sessions" ]; then
         before_kb=$(measure_cleanup "/var/lib/php/sessions")
-        find /var/lib/php/sessions -type f -mtime +${PHP_SESSIONS_RETENTION_DAYS} -delete 2>/dev/null
+        c=$(find /var/lib/php/sessions -maxdepth 1 -type f -mtime +${PHP_SESSIONS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
         after_kb=$(measure_cleanup "/var/lib/php/sessions")
-        cleaned_kb=$((before_kb - after_kb))
-        if [ "$cleaned_kb" -gt 0 ]; then
-            add_cleaned_space "$cleaned_kb"
-            cleaned_formatted=$(convert_space $cleaned_kb)
-            echo "OK (freed: $cleaned_formatted)"
-        else
-            echo "OK"
-        fi
+        diff_kb=$((before_kb - after_kb))
+        [ "$diff_kb" -gt 0 ] 2>/dev/null && sess_cleaned_kb=$((sess_cleaned_kb + diff_kb))
+        sess_deleted_count=$((sess_deleted_count + c))
+    fi
+    # HestiaCP per-user PHP-FPM pools store session files in /home/<user>/tmp/sess_*
+    for u_dir in "$HESTIA/data/users"/*; do
+        [ -d "$u_dir" ] || continue
+        u_name=$(basename "$u_dir")
+        id "$u_name" >/dev/null 2>&1 || continue
+        u_home=$(getent passwd "$u_name" | cut -d: -f6)
+        [ -n "$u_home" ] && [ -d "$u_home/tmp" ] && [ ! -L "$u_home/tmp" ] || continue
+        before_kb=$(measure_cleanup "$u_home/tmp")
+        c=$(runuser -u "$u_name" -- find "$u_home/tmp" -maxdepth 1 -type f -name 'sess_*' -mtime +${PHP_SESSIONS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
+        after_kb=$(measure_cleanup "$u_home/tmp")
+        diff_kb=$((before_kb - after_kb))
+        [ "$diff_kb" -gt 0 ] 2>/dev/null && sess_cleaned_kb=$((sess_cleaned_kb + diff_kb))
+        sess_deleted_count=$((sess_deleted_count + c))
+    done
+    if [ "$sess_cleaned_kb" -gt 0 ]; then
+        add_cleaned_space "$sess_cleaned_kb"
+        cleaned_formatted=$(convert_space $sess_cleaned_kb)
+        echo "OK ($sess_deleted_count files, freed: $cleaned_formatted)"
     else
-        echo "OK (no sessions dir)"
+        echo "OK ($sess_deleted_count files)"
     fi
     TASKS_SUCCESS+=("PHP sessions")
+fi
+
+if [ "$CLEAN_SSL_TMP" = "TRUE" ] || [ "$CLEAN_SSL_TMP" = "true" ]; then
+    echo -n "[$(date)] : Expired SSL temp dirs (>${SSL_TMP_RETENTION_DAYS}d)... "
+    ssl_tmp_count=0
+    ssl_tmp_kb=0
+    for u_dir in "$HESTIA/data/users"/*; do
+        [ -d "$u_dir" ] || continue
+        u_name=$(basename "$u_dir")
+        u_home=$(getent passwd "$u_name" | cut -d: -f6)
+        [ -n "$u_home" ] && [ -d "$u_home/web" ] || continue
+        for priv_dir in "$u_home/web"/*/private; do
+            [ -d "$priv_dir" ] && [ ! -L "$priv_dir" ] || continue
+            for ssl_td in "$priv_dir"/tmp.??????????; do
+                [ -d "$ssl_td" ] && [ ! -L "$ssl_td" ] || continue
+                td_base=$(basename "$ssl_td")
+                [[ "$td_base" =~ ^tmp\.[A-Za-z0-9]{10}$ ]] || continue
+                [ -n "$(find "$ssl_td" -maxdepth 0 -mtime +${SSL_TMP_RETENTION_DAYS} 2>/dev/null)" ] || continue
+                # Only remove flat mktemp certificate staging directories (never nested project trees)
+                if ! find "$ssl_td" -mindepth 2 -print -quit 2>/dev/null | grep -q .; then
+                    td_kb=$(measure_cleanup "$ssl_td")
+                    if rm -rf "$ssl_td" 2>/dev/null; then
+                        ssl_tmp_count=$((ssl_tmp_count + 1))
+                        ssl_tmp_kb=$((ssl_tmp_kb + td_kb))
+                    fi
+                fi
+            done
+        done
+    done
+    if [ "$ssl_tmp_kb" -gt 0 ]; then
+        add_cleaned_space "$ssl_tmp_kb"
+        cleaned_formatted=$(convert_space $ssl_tmp_kb)
+        echo "OK ($ssl_tmp_count dirs, freed: $cleaned_formatted)"
+    else
+        echo "OK ($ssl_tmp_count dirs)"
+    fi
+    TASKS_SUCCESS+=("Expired SSL temp dirs")
+fi
+
+if [ "$CLEAN_ORPHAN_BACKUP_TMP" = "TRUE" ] || [ "$CLEAN_ORPHAN_BACKUP_TMP" = "true" ]; then
+    echo -n "[$(date)] : Orphaned /backup/tmp.* dirs (>${ORPHAN_BACKUP_TMP_DAYS}d)... "
+    if pgrep -f '/usr/local/hestia/bin/v-backup-user' >/dev/null 2>&1; then
+        echo "SKIP (backup currently running)"
+        TASKS_SKIPPED+=("Orphaned backup temp dirs")
+    else
+        bkp_tmp_count=0
+        bkp_tmp_kb=0
+        if [ -d "/backup" ] && [ ! -L "/backup" ]; then
+            for b_td in /backup/tmp.??????????; do
+                [ -d "$b_td" ] && [ ! -L "$b_td" ] || continue
+                td_base=$(basename "$b_td")
+                [[ "$td_base" =~ ^tmp\.[A-Za-z0-9]{10}$ ]] || continue
+                [ -n "$(find "$b_td" -maxdepth 0 -mtime +${ORPHAN_BACKUP_TMP_DAYS} 2>/dev/null)" ] || continue
+                td_kb=$(measure_cleanup "$b_td")
+                if rm -rf "$b_td" 2>/dev/null; then
+                    bkp_tmp_count=$((bkp_tmp_count + 1))
+                    bkp_tmp_kb=$((bkp_tmp_kb + td_kb))
+                fi
+            done
+        fi
+        if [ "$bkp_tmp_kb" -gt 0 ]; then
+            add_cleaned_space "$bkp_tmp_kb"
+            cleaned_formatted=$(convert_space $bkp_tmp_kb)
+            echo "OK ($bkp_tmp_count dirs, freed: $cleaned_formatted)"
+        else
+            echo "OK ($bkp_tmp_count dirs)"
+        fi
+        TASKS_SUCCESS+=("Orphaned backup temp dirs")
+    fi
+fi
+
+if [ "$CLEAN_HST_BACKUPS" = "TRUE" ] || [ "$CLEAN_HST_BACKUPS" = "true" ]; then
+    keep_hst=${HST_BACKUPS_KEEP_COUNT:-2}
+    echo -n "[$(date)] : HestiaCP upgrade snapshots (keep latest ${keep_hst})... "
+    hst_del_count=0
+    hst_del_kb=0
+    if [ -d "/root/hst_backups" ] && [ ! -L "/root/hst_backups" ] && [[ "$keep_hst" =~ ^[0-9]+$ ]]; then
+        mapfile -t hst_dirs < <(find /root/hst_backups -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' 2>/dev/null | sort -r)
+        if [ "${#hst_dirs[@]}" -gt "$keep_hst" ]; then
+            for (( i=keep_hst; i<${#hst_dirs[@]}; i++ )); do
+                old_hst="${hst_dirs[$i]}"
+                [ -d "$old_hst" ] && [ ! -L "$old_hst" ] || continue
+                td_kb=$(measure_cleanup "$old_hst")
+                if rm -rf "$old_hst" 2>/dev/null; then
+                    hst_del_count=$((hst_del_count + 1))
+                    hst_del_kb=$((hst_del_kb + td_kb))
+                fi
+            done
+        fi
+    fi
+    if [ "$hst_del_kb" -gt 0 ]; then
+        add_cleaned_space "$hst_del_kb"
+        cleaned_formatted=$(convert_space $hst_del_kb)
+        echo "OK ($hst_del_count removed, freed: $cleaned_formatted)"
+    else
+        echo "OK ($hst_del_count removed)"
+    fi
+    TASKS_SUCCESS+=("HestiaCP upgrade snapshots")
 fi
 
 echo ""
@@ -895,7 +1015,9 @@ send_html_email() {
 </body>
 </html>"
 
-    local temp_html="/tmp/garbage_email_$$.html"
+    local temp_html
+    temp_html=$(mktemp /tmp/garbage_email.XXXXXX)
+    chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     
     local SENDMAIL="$HESTIA/web/inc/mail-wrapper.php"

@@ -33,7 +33,8 @@ By default, the script will safely clean logs older than 7 days. If you want to 
 ## 🔬 Advanced Architecture Notes (Geeks Only)
 
 ### Features under the hood
-*   **System Logs:** Cleans old `journalctl` logs, rotated logs, and orphaned temp files.
+*   **System Logs:** Cleans old `journalctl` logs, rotated logs, and orphaned temp/lock files.
+*   **PHP Sessions & HestiaCP Temp Hygiene:** Cleans stale PHP sessions across both `/var/lib/php/sessions` and per-user HestiaCP `/home/*/tmp/sess_*` pools (privilege-dropped as each user), removes expired `v-change-web-domain-sslcert` `private/tmp.*` staging folders, cleans orphaned `/backup/tmp.*` directories (only when no backup is running), and prunes `/root/hst_backups` to retain only the latest 2 HestiaCP panel upgrade snapshots.
 *   **Service Logs:** Truncates and safely rotates logs for Nginx, Apache, Exim, Dovecot, MySQL, PHP-FPM without restarting the services.
 *   **Mail Queue:** Eradicates old frozen Exim emails and spam.
 *   **Trash:** Empties user trash bins older than configured days via Hestia CLI.
