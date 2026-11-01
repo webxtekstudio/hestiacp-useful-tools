@@ -13,7 +13,7 @@ export HESTIA="${HESTIA:-/usr/local/hestia}"
 patch_b2_functions() {
     local script="$HESTIA/func/backup.sh"
     [ ! -f "$script" ] && return 1
-    grep -q "hestia-custom-b2-v5-retry" "$script" 2>/dev/null && return 0
+    grep -q "hestia-custom-b2-v5.1-retry" "$script" 2>/dev/null && return 0
 
     [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
@@ -28,7 +28,7 @@ patch_b2_functions() {
 
     cat > "$repl_file" << 'PATCH_EOF'
 b2_backup() {
-	# hestia-custom-b2-v5-retry
+	# hestia-custom-b2-v5.1-retry
 	# Defining backblaze b2 settings
 	source_conf "$HESTIA/conf/b2.backup.conf"
 
@@ -64,6 +64,7 @@ b2_backup() {
 		rm -f "$user.$backup_new_date.tar"
 	fi
 	if [ "$rc" -ne 0 ]; then
+		[ -n "$tmpdir" ] && [[ "$tmpdir" == "$BACKUP/tmp."* ]] && rm -rf "$tmpdir"
 		check_result "$E_CONNECT" "b2 failed to upload $user.$backup_new_date.tar"
 	fi
 
@@ -158,7 +159,7 @@ PATCH_EOF
 
     rm -f "$repl_file" 2>/dev/null
 
-    if grep -q "hestia-custom-b2-v5-retry" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
+    if grep -q "hestia-custom-b2-v5.1-retry" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
         # Remove empty gap lines if consecutive skipped blocks left extra blank lines
         mv "$temp" "$script" && chmod +x "$script"
         _log "[$(date)] : Patched b2_backup/b2_download/b2_delete (v5 retry + B2 CLI v4 URI support)"
