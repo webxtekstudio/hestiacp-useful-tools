@@ -351,14 +351,24 @@ _run_user_git() {
         git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never "$@" 9>&-
 }
 
+_write_stage_gitconfig() {
+    local cfg_path="$1"
+    local stage_git="$2"
+    local user_group="$3"
+    printf '[safe]\n\tdirectory = %s\n' "$stage_git" > "$cfg_path" || return 1
+    chown "root:$user_group" "$cfg_path" || return 1
+    chmod 0640 "$cfg_path" || return 1
+}
+
 _run_user_local_fetch_or_clone() {
     local user="$1"
-    shift
+    local global_cfg="$2"
+    shift 2
     runuser -u "$user" -- env -i \
         PATH="/usr/local/bin:/usr/bin:/bin" \
         HOME="/nonexistent" \
         GIT_CONFIG_NOSYSTEM=1 \
-        GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_CONFIG_GLOBAL="${global_cfg:-/dev/null}" \
         GIT_TERMINAL_PROMPT=0 \
         GIT_SSH_COMMAND=/bin/false \
         git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.allow=never -c protocol.file.allow=always "$@" 9>&-
@@ -625,8 +635,13 @@ sync_overwrite_existing() {
     # Stage fetch into an isolated bare repo without objects/info/alternates so root git
     # never reads or follows tenant-controlled object stores, and tenant never touches credentials.
     install -d -m 0711 -o root -g root "$STAGE_BASE" || return 1
-    stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
-    git init --bare -q "$stage_git"
+    local stage_dir stage_cfg
+    stage_dir=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
+    chown "root:$user_group" "$stage_dir" || { rm -rf "$stage_dir"; return 1; }
+    chmod 0750 "$stage_dir" || { rm -rf "$stage_dir"; return 1; }
+    stage_git="$stage_dir/repo.git"
+    stage_cfg="$stage_dir/gitconfig"
+    git init --bare -q "$stage_git" || { rm -rf "$stage_dir"; return 1; }
 
     effective_repo="$repo"
     if tok=$(_load_readonly_token); then
@@ -642,16 +657,17 @@ sync_overwrite_existing() {
     fi
     log_git_output "$out"
     if [ "$rc" -ne 0 ]; then
-        rm -rf "$stage_git"
+        rm -rf "$stage_dir"
         return 1
     fi
 
     chown -RP "root:$user_group" "$stage_git"
     chmod -R u=rwX,g=rX,o= "$stage_git"
-    out=$(_run_user_local_fetch_or_clone "$user" -c "safe.directory=$stage_git" -C "$dest" fetch --no-tags "$stage_git" "+refs/mirror/target:refs/remotes/origin/$branch" 2>&1)
+    _write_stage_gitconfig "$stage_cfg" "$stage_git" "$user_group" || { rm -rf "$stage_dir"; return 1; }
+    out=$(_run_user_local_fetch_or_clone "$user" "$stage_cfg" -C "$dest" fetch --no-tags "$stage_git" "+refs/mirror/target:refs/remotes/origin/$branch" 2>&1)
     rc=$?
     log_git_output "$out"
-    rm -rf "$stage_git"
+    rm -rf "$stage_dir"
     [ "$rc" -eq 0 ] || return 1
 
     out=$(_run_user_git "$user" -C "$dest" reset --hard "refs/remotes/origin/$branch" 2>&1) || { log_git_output "$out"; return 1; }
@@ -670,12 +686,16 @@ clone_repo_staged() {
     local dest_rel="$7"
     local shallow_mode="$8"
     local depth_args=()
-    local stage_git out rc tok auth_hdr effective_repo
+    local stage_dir stage_git stage_cfg out rc tok auth_hdr effective_repo
 
     [ "$shallow_mode" = "shallow" ] && depth_args=(--depth 1)
 
     install -d -m 0711 -o root -g root "$STAGE_BASE" || return 1
-    stage_git=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
+    stage_dir=$(mktemp -d "$STAGE_BASE/stage.$$.XXXXXX") || return 1
+    chown "root:$user_group" "$stage_dir" || { rm -rf "$stage_dir"; return 1; }
+    chmod 0750 "$stage_dir" || { rm -rf "$stage_dir"; return 1; }
+    stage_git="$stage_dir/repo.git"
+    stage_cfg="$stage_dir/gitconfig"
 
     effective_repo="$repo"
     if tok=$(_load_readonly_token); then
@@ -691,7 +711,7 @@ clone_repo_staged() {
     fi
 
     if [ "$rc" -ne 0 ]; then
-        rm -rf "$stage_git"
+        rm -rf "$stage_dir"
         log_git_output "$out"
         return 1
     fi
@@ -699,10 +719,11 @@ clone_repo_staged() {
     log_git_output "$out"
     chown -RP "root:$user_group" "$stage_git"
     chmod -R u=rwX,g=rX,o= "$stage_git"
-    out=$(_run_user_local_fetch_or_clone "$user" -c "safe.directory=$stage_git" clone --no-local -b "$branch" "$stage_git" "$target_dir" 2>&1)
+    _write_stage_gitconfig "$stage_cfg" "$stage_git" "$user_group" || { rm -rf "$stage_dir"; return 1; }
+    out=$(_run_user_local_fetch_or_clone "$user" "$stage_cfg" clone --no-local -b "$branch" "$stage_git" "$target_dir" 2>&1)
     rc=$?
     log_git_output "$out"
-    rm -rf "$stage_git"
+    rm -rf "$stage_dir"
     [ "$rc" -eq 0 ] || return 1
 
     if [ -n "$dest_rel" ]; then
