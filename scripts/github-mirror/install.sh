@@ -21,24 +21,24 @@ if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-github-mirror" "$target_bin";
     cp "$target_bin" "$BAK_DIR/v-github-mirror.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/v-github-mirror.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp --remove-destination "$SCRIPT_DIR/v-github-mirror" "$target_bin"
-chmod +x "$target_bin"
+rm -f "$target_bin"
+install -o root -g root -m 0755 "$SCRIPT_DIR/v-github-mirror" "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
 if [ ! -f "/etc/hestiacp-github-mirror.conf" ]; then
-    cp "$SCRIPT_DIR/github-mirror.conf.sample" "/etc/hestiacp-github-mirror.conf"
-    chmod 600 "/etc/hestiacp-github-mirror.conf"
+    install -o root -g root -m 0600 "$SCRIPT_DIR/github-mirror.conf.sample" "/etc/hestiacp-github-mirror.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-github-mirror.conf"
 else
+    chown root:root "/etc/hestiacp-github-mirror.conf"
     chmod 600 "/etc/hestiacp-github-mirror.conf"
     echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-github-mirror.conf"
 fi
 
 if [ ! -f "/etc/hestiacp-github-mirror.settings" ]; then
-    cp "$SCRIPT_DIR/github-mirror.settings.sample" "/etc/hestiacp-github-mirror.settings"
-    chmod 600 "/etc/hestiacp-github-mirror.settings"
+    install -o root -g root -m 0600 "$SCRIPT_DIR/github-mirror.settings.sample" "/etc/hestiacp-github-mirror.settings"
     echo "  -> [OK] Installed settings: /etc/hestiacp-github-mirror.settings"
 else
+    chown root:root "/etc/hestiacp-github-mirror.settings"
     chmod 600 "/etc/hestiacp-github-mirror.settings"
     echo "  -> [INFO] Settings exist (permissions verified 0600): /etc/hestiacp-github-mirror.settings"
 fi

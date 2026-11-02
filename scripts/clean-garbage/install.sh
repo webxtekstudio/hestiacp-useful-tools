@@ -21,15 +21,15 @@ if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-clean-garbage" "$target_bin";
     cp "$target_bin" "$BAK_DIR/v-clean-garbage.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/v-clean-garbage.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp --remove-destination "$SCRIPT_DIR/v-clean-garbage" "$target_bin"
-chmod +x "$target_bin"
+rm -f "$target_bin"
+install -o root -g root -m 0755 "$SCRIPT_DIR/v-clean-garbage" "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
 if [ ! -f "/etc/hestiacp-clean-garbage.conf" ]; then
-    cp "$SCRIPT_DIR/clean-garbage.conf.sample" "/etc/hestiacp-clean-garbage.conf"
-    chmod 600 "/etc/hestiacp-clean-garbage.conf"
+    install -o root -g root -m 0600 "$SCRIPT_DIR/clean-garbage.conf.sample" "/etc/hestiacp-clean-garbage.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-clean-garbage.conf"
 else
+    chown root:root "/etc/hestiacp-clean-garbage.conf"
     chmod 600 "/etc/hestiacp-clean-garbage.conf"
     echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-clean-garbage.conf"
 fi

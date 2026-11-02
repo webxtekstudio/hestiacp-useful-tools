@@ -50,10 +50,10 @@ install_root_bin "$SCRIPT_DIR/bin/v-prune-backups" "$HESTIA_BIN/v-prune-backups"
 install_root_bin "$SCRIPT_DIR/bin/v-verify-backups" "$HESTIA_BIN/v-verify-backups"
 install_root_bin "$SCRIPT_DIR/hooks/v-backup-users-retention-hook" "$HESTIA_BIN/v-backup-users-retention-hook"
 if [ ! -f "$RETENTION_CONF" ]; then
-    cp "$SCRIPT_DIR/config/backup-retention.conf.sample" "$RETENTION_CONF"
-    chmod 600 "$RETENTION_CONF"
+    install -o root -g root -m 0600 "$SCRIPT_DIR/config/backup-retention.conf.sample" "$RETENTION_CONF"
     echo "  -> Installed optional retention config: $RETENTION_CONF"
 else
+    chown root:root "$RETENTION_CONF" 2>/dev/null || true
     chmod 600 "$RETENTION_CONF" 2>/dev/null || true
     echo "  -> Retention config already exists (skipped): $RETENTION_CONF"
 fi
@@ -89,19 +89,19 @@ repo_tree_is_root_safe() {
         cur="$(dirname "$cur")"
     done
 
-    # Verify no file or subdirectory inside $target is non-root-owned or group/world-writable
+    # Verify no file, subdirectory, or symlink inside $target is non-root-owned, a symlink, or group/world-writable
     local unsafe
-    unsafe="$(find -P "$target" \( ! -user 0 -o \( ! -type l -perm /022 \) \) -print -quit 2>/dev/null || echo 'err')"
+    unsafe="$(find -P "$target" \( ! -user 0 -o -type l -o -perm /022 \) -print -quit 2>/dev/null || echo 'err')"
     [ -z "$unsafe" ]
 }
 
-if [ -d "/etc/apt/apt.conf.d" ] && [ -f "$REPO_ROOT/install.sh" ] && [ ! -L "$REPO_ROOT/install.sh" ]; then
-    if repo_tree_is_root_safe "$REPO_ROOT"; then
+if [ -d "/etc/apt/apt.conf.d" ]; then
+    if [ -f "$REPO_ROOT/install.sh" ] && [ ! -L "$REPO_ROOT/install.sh" ] && repo_tree_is_root_safe "$REPO_ROOT"; then
         tmp_apt_hook="$(mktemp /etc/apt/apt.conf.d/.99hestia-custom-patches.XXXXXX)"
         cat > "$tmp_apt_hook" << APT_EOF
 // Managed by hestiacp-useful-tools (backup-core-patches)
 // Automatically re-applies HestiaCP custom patches after apt/dpkg package updates
-DPkg::Post-Invoke { "if [ -d '$REPO_ROOT' ] && [ -f '$REPO_ROOT/install.sh' ] && [ ! -L '$REPO_ROOT/install.sh' ] && [ -O '$REPO_ROOT' ] && [ -O '$REPO_ROOT/install.sh' ] && ! find -P '$REPO_ROOT' ! -user 0 -print -quit -o ! -type l -perm /022 -print -quit 2>/dev/null | grep -q .; then /bin/bash '$REPO_ROOT/install.sh' </dev/null >/dev/null 2>&1 || true; fi"; };
+DPkg::Post-Invoke { "if [ -d '$REPO_ROOT' ] && [ ! -L '$REPO_ROOT' ] && [ -f '$REPO_ROOT/install.sh' ] && [ ! -L '$REPO_ROOT/install.sh' ] && [ -O '$REPO_ROOT' ] && [ -O '$REPO_ROOT/install.sh' ] && /bin/bash -c 'cur=\"$REPO_ROOT\"; while true; do [ ! -L \"\$cur\" ] && [ -O \"\$cur\" ] || exit 1; p=\$(stat -c \"%a\" \"\$cur\" 2>/dev/null || echo 777); [[ ! \"\$p\" =~ [2367].\$ && ! \"\$p\" =~ [2367]\$ ]] || exit 1; [ \"\$cur\" = \"/\" ] && break; cur=\$(dirname \"\$cur\"); done' && ! find -P '$REPO_ROOT' \( ! -user 0 -o -type l -o -perm /022 \) -print -quit 2>/dev/null | grep -q .; then /bin/bash '$REPO_ROOT/install.sh' </dev/null >/dev/null 2>&1 || true; fi"; };
 APT_EOF
         chown root:root "$tmp_apt_hook"
         chmod 0644 "$tmp_apt_hook"
@@ -113,7 +113,11 @@ APT_EOF
             echo "  -> Installed APT post-invoke auto-heal hook: $APT_HOOK_FILE"
         fi
     else
-        echo "  -> [WARN] Skipped APT hook ($APT_HOOK_FILE): repo tree '$REPO_ROOT' and its ancestors must be root-owned and non-world/group-writable"
+        if [ -f "$APT_HOOK_FILE" ] || [ -L "$APT_HOOK_FILE" ]; then
+            rm -f "$APT_HOOK_FILE"
+            echo "  -> [WARN] Removed stale/unsafe APT hook: $APT_HOOK_FILE"
+        fi
+        echo "  -> [WARN] Skipped APT hook ($APT_HOOK_FILE): repo tree '$REPO_ROOT' and its ancestors must be root-owned, symlink-free, and non-world/group-writable"
     fi
 fi
 

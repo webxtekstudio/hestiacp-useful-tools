@@ -21,8 +21,8 @@ if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-add-exim-limit" "$target_bin"
     cp "$target_bin" "$BAK_DIR/v-add-exim-limit.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/v-add-exim-limit.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp --remove-destination "$SCRIPT_DIR/v-add-exim-limit" "$target_bin"
-chmod +x "$target_bin"
+rm -f "$target_bin"
+install -o root -g root -m 0755 "$SCRIPT_DIR/v-add-exim-limit" "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
 target_monitor="$HESTIA_BIN/monitor_large_emails.py"
@@ -31,8 +31,8 @@ if [ -f "$target_monitor" ] && ! cmp -s "$SCRIPT_DIR/monitor_large_emails.py" "$
     cp "$target_monitor" "$BAK_DIR/monitor_large_emails.py.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/monitor_large_emails.py.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp --remove-destination "$SCRIPT_DIR/monitor_large_emails.py" "$target_monitor"
-chmod +x "$target_monitor"
+rm -f "$target_monitor"
+install -o root -g root -m 0755 "$SCRIPT_DIR/monitor_large_emails.py" "$target_monitor"
 echo "  -> [OK] Installed monitor helper: $target_monitor"
 
 # Migrate legacy /usr/local/bin duplicate & cron path so updates are always live
@@ -46,10 +46,10 @@ if [ -f /usr/local/bin/monitor_large_emails.py ]; then
 fi
 
 if [ ! -f "/etc/hestiacp-exim-limit.conf" ]; then
-    cp "$SCRIPT_DIR/exim-limit.conf.sample" "/etc/hestiacp-exim-limit.conf"
-    chmod 600 "/etc/hestiacp-exim-limit.conf"
+    install -o root -g root -m 0600 "$SCRIPT_DIR/exim-limit.conf.sample" "/etc/hestiacp-exim-limit.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-exim-limit.conf"
 else
+    chown root:root "/etc/hestiacp-exim-limit.conf"
     chmod 600 "/etc/hestiacp-exim-limit.conf"
     echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-exim-limit.conf"
 fi

@@ -78,8 +78,9 @@ fi
 if [ -z "$ADMIN_EMAIL" ] && [ -f "$HESTIA/conf/hestia.conf" ]; then
     ADMIN_EMAIL=$(grep "^CONTACT=" "$HESTIA/conf/hestia.conf" 2>/dev/null | cut -d"'" -f2)
 fi
-# Final fallback
-if [ -z "$ADMIN_EMAIL" ]; then
+# Final fallback & header/option-injection sanitization
+ADMIN_EMAIL=$(printf '%s' "$ADMIN_EMAIL" | tr -d '\r\n[:space:]')
+if [ -z "$ADMIN_EMAIL" ] || [[ "$ADMIN_EMAIL" == -* ]]; then
     ADMIN_EMAIL="root"
 fi
 
@@ -107,7 +108,7 @@ _send_fatal_email_mirror() {
     if [ -f "$SENDMAIL" ]; then
         echo -e "$body" | "$SENDMAIL" -s "$subject" "$ADMIN_EMAIL" 2>/dev/null
     else
-        { echo "Subject: $subject"; echo; echo -e "$body"; } | /usr/sbin/sendmail "$ADMIN_EMAIL" 2>/dev/null
+        { echo "Subject: $subject"; echo; echo -e "$body"; } | /usr/sbin/sendmail -i -- "$ADMIN_EMAIL" 2>/dev/null
     fi
 }
 
@@ -171,7 +172,8 @@ send_html_email() {
     local status="$1"
     local admin_email="$2"
     [ -z "$admin_email" ] && return 1
-    admin_email=$(printf '%s' "$admin_email" | tr -d '\r\n')
+    admin_email=$(printf '%s' "$admin_email" | tr -d '\r\n[:space:]')
+    [ -z "$admin_email" ] || [[ "$admin_email" == -* ]] && return 1
     
     local raw_hostname
     raw_hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "HestiaCP Server")
@@ -272,7 +274,7 @@ send_html_email() {
             echo "Content-Type: text/html; charset=UTF-8"
             echo
             cat "$temp_html"
-        ) | /usr/sbin/sendmail "$admin_email" 2>/dev/null
+        ) | /usr/sbin/sendmail -i -- "$admin_email" 2>/dev/null
     fi
     
     rm -f "$temp_html" 2>/dev/null
@@ -281,6 +283,21 @@ send_html_email() {
 
 sanitize_repo_url() {
     printf '%s' "$1" | sed -E 's#(https?://)[^/@]+@#\1***@#'
+}
+
+strip_https_userinfo() {
+    printf '%s' "$1" | sed -E 's#(https?://)[^/@]+@#\1#'
+}
+
+_scrub_stage_bare_repo() {
+    local stage_git="$1"
+    rm -f "$stage_git/FETCH_HEAD" "$stage_git/ORIG_HEAD" 2>/dev/null || true
+    cat > "$stage_git/config" << 'EOF_BARE_CFG' || return 1
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+EOF_BARE_CFG
 }
 
 log_git_output() {
@@ -318,7 +335,7 @@ _run_root_git_net() {
     local tok auth_hdr https_url
     if tok=$(_load_readonly_token); then
         auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
-        https_url="$repo_url"
+        https_url=$(strip_https_userinfo "$repo_url")
         if [[ "$https_url" =~ ^git@github\.com:(.+)$ ]]; then
             https_url="https://github.com/${BASH_REMATCH[1]}"
         fi
@@ -406,6 +423,7 @@ resolve_remote_ref() {
     effective_repo="$repo"
     if tok=$(_load_readonly_token); then
         auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+        effective_repo=$(strip_https_userinfo "$effective_repo")
         if [[ "$effective_repo" =~ ^git@github\.com:(.+)$ ]]; then
             effective_repo="https://github.com/${BASH_REMATCH[1]}"
         fi
@@ -646,6 +664,7 @@ sync_overwrite_existing() {
     effective_repo="$repo"
     if tok=$(_load_readonly_token); then
         auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+        effective_repo=$(strip_https_userinfo "$effective_repo")
         if [[ "$effective_repo" =~ ^git@github\.com:(.+)$ ]]; then
             effective_repo="https://github.com/${BASH_REMATCH[1]}"
         fi
@@ -661,6 +680,7 @@ sync_overwrite_existing() {
         return 1
     fi
 
+    _scrub_stage_bare_repo "$stage_git" || { rm -rf "$stage_dir"; return 1; }
     chown -RP "root:$user_group" "$stage_git"
     chmod -R u=rwX,g=rX,o= "$stage_git"
     _write_stage_gitconfig "$stage_cfg" "$stage_git" "$user_group" || { rm -rf "$stage_dir"; return 1; }
@@ -700,6 +720,7 @@ clone_repo_staged() {
     effective_repo="$repo"
     if tok=$(_load_readonly_token); then
         auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$tok" | base64 -w0)"
+        effective_repo=$(strip_https_userinfo "$effective_repo")
         if [[ "$effective_repo" =~ ^git@github\.com:(.+)$ ]]; then
             effective_repo="https://github.com/${BASH_REMATCH[1]}"
         fi
@@ -717,6 +738,7 @@ clone_repo_staged() {
     fi
 
     log_git_output "$out"
+    _scrub_stage_bare_repo "$stage_git" || { rm -rf "$stage_dir"; return 1; }
     chown -RP "root:$user_group" "$stage_git"
     chmod -R u=rwX,g=rX,o= "$stage_git"
     _write_stage_gitconfig "$stage_cfg" "$stage_git" "$user_group" || { rm -rf "$stage_dir"; return 1; }
@@ -878,16 +900,30 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
 
             # --- Retention Cleanup Logic ---
             if [ "$retention_mode" == "backup" ]; then
-                # SMART RETENTION (Daily/Weekly/Monthly)
+                # SMART RETENTION (Daily/Weekly/Monthly — latest snapshot per bucket)
                 log "Running smart retention cleanup..."
                 
                 CURRENT_DATE_SEC=$(date +%s)
+                eff_daily_enabled="$ENABLE_DAILY_BACKUPS"
+                eff_daily_count="$DAILY_BACKUPS_COUNT"
+                if [ "$eff_daily_enabled" != "true" ] && [ "$ENABLE_WEEKLY_BACKUPS" != "true" ] && [ "$ENABLE_MONTHLY_BACKUPS" != "true" ]; then
+                    eff_daily_enabled="true"
+                    if [ "$retention_count" -gt 1 ]; then
+                        eff_daily_count="$retention_count"
+                    fi
+                    log "No smart retention tier enabled in settings; defaulting to daily retention (${eff_daily_count} days)."
+                fi
                 
                 # Always keep the newly created backup snapshot
                 declare -A KEEP_LIST=()
+                declare -A SEEN_DAILY=()
+                declare -A SEEN_WEEKLY=()
+                declare -A SEEN_MONTHLY=()
                 KEEP_LIST["$VERSION_DIR"]=1
                 
-                for backup in "${BACKUPS[@]}"; do
+                # Iterate newest-to-oldest so each daily/weekly/monthly slot keeps only the freshest snapshot
+                for (( b_idx=${#BACKUPS[@]}-1; b_idx>=0; b_idx-- )); do
+                    backup="${BACKUPS[$b_idx]}"
                     dirname=$(basename "$backup")
                     suffix="${dirname#"${dest_base}_"}"
                     date_str="${suffix%%_*}"
@@ -901,23 +937,27 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                     age_days=$(( (CURRENT_DATE_SEC - backup_date_sec) / 86400 ))
                     day_of_week=$(date -d "$date_str" +%u) # 1=Monday, 7=Sunday
                     day_of_month=$(date -d "$date_str" +%-d) # 1-31 (no leading zero)
+                    month_key="${date_str:0:6}"
                     
-                    # DAILY RETENTION
-                    if [ "$ENABLE_DAILY_BACKUPS" == "true" ] && [ "$age_days" -lt "$DAILY_BACKUPS_COUNT" ]; then
+                    # DAILY RETENTION (1 snapshot per calendar day)
+                    if [ "$eff_daily_enabled" == "true" ] && [ "$age_days" -lt "$eff_daily_count" ] && [ -z "${SEEN_DAILY["$date_str"]}" ]; then
+                        SEEN_DAILY["$date_str"]=1
                         KEEP_LIST["$backup"]=1
                         log "Keeping DAILY backup: $dirname (Age: $age_days days)"
                     fi
                     
-                    # WEEKLY RETENTION (Keep Sunday backups)
-                    if [ "$ENABLE_WEEKLY_BACKUPS" == "true" ] && [ "$day_of_week" -eq 7 ] && [ "$age_days" -lt $((WEEKLY_BACKUPS_COUNT * 7)) ]; then
-                         KEEP_LIST["$backup"]=1
-                         log "Keeping WEEKLY backup: $dirname (Sunday)"
+                    # WEEKLY RETENTION (1 Sunday snapshot per calendar Sunday)
+                    if [ "$ENABLE_WEEKLY_BACKUPS" == "true" ] && [ "$day_of_week" -eq 7 ] && [ "$age_days" -lt $((WEEKLY_BACKUPS_COUNT * 7)) ] && [ -z "${SEEN_WEEKLY["$date_str"]}" ]; then
+                        SEEN_WEEKLY["$date_str"]=1
+                        KEEP_LIST["$backup"]=1
+                        log "Keeping WEEKLY backup: $dirname (Sunday)"
                     fi
                     
-                    # MONTHLY RETENTION (Keep 1st of month backups)
-                    if [ "$ENABLE_MONTHLY_BACKUPS" == "true" ] && [ "$day_of_month" -eq 1 ] && [ "$age_days" -lt $((MONTHLY_BACKUPS_COUNT * 30)) ]; then
-                         KEEP_LIST["$backup"]=1
-                         log "Keeping MONTHLY backup: $dirname (1st of Month)"
+                    # MONTHLY RETENTION (1 1st-of-month snapshot per month)
+                    if [ "$ENABLE_MONTHLY_BACKUPS" == "true" ] && [ "$day_of_month" -eq 1 ] && [ "$age_days" -lt $((MONTHLY_BACKUPS_COUNT * 31)) ] && [ -z "${SEEN_MONTHLY["$month_key"]}" ]; then
+                        SEEN_MONTHLY["$month_key"]=1
+                        KEEP_LIST["$backup"]=1
+                        log "Keeping MONTHLY backup: $dirname (1st of Month)"
                     fi
                 done
                 
@@ -928,7 +968,7 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
                         runuser -u "$user" -- env -i PATH="/usr/bin:/bin" rm -rf "$backup" 9>&-
                     fi
                 done
-                unset KEEP_LIST
+                unset KEEP_LIST SEEN_DAILY SEEN_WEEKLY SEEN_MONTHLY
                 
             else
                 # SIMPLE RETENTION (Keep last N exact timestamped directories)

@@ -409,11 +409,11 @@ check_php_status() {
             local pool_conf="/etc/php/${version}/fpm/pool.d/www.conf"
             if [ -f "$pool_conf" ]; then
                 local max_children=$(grep "^pm.max_children" "$pool_conf" 2>/dev/null | awk '{print $3}' | head -1)
-                local active_processes=$(run_with_timeout 3 "pgrep -c 'php-fpm: pool www' || echo '0'")
+                local active_processes=$(run_with_timeout 3 "pgrep -c 'php-fpm: pool www' || true")
                 
                 if [ -n "$max_children" ] && [ -n "$active_processes" ]; then
-                    max_children=$(echo "$max_children" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
-                    active_processes=$(echo "$active_processes" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+                    max_children=$(echo "$max_children" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
+                    active_processes=$(echo "$active_processes" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
                     
                     if [ "$max_children" -gt 0 ] 2>/dev/null && [ "$active_processes" -gt 0 ] 2>/dev/null; then
                         local usage_percent=$((active_processes * 100 / max_children))
@@ -427,7 +427,7 @@ check_php_status() {
             fi
             
             local crashed=$(run_with_timeout 2 "ps aux | grep '[p]hp${version}-fpm' | awk '\$8 ~ /Z/ {count++} END {print count+0}' || echo '0'")
-            crashed=$(echo "$crashed" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+            crashed=$(echo "$crashed" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             [ -z "$crashed" ] && crashed=0
             if [ "$crashed" -gt 0 ] 2>/dev/null; then
                 log_message "${RED}[FAIL] PHP $version has $crashed crashed/zombie process(es)${NC}"
@@ -436,11 +436,11 @@ check_php_status() {
             
             local processes=0
             if command -v pgrep >/dev/null 2>&1; then
-                processes=$(pgrep -c "php${version}-fpm" 2>/dev/null || echo "0")
+                processes=$(pgrep -c "php${version}-fpm" 2>/dev/null || true)
             else
-                processes=$(ps aux | grep -c "[p]hp${version}-fpm" || echo "0")
+                processes=$(ps aux | grep -c "[p]hp${version}-fpm" || true)
             fi
-            processes=$(echo "$processes" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+            processes=$(echo "$processes" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             [ -z "$processes" ] && processes=0
             total_processes=$((total_processes + processes))
         else
@@ -456,11 +456,11 @@ check_php_status() {
         log_message "${GREEN}[OK] PHP versions installed: $(IFS=', '; echo "${php_versions[*]}")${NC}"
         if [ "$total_processes" -eq 0 ] 2>/dev/null; then
             if command -v pgrep >/dev/null 2>&1; then
-                total_processes=$(pgrep -c 'php-fpm' 2>/dev/null || echo "0")
+                total_processes=$(pgrep -c 'php-fpm' 2>/dev/null || true)
             else
-                total_processes=$(ps aux | grep -c '[p]hp-fpm' || echo "0")
+                total_processes=$(ps aux | grep -c '[p]hp-fpm' || true)
             fi
-            total_processes=$(echo "$total_processes" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+            total_processes=$(echo "$total_processes" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             [ -z "$total_processes" ] && total_processes=0
         fi
         log_message "${GREEN}[OK] PHP processes running: $total_processes${NC}"
@@ -501,7 +501,7 @@ check_mysql_status() {
             log_message "${GREEN}[OK] Version: $version${NC}"
             
             local db_count=$(run_with_timeout 5 "$DB_CMD -N -e \"SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('information_schema','performance_schema','mysql','sys');\" 2>/dev/null")
-            db_count=$(echo "$db_count" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+            db_count=$(echo "$db_count" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             log_message "${GREEN}[OK] Databases: $db_count${NC}"
             
             local error_log="/var/log/mysql/error.log"
@@ -510,8 +510,8 @@ check_mysql_status() {
             
             if [ -s "$error_log" ]; then
                 local today=$(date +%Y-%m-%d)
-                local errors_today=$(grep "$today" "$error_log" 2>/dev/null | grep -ciE "(error|crash|corrupt|failed)" | head -1 || echo "0")
-                errors_today=$(echo "$errors_today" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+                local errors_today=$(grep "$today" "$error_log" 2>/dev/null | grep -ciE "(error|crash|corrupt|failed)" | head -1 || true)
+                errors_today=$(echo "$errors_today" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
                 
                 if [ "$errors_today" -gt 50 ] 2>/dev/null; then
                     log_message "${YELLOW}[WARN] Errors in MySQL log today: $errors_today (High)${NC}"
@@ -520,12 +520,12 @@ check_mysql_status() {
                     log_message "${YELLOW}[WARN] Errors in MySQL log today: $errors_today${NC}"
                 fi
                 
-                local crash_count=$(tail -1000 "$error_log" 2>/dev/null | grep -ci "crashed\|table.*marked as crashed" || echo "0")
-                crash_count=$(echo "$crash_count" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+                local crash_count=$(tail -1000 "$error_log" 2>/dev/null | grep -ci "crashed\|table.*marked as crashed" || true)
+                crash_count=$(echo "$crash_count" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
                 [ -z "$crash_count" ] && crash_count=0
                 if [ "$crash_count" -gt 0 ] 2>/dev/null; then
-                    local recent_crashes=$(grep "$today" "$error_log" 2>/dev/null | grep -ci "crashed\|table.*marked as crashed" || echo "0")
-                    recent_crashes=$(echo "$recent_crashes" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+                    local recent_crashes=$(grep "$today" "$error_log" 2>/dev/null | grep -ci "crashed\|table.*marked as crashed" || true)
+                    recent_crashes=$(echo "$recent_crashes" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
                     [ -z "$recent_crashes" ] && recent_crashes=0
                     if [ "$recent_crashes" -gt 0 ] 2>/dev/null; then
                         log_message "${RED}[FAIL] Table crashes detected today: $recent_crashes${NC}"
@@ -535,8 +535,8 @@ check_mysql_status() {
                     fi
                 fi
             elif command -v journalctl >/dev/null 2>&1; then
-                local j_crashes=$(journalctl -u mariadb --since "today" --no-pager 2>/dev/null | grep -ciE "marked as crashed|corrupt" || echo "0")
-                j_crashes=$(echo "$j_crashes" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+                local j_crashes=$(journalctl -u mariadb --since "today" --no-pager 2>/dev/null | grep -ciE "marked as crashed|corrupt" || true)
+                j_crashes=$(echo "$j_crashes" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
                 [ -z "$j_crashes" ] && j_crashes=0
                 if [ "$j_crashes" -gt 0 ] 2>/dev/null; then
                     log_message "${RED}[FAIL] Table crashes detected in systemd journal today: $j_crashes${NC}"
@@ -545,7 +545,7 @@ check_mysql_status() {
             fi
             
             local slow_queries=$(run_with_timeout 5 "$DB_CMD -N -e \"SHOW GLOBAL STATUS LIKE 'Slow_queries';\" 2>/dev/null" | awk '{print $2}' | head -1)
-            slow_queries=$(echo "$slow_queries" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+            slow_queries=$(echo "$slow_queries" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             if [ "$slow_queries" -gt 1000 ] 2>/dev/null; then
                 log_message "${YELLOW}[WARN] Slow queries count: $slow_queries (High)${NC}"
                 ((warnings++))
@@ -592,7 +592,7 @@ check_clamav_status() {
         
         local scans_today=0
         if [ -f "/var/log/clamav/clamav.log" ]; then
-            scans_today=$(grep "$(date +%Y-%m-%d)" /var/log/clamav/clamav.log 2>/dev/null | grep -c "Infected files: 0" 2>/dev/null || echo "0")
+            scans_today=$(grep "$(date +%Y-%m-%d)" /var/log/clamav/clamav.log 2>/dev/null | grep -c "Infected files: 0" 2>/dev/null || true)
         fi
         scans_today=$(echo "$scans_today" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
         [ -z "$scans_today" ] && scans_today=0
@@ -784,7 +784,7 @@ check_exim4_status() {
             log_message "${GREEN}[OK] Mail queue size: $queue_size${NC}"
         fi
         
-        frozen=$(run_with_timeout 5 "exim -bpr 2>/dev/null | grep -c 'frozen' || echo '0'")
+        frozen=$(run_with_timeout 5 "exim -bpr 2>/dev/null | grep -c 'frozen' || true")
         frozen=$(echo "$frozen" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
         [ -z "$frozen" ] && frozen=0
         
@@ -795,7 +795,7 @@ check_exim4_status() {
             log_message "${GREEN}[OK] No frozen emails${NC}"
         fi
         
-        deferred_count=$(run_with_timeout 5 "exim -bp 2>/dev/null | grep -c '^[0-9]' || echo '0'")
+        deferred_count=$(run_with_timeout 5 "exim -bp 2>/dev/null | grep -c '^[0-9]' || true")
         deferred_count=$(echo "$deferred_count" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
         [ -z "$deferred_count" ] && deferred_count=0
         if [ "$deferred_count" -gt 10 ] 2>/dev/null; then
@@ -805,7 +805,7 @@ check_exim4_status() {
         local today=$(date +%Y-%m-%d)
         
         if [ -f "/var/log/exim4/rejectlog" ]; then
-            rejected_today=$(grep -c "^$today" /var/log/exim4/rejectlog 2>/dev/null || echo "0")
+            rejected_today=$(grep -c "^$today" /var/log/exim4/rejectlog 2>/dev/null || true)
             rejected_today=$(echo "$rejected_today" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             [ -z "$rejected_today" ] && rejected_today=0
             
@@ -822,7 +822,7 @@ check_exim4_status() {
         fi
         
         if [ -f "/var/log/exim4/mainlog" ]; then
-            local recent_tls_errors=$(tail -1000 /var/log/exim4/mainlog 2>/dev/null | grep -c "TLS error" || echo "0")
+            local recent_tls_errors=$(tail -1000 /var/log/exim4/mainlog 2>/dev/null | grep -c "TLS error" || true)
             recent_tls_errors=$(echo "$recent_tls_errors" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             if [ -n "$recent_tls_errors" ] && [ "$recent_tls_errors" -gt 100 ] 2>/dev/null; then
                 log_message "${YELLOW}[WARN] TLS errors detected in logs (last 1000 lines): $recent_tls_errors${NC}"
@@ -1064,12 +1064,12 @@ check_backup_status() {
         
         if [ -f "$log_to_check" ]; then
             local recent_log=$(tail -1000 "$log_to_check" 2>/dev/null)
-            success_count=$(echo "$recent_log" | grep -cE "Backup completed|✓ Backup completed" 2>/dev/null || echo "0")
-            failed_count=$(echo "$recent_log" | grep -cE "Backup failed|✗ Backup failed" 2>/dev/null || echo "0")
+            success_count=$(echo "$recent_log" | grep -cE "Backup completed|✓ Backup completed" 2>/dev/null || true)
+            failed_count=$(echo "$recent_log" | grep -cE "Backup failed|✗ Backup failed" 2>/dev/null || true)
             
             if [ "$success_count" -eq 0 ] && [ "$failed_count" -eq 0 ]; then
-                success_count=$(echo "$recent_log" | grep -c "SUCCESS" 2>/dev/null || echo "0")
-                failed_count=$(echo "$recent_log" | grep -c "FAIL" 2>/dev/null || echo "0")
+                success_count=$(echo "$recent_log" | grep -c "SUCCESS" 2>/dev/null || true)
+                failed_count=$(echo "$recent_log" | grep -c "FAIL" 2>/dev/null || true)
             fi
             
             success_count=$(echo "$success_count" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
@@ -1157,7 +1157,7 @@ check_users_domains() {
             local user_mail=0
             
             if [ -f "$user_dir/web.conf" ]; then
-                user_domains=$(grep -c "^DOMAIN=" "$user_dir/web.conf" 2>/dev/null || echo "0")
+                user_domains=$(grep -c "^DOMAIN=" "$user_dir/web.conf" 2>/dev/null || true)
                 user_domains=$(echo "$user_domains" | tr -d '\n\r' | grep -oE '[0-9]+' | head -1 || echo "0")
                 [ -z "$user_domains" ] && user_domains=0
                 total_domains=$((total_domains + user_domains))
@@ -1246,8 +1246,8 @@ check_php_errors() {
         local php_error_log="/var/log/php${php_version}-fpm.log"
         [ -f "$php_error_log" ] || continue
         
-        local errors=$(grep "$today" "$php_error_log" 2>/dev/null | grep -cE "error|warning|fatal" || echo "0")
-        local fatal=$(grep "$today" "$php_error_log" 2>/dev/null | grep -c "Fatal error" || echo "0")
+        local errors=$(grep "$today" "$php_error_log" 2>/dev/null | grep -cE "error|warning|fatal" || true)
+        local fatal=$(grep "$today" "$php_error_log" 2>/dev/null | grep -c "Fatal error" || true)
         
         errors=$(echo "$errors" | tr -d '\n\r ' | sed 's/^0*//')
         fatal=$(echo "$fatal" | tr -d '\n\r ' | sed 's/^0*//')
@@ -1271,7 +1271,7 @@ check_php_errors() {
             [ -f "$error_log" ] || error_log="$domain_dir/error_log"
             [ -f "$error_log" ] || continue
             
-            local domain_errors=$(grep "$today" "$error_log" 2>/dev/null | grep -cE "PHP (Fatal|Parse|Warning)" || echo "0")
+            local domain_errors=$(grep "$today" "$error_log" 2>/dev/null | grep -cE "PHP (Fatal|Parse|Warning)" || true)
             domain_errors=$(echo "$domain_errors" | tr -d '\n\r ' | sed 's/^0*//')
             [ -z "$domain_errors" ] || ! [[ "$domain_errors" =~ ^[0-9]+$ ]] && domain_errors=0
             site_php_errors=$((site_php_errors + domain_errors))
@@ -1285,11 +1285,11 @@ check_php_errors() {
     
     local php_processes=0
     if command -v pgrep >/dev/null 2>&1; then
-        php_processes=$(pgrep -c 'php-fpm' 2>/dev/null || echo "0")
+        php_processes=$(pgrep -c 'php-fpm' 2>/dev/null || true)
     else
-        php_processes=$(ps aux | grep -c "[p]hp-fpm" || echo "0")
+        php_processes=$(ps aux | grep -c "[p]hp-fpm" || true)
     fi
-    php_processes=$(echo "$php_processes" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+    php_processes=$(echo "$php_processes" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
     [ -z "$php_processes" ] && php_processes=0
     
     local php_processes_zombie=0
@@ -1302,7 +1302,7 @@ check_php_errors() {
     else
         php_processes_zombie=$(ps aux | grep "[p]hp-fpm" | awk '$8 ~ /Z/ {count++} END {print count+0}' || echo "0")
     fi
-    php_processes_zombie=$(echo "$php_processes_zombie" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+    php_processes_zombie=$(echo "$php_processes_zombie" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
     [ -z "$php_processes_zombie" ] && php_processes_zombie=0
     crashed_processes=$php_processes_zombie
     
@@ -1354,8 +1354,8 @@ check_web_errors() {
     local today=$(date +%Y-%m-%d)
     
     if [ -f "/var/log/nginx/error.log" ]; then
-        nginx_errors=$(grep "$today" /var/log/nginx/error.log 2>/dev/null | grep -cE "error|critical|emergency" || echo "0")
-        critical_errors=$(grep "$today" /var/log/nginx/error.log 2>/dev/null | grep -cE "crit|emerg" || echo "0")
+        nginx_errors=$(grep "$today" /var/log/nginx/error.log 2>/dev/null | grep -cE "error|critical|emergency" || true)
+        critical_errors=$(grep "$today" /var/log/nginx/error.log 2>/dev/null | grep -cE "crit|emerg" || true)
         
         nginx_errors=$(echo "$nginx_errors" | tr -d '\n\r ' | sed 's/^0*//')
         critical_errors=$(echo "$critical_errors" | tr -d '\n\r ' | sed 's/^0*//')
@@ -1374,7 +1374,7 @@ check_web_errors() {
     fi
     
     if [ -f "/var/log/apache2/error.log" ]; then
-        apache_errors=$(grep "$today" /var/log/apache2/error.log 2>/dev/null | grep -cE "error|critical|emergency" || echo "0")
+        apache_errors=$(grep "$today" /var/log/apache2/error.log 2>/dev/null | grep -cE "error|critical|emergency" || true)
         apache_errors=$(echo "$apache_errors" | tr -d '\n\r ' | sed 's/^0*//')
         [ -z "$apache_errors" ] || ! [[ "$apache_errors" =~ ^[0-9]+$ ]] && apache_errors=0
         
@@ -1404,8 +1404,39 @@ check_email_blacklist() {
     log_message "${BLUE}=== Email Blacklist Status ===${NC}"
     local issues=0
     local blacklisted=0
-    local server_ip=$(curl -s --max-time 5 -4 ifconfig.me 2>/dev/null || curl -s --max-time 5 -4 icanhazip.com 2>/dev/null || curl -s --max-time 5 ifconfig.me 2>/dev/null | grep -oE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || echo "")
-    
+    local lookup_warnings=0
+    local server_ip=""
+
+    # 1. Prefer local HestiaCP configured IPv4 (NAT IP if configured, otherwise primary interface IP)
+    if [ -d "$HESTIA/data/ips" ]; then
+        local ip_file nat_ip base_ip
+        for ip_file in "$HESTIA/data/ips"/*; do
+            [ -f "$ip_file" ] || continue
+            nat_ip=$(grep "^NAT=" "$ip_file" 2>/dev/null | cut -d"'" -f2)
+            base_ip=$(basename "$ip_file")
+            if [[ "$nat_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                server_ip="$nat_ip"
+                break
+            elif [[ "$base_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                server_ip="$base_ip"
+                break
+            fi
+        done
+    fi
+
+    # 2. Fallback to kernel routing table or HTTPS-only external lookup
+    if [ -z "$server_ip" ]; then
+        server_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)
+    fi
+    if [ -z "$server_ip" ] || [[ "$server_ip" =~ ^(10\.|127\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.) ]]; then
+        local ext_ip=""
+        ext_ip=$(curl -fsS --max-time 5 -4 https://api.ipify.org 2>/dev/null || curl -fsS --max-time 5 -4 https://icanhazip.com 2>/dev/null || true)
+        ext_ip=$(printf '%s' "$ext_ip" | tr -d '\r\n[:space:]')
+        if [[ "$ext_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+            server_ip="$ext_ip"
+        fi
+    fi
+
     if [ -z "$server_ip" ]; then
         log_message "${YELLOW}[WARN] Could not determine server IP${NC}"
         module_health_score["email_blacklist"]=80
@@ -1413,7 +1444,7 @@ check_email_blacklist() {
         detailed_report["email_blacklist"]="Could not check blacklist status"
         return 0
     fi
-    
+
     if [[ "$server_ip" =~ : ]]; then
         log_message "${YELLOW}[WARN] Server has IPv6 address, blacklist check skipped (requires IPv4)${NC}"
         module_health_score["email_blacklist"]=80
@@ -1421,89 +1452,121 @@ check_email_blacklist() {
         detailed_report["email_blacklist"]="IPv6 detected, blacklist check requires IPv4"
         return 0
     fi
-    
-    log_message "${GREEN}[OK] Server IP: $server_ip${NC}"
-    
-    local o1 o2 o3 o4 reversed_ip
+
+    local o1 o2 o3 o4 reversed_ip oct
     IFS='.' read -r o1 o2 o3 o4 <<< "$server_ip"
-    if [ -z "$o1" ] || [ -z "$o2" ] || [ -z "$o3" ] || [ -z "$o4" ]; then
-        log_message "${YELLOW}[WARN] Could not parse IPv4 octets for DNSBL lookup${NC}"
-        module_health_score["email_blacklist"]=70
-        module_health_level["email_blacklist"]="FAIR"
-        detailed_report["email_blacklist"]="Unable to parse IPv4 octets for DNSBL lookup"
-        return 0
-    fi
-    reversed_ip="${o4}.${o3}.${o2}.${o1}"
+    for oct in "$o1" "$o2" "$o3" "$o4"; do
+        if ! [[ "$oct" =~ ^[0-9]+$ ]] || [ "$((10#$oct))" -gt 255 ]; then
+            log_message "${YELLOW}[WARN] Invalid IPv4 address for DNSBL lookup: $server_ip${NC}"
+            module_health_score["email_blacklist"]=70
+            module_health_level["email_blacklist"]="FAIR"
+            detailed_report["email_blacklist"]="Unable to parse valid IPv4 octets for DNSBL lookup"
+            return 0
+        fi
+    done
+    log_message "${GREEN}[OK] Server IP: $server_ip${NC}"
+    reversed_ip="$((10#$o4)).$((10#$o3)).$((10#$o2)).$((10#$o1))"
 
     local blacklists=("zen.spamhaus.org" "bl.spamcop.net" "b.barracudacentral.org")
     local blacklist_results=()
-    
+    local resolver_warnings=()
+    local critical_listings=0
+
     for blacklist in "${blacklists[@]}"; do
-        local lookup_result=$(timeout 5 host -t A "${reversed_ip}.${blacklist}" 2>/dev/null)
-        local has_address=$(echo "$lookup_result" | grep -c "has address" || echo "0")
-        has_address=$(echo "$has_address" | tr -d '\n\r ' | sed 's/^0*//')
-        [ -z "$has_address" ] || ! [[ "$has_address" =~ ^[0-9]+$ ]] && has_address=0
-        
-        if [ "$has_address" -gt 0 ] 2>/dev/null; then
-            local return_code=$(echo "$lookup_result" | grep "has address" | awk '{print $NF}' | head -1)
-            
-            if [ "$blacklist" = "zen.spamhaus.org" ]; then
-                case "$return_code" in
-                    127.0.0.2|127.0.0.3)
-                        log_message "${RED}[FAIL] Listed on $blacklist (SBL - Spam)${NC}"
-                        blacklist_results+=("$blacklist (SBL)")
-                        ((blacklisted++))
-                        ((high_issues++))
-                        ;;
-                    127.0.0.4)
-                        log_message "${RED}[FAIL] Listed on $blacklist (XBL - Malware/Botnet)${NC}"
-                        blacklist_results+=("$blacklist (XBL)")
-                        ((blacklisted++))
-                        ((high_issues++))
-                        ;;
-                    127.0.0.5|127.0.0.6|127.0.0.7|127.0.0.9|127.0.0.10|127.0.0.11)
-                        log_message "${YELLOW}[WARN] Listed on $blacklist (PBL - Policy Block, may be false positive)${NC}"
-                        blacklist_results+=("$blacklist (PBL)")
-                        ((blacklisted++))
-                        ((low_issues++))
-                        ;;
-                    127.255.255.*)
-                        log_message "${GREEN}[OK] $blacklist DNS lookup returned resolver status ($return_code) — IP not listed${NC}"
-                        ;;
-                    *)
-                        log_message "${YELLOW}[WARN] Listed on $blacklist (Code: $return_code)${NC}"
-                        blacklist_results+=("$blacklist (Code: $return_code)")
-                        ((blacklisted++))
-                        ((medium_issues++))
-                        ;;
-                esac
-            else
-                case "$return_code" in
-                    127.255.255.*)
-                        log_message "${GREEN}[OK] $blacklist DNS lookup returned resolver status ($return_code) — IP not listed${NC}"
-                        ;;
-                    *)
-                        log_message "${RED}[FAIL] Listed on $blacklist (Code: $return_code)${NC}"
-                        blacklist_results+=("$blacklist")
-                        ((blacklisted++))
-                        ((high_issues++))
-                        ;;
-                esac
+        local lookup_result=""
+        lookup_result=$(timeout 5 host -t A "${reversed_ip}.${blacklist}" 2>/dev/null || true)
+        local addr_lines=""
+        addr_lines=$(printf '%s\n' "$lookup_result" | awk '/has address/ {print $NF}')
+
+        if [ -n "$addr_lines" ]; then
+            local listed_this_bl=0
+            local crit_this_bl=0
+            local pbl_this_bl=0
+            local blocked_query_this_bl=0
+            local codes_seen=()
+            local return_code=""
+
+            while IFS= read -r return_code; do
+                [ -n "$return_code" ] || continue
+                if [ "$blacklist" = "zen.spamhaus.org" ]; then
+                    case "$return_code" in
+                        127.0.0.2|127.0.0.3|127.0.0.9)
+                            listed_this_bl=1
+                            crit_this_bl=1
+                            codes_seen+=("SBL:$return_code")
+                            ;;
+                        127.0.0.4|127.0.0.5|127.0.0.6|127.0.0.7)
+                            listed_this_bl=1
+                            crit_this_bl=1
+                            codes_seen+=("XBL:$return_code")
+                            ;;
+                        127.0.0.10|127.0.0.11)
+                            listed_this_bl=1
+                            pbl_this_bl=1
+                            codes_seen+=("PBL:$return_code")
+                            ;;
+                        127.255.255.*)
+                            blocked_query_this_bl=1
+                            codes_seen+=("QUERY_REFUSED:$return_code")
+                            ;;
+                        *)
+                            listed_this_bl=1
+                            codes_seen+=("Code:$return_code")
+                            ;;
+                    esac
+                else
+                    case "$return_code" in
+                        127.255.255.*)
+                            blocked_query_this_bl=1
+                            codes_seen+=("QUERY_REFUSED:$return_code")
+                            ;;
+                        127.0.0.1)
+                            blocked_query_this_bl=1
+                            codes_seen+=("RESOLVER_ERROR:$return_code")
+                            ;;
+                        127.*)
+                            listed_this_bl=1
+                            crit_this_bl=1
+                            codes_seen+=("$return_code")
+                            ;;
+                        *)
+                            blocked_query_this_bl=1
+                            codes_seen+=("UNEXPECTED:$return_code")
+                            ;;
+                    esac
+                fi
+            done <<< "$addr_lines"
+
+            local joined_codes
+            joined_codes=$(IFS=','; echo "${codes_seen[*]}")
+            if [ "$crit_this_bl" -eq 1 ]; then
+                log_message "${RED}[FAIL] Listed on $blacklist ($joined_codes)${NC}"
+                blacklist_results+=("$blacklist ($joined_codes)")
+                ((blacklisted++))
+                ((critical_listings++))
+                ((high_issues++))
+            elif [ "$listed_this_bl" -eq 1 ] && [ "$pbl_this_bl" -eq 1 ]; then
+                log_message "${YELLOW}[WARN] Listed on $blacklist ($joined_codes — Policy Block)${NC}"
+                blacklist_results+=("$blacklist ($joined_codes)")
+                ((blacklisted++))
+                ((low_issues++))
+            elif [ "$listed_this_bl" -eq 1 ]; then
+                log_message "${YELLOW}[WARN] Listed on $blacklist ($joined_codes)${NC}"
+                blacklist_results+=("$blacklist ($joined_codes)")
+                ((blacklisted++))
+                ((medium_issues++))
+            elif [ "$blocked_query_this_bl" -eq 1 ]; then
+                log_message "${YELLOW}[WARN] $blacklist refused/rate-limited DNSBL query via current resolver ($joined_codes) — listing status unverified${NC}"
+                resolver_warnings+=("$blacklist ($joined_codes)")
+                ((lookup_warnings++))
             fi
         else
             log_message "${GREEN}[OK] Not listed on $blacklist${NC}"
         fi
     done
-    
-    blacklisted=$(echo "$blacklisted" | tr -d '\n\r ' | sed 's/^0*//')
-    [ -z "$blacklisted" ] || ! [[ "$blacklisted" =~ ^[0-9]+$ ]] && blacklisted=0
-    
-    if [ "$blacklisted" -gt 0 ] 2>/dev/null; then
-        local critical_listings=$(echo "${blacklist_results[@]}" | grep -cE "SBL|XBL" || echo "0")
-        critical_listings=$(echo "$critical_listings" | tr -d '\n\r ' | sed 's/^0*//')
-        [ -z "$critical_listings" ] || ! [[ "$critical_listings" =~ ^[0-9]+$ ]] && critical_listings=0
-        
-        if [ "$critical_listings" -gt 0 ] 2>/dev/null; then
+
+    if [ "$blacklisted" -gt 0 ]; then
+        if [ "$critical_listings" -gt 0 ]; then
             module_health_score["email_blacklist"]=30
             module_health_level["email_blacklist"]="CRITICAL"
             detailed_report["email_blacklist"]="CRITICAL: Listed on ${blacklisted} blacklist(s): $(IFS=', '; echo "${blacklist_results[*]}")"
@@ -1514,6 +1577,11 @@ check_email_blacklist() {
             detailed_report["email_blacklist"]="Listed on ${blacklisted} blacklist(s) (non-critical): $(IFS=', '; echo "${blacklist_results[*]}")"
             return 1
         fi
+    elif [ "$lookup_warnings" -gt 0 ]; then
+        module_health_score["email_blacklist"]=85
+        module_health_level["email_blacklist"]="GOOD"
+        detailed_report["email_blacklist"]="No confirmed listings, but ${lookup_warnings} DNSBL query/queries were rate-limited or refused by open resolver: $(IFS=', '; echo "${resolver_warnings[*]}")"
+        return 0
     else
         module_health_score["email_blacklist"]=100
         module_health_level["email_blacklist"]="EXCELLENT"
@@ -1533,8 +1601,8 @@ check_system_logs() {
     local today=$(date +%Y-%m-%d)
     
     if [ -f "/var/log/syslog" ]; then
-        critical_errors=$(grep "$today" /var/log/syslog 2>/dev/null | grep -cE "CRITICAL|EMERGENCY|panic|Oops|segfault|segmentation fault" || echo "0")
-        kernel_errors=$(grep "$today" /var/log/syslog 2>/dev/null | grep -cE "kernel:.*error|kernel:.*fail" || echo "0")
+        critical_errors=$(grep "$today" /var/log/syslog 2>/dev/null | grep -cE "CRITICAL|EMERGENCY|panic|Oops|segfault|segmentation fault" || true)
+        kernel_errors=$(grep "$today" /var/log/syslog 2>/dev/null | grep -cE "kernel:.*error|kernel:.*fail" || true)
         
         critical_errors=$(echo "$critical_errors" | tr -d '\n\r ' | sed 's/^0*//')
         kernel_errors=$(echo "$kernel_errors" | tr -d '\n\r ' | sed 's/^0*//')
@@ -1553,7 +1621,7 @@ check_system_logs() {
             log_message "${YELLOW}[WARN] Kernel errors today: $kernel_errors${NC}"
         fi
         
-        local oom_kills=$(grep "$today" /var/log/syslog 2>/dev/null | grep -c "Out of memory" || echo "0")
+        local oom_kills=$(grep "$today" /var/log/syslog 2>/dev/null | grep -c "Out of memory" || true)
         oom_kills=$(echo "$oom_kills" | tr -d '\n\r ' | sed 's/^0*//')
         [ -z "$oom_kills" ] || ! [[ "$oom_kills" =~ ^[0-9]+$ ]] && oom_kills=0
         if [ "$oom_kills" -gt 0 ] 2>/dev/null; then
@@ -1564,7 +1632,7 @@ check_system_logs() {
     fi
     
     if [ -f "/var/log/auth.log" ]; then
-        failed_logins=$(grep "$today" /var/log/auth.log 2>/dev/null | grep -cE "Failed password|authentication failure" || echo "0")
+        failed_logins=$(grep "$today" /var/log/auth.log 2>/dev/null | grep -cE "Failed password|authentication failure" || true)
         failed_logins=$(echo "$failed_logins" | tr -d '\n\r ' | sed 's/^0*//')
         [ -z "$failed_logins" ] || ! [[ "$failed_logins" =~ ^[0-9]+$ ]] && failed_logins=0
         
@@ -1581,7 +1649,7 @@ check_system_logs() {
             log_message "${GREEN}[OK] No failed login attempts today${NC}"
         fi
         
-        local invalid_users=$(grep "$today" /var/log/auth.log 2>/dev/null | grep -c "Invalid user" || echo "0")
+        local invalid_users=$(grep "$today" /var/log/auth.log 2>/dev/null | grep -c "Invalid user" || true)
         invalid_users=$(echo "$invalid_users" | tr -d '\n\r ' | sed 's/^0*//')
         [ -z "$invalid_users" ] || ! [[ "$invalid_users" =~ ^[0-9]+$ ]] && invalid_users=0
         if [ "$invalid_users" -gt 50 ] 2>/dev/null; then
@@ -1774,7 +1842,7 @@ check_database_health() {
         while IFS= read -r table; do
             [ -z "$table" ] && continue
             local table_ident="${table//\`/\`\`}"
-            local check_result=$($DB_CMD -N -e "CHECK TABLE \`${db_ident}\`.\`${table_ident}\`;" 2>/dev/null | grep -ciE "corrupt|error|damaged" || echo "0")
+            local check_result=$($DB_CMD -N -e "CHECK TABLE \`${db_ident}\`.\`${table_ident}\`;" 2>/dev/null | grep -ciE "corrupt|error|damaged" || true)
             if [ "$check_result" -gt 0 ] 2>/dev/null; then
                 ((corrupted_tables++))
             fi
@@ -1826,7 +1894,7 @@ check_cron_jobs() {
         [ "$user" = "default" ] && continue
         
         if [ -f "$user_dir/cron.conf" ]; then
-            local user_crons=$(grep -c "^JOB=" "$user_dir/cron.conf" 2>/dev/null || echo "0")
+            local user_crons=$(grep -c "^JOB=" "$user_dir/cron.conf" 2>/dev/null || true)
             user_crons=$(echo "$user_crons" | tr -d '\n\r ' | sed 's/^0*//')
             [ -z "$user_crons" ] || ! [[ "$user_crons" =~ ^[0-9]+$ ]] && user_crons=0
             total_crons=$((total_crons + user_crons))
@@ -1839,7 +1907,7 @@ check_cron_jobs() {
     
     if [ -f "/var/log/syslog" ]; then
         local today=$(date +%Y-%m-%d)
-        failed_crons=$(grep "$today" /var/log/syslog 2>/dev/null | grep -cE "CRON.*error|CRON.*failed" || echo "0")
+        failed_crons=$(grep "$today" /var/log/syslog 2>/dev/null | grep -cE "CRON.*error|CRON.*failed" || true)
         failed_crons=$(echo "$failed_crons" | tr -d '\n\r ' | sed 's/^0*//')
         [ -z "$failed_crons" ] || ! [[ "$failed_crons" =~ ^[0-9]+$ ]] && failed_crons=0
     fi
@@ -1889,14 +1957,14 @@ check_system_updates() {
         local update_output=$(run_with_timeout 30 "apt-get -s upgrade 2>/dev/null | grep -E '^Inst|^Conf|^Remv'" || echo "")
         
         if [ -n "$update_output" ]; then
-            updates_available=$(echo "$update_output" | grep -c "^Inst" || echo "0")
-            local removals=$(echo "$update_output" | grep -c "^Remv" || echo "0")
+            updates_available=$(echo "$update_output" | grep -c "^Inst" || true)
+            local removals=$(echo "$update_output" | grep -c "^Remv" || true)
             
-            security_updates=$(echo "$update_output" | grep -cE "Inst.*security|Inst.*Security|Inst.*\(.*security.*\)" || echo "0")
+            security_updates=$(echo "$update_output" | grep -cE "Inst.*security|Inst.*Security|Inst.*\(.*security.*\)" || true)
             
-            updates_available=$(echo "$updates_available" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
-            security_updates=$(echo "$security_updates" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
-            removals=$(echo "$removals" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+            updates_available=$(echo "$updates_available" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
+            security_updates=$(echo "$security_updates" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
+            removals=$(echo "$removals" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
             [ -z "$updates_available" ] && updates_available=0
             [ -z "$security_updates" ] && security_updates=0
             [ -z "$removals" ] && removals=0
@@ -1953,7 +2021,7 @@ check_inodes() {
     log_message "${BLUE}=== Inode Usage Status ===${NC}"
     local issues=0
     local inode_usage=$(df -i / 2>/dev/null | tail -1 | awk '{print $5}' | sed 's/%//')
-    inode_usage=$(echo "$inode_usage" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+    inode_usage=$(echo "$inode_usage" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
     [ -z "$inode_usage" ] && inode_usage=0
     
     if [ "$inode_usage" -gt 90 ] 2>/dev/null; then
@@ -1986,11 +2054,11 @@ check_high_resource_processes() {
     local high_memory=0
     
     high_cpu=$(ps aux --sort=-%cpu 2>/dev/null | awk 'NR>1 && $3 > 80 {count++} END {print count+0}' || echo "0")
-    high_cpu=$(echo "$high_cpu" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+    high_cpu=$(echo "$high_cpu" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
     [ -z "$high_cpu" ] && high_cpu=0
     
     high_memory=$(ps aux --sort=-%mem 2>/dev/null | awk 'NR>1 && $4 > 80 {count++} END {print count+0}' || echo "0")
-    high_memory=$(echo "$high_memory" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+    high_memory=$(echo "$high_memory" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
     [ -z "$high_memory" ] && high_memory=0
     
     if [ "$high_cpu" -gt 0 ] 2>/dev/null; then
@@ -2038,8 +2106,8 @@ check_swap_usage() {
     local swap_total=$(free -m 2>/dev/null | grep "^Swap:" | awk '{print $2}' || echo "0")
     local swap_used=$(free -m 2>/dev/null | grep "^Swap:" | awk '{print $3}' || echo "0")
     
-    swap_total=$(echo "$swap_total" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
-    swap_used=$(echo "$swap_used" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+    swap_total=$(echo "$swap_total" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
+    swap_used=$(echo "$swap_used" | tr -d '\n\r ' | sed 's/^0*//' | grep -oE '^[0-9]+$' || echo "0")
     [ -z "$swap_total" ] && swap_total=0
     [ -z "$swap_used" ] && swap_used=0
     

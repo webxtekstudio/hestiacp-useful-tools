@@ -21,15 +21,15 @@ if [ -f "$target_bin" ] && ! cmp -s "$SCRIPT_DIR/v-system-report" "$target_bin";
     cp "$target_bin" "$BAK_DIR/v-system-report.bak.$(date +%Y%m%d-%H%M%S)"
     ls -1t "$BAK_DIR"/v-system-report.bak.* 2>/dev/null | tail -n +4 | xargs -r rm -f -- 2>/dev/null || true
 fi
-cp --remove-destination "$SCRIPT_DIR/v-system-report" "$target_bin"
-chmod +x "$target_bin"
+rm -f "$target_bin"
+install -o root -g root -m 0755 "$SCRIPT_DIR/v-system-report" "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
 if [ ! -f "/etc/hestiacp-system-report.conf" ]; then
-    cp "$SCRIPT_DIR/system-report.conf.sample" "/etc/hestiacp-system-report.conf"
-    chmod 600 "/etc/hestiacp-system-report.conf"
+    install -o root -g root -m 0600 "$SCRIPT_DIR/system-report.conf.sample" "/etc/hestiacp-system-report.conf"
     echo "  -> [OK] Installed config: /etc/hestiacp-system-report.conf"
 else
+    chown root:root "/etc/hestiacp-system-report.conf"
     chmod 600 "/etc/hestiacp-system-report.conf"
     echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-system-report.conf"
 fi

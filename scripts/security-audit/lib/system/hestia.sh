@@ -23,17 +23,21 @@ check_hestia_panel() {
         local expiry
         expiry=$(openssl x509 -enddate -noout -in "$panel_cert" 2>/dev/null | cut -d= -f2)
         if [ -n "$expiry" ]; then
-            local exp_epoch
-            exp_epoch=$(date -d "$expiry" +%s 2>/dev/null)
-            local now_epoch
-            now_epoch=$(date +%s)
-            local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
-            if [ $days_left -lt 0 ]; then
-                result_fail "S20" "Panel SSL certificate is EXPIRED"
-            elif [ $days_left -lt 14 ]; then
-                result_warn "S21" "Panel SSL expires in ${days_left} days"
+            local exp_epoch=""
+            exp_epoch=$(date -d "$expiry" +%s 2>/dev/null || true)
+            if [[ "$exp_epoch" =~ ^[0-9]+$ ]]; then
+                local now_epoch
+                now_epoch=$(date +%s)
+                local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+                if [ "$days_left" -lt 0 ]; then
+                    result_fail "S20" "Panel SSL certificate is EXPIRED"
+                elif [ "$days_left" -lt 14 ]; then
+                    result_warn "S21" "Panel SSL expires in ${days_left} days"
+                else
+                    result_pass "S20" "Panel SSL certificate is valid (${days_left} days remaining)"
+                fi
             else
-                result_pass "S20" "Panel SSL certificate is valid (${days_left} days remaining)"
+                result_fail "S20" "Cannot parse panel SSL certificate expiry"
             fi
         else
             result_fail "S20" "Cannot parse panel SSL certificate"
@@ -67,7 +71,7 @@ check_hestia_panel() {
 
         local admin_domains=0
         if [ -f "/usr/local/hestia/data/users/${admin_user}/web.conf" ]; then
-            admin_domains=$(grep -c "^DOMAIN=" "/usr/local/hestia/data/users/${admin_user}/web.conf" 2>/dev/null || echo 0)
+            admin_domains=$(grep -c "^DOMAIN=" "/usr/local/hestia/data/users/${admin_user}/web.conf" 2>/dev/null) || admin_domains=0
         fi
         if [ "$admin_domains" -gt 0 ]; then
             result_warn "S23" "${admin_domains} website(s) hosted under admin user (${admin_user}) — use separate accounts"
