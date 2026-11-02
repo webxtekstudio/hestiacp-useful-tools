@@ -105,6 +105,20 @@ Configuration lives in:
 /etc/hestiacp-backup-retention.conf
 ```
 
+### 6. Remote Backup Size & Integrity Verification (`v-verify-backups`)
+
+Log lines alone cannot catch a truncated upload or an accidentally deleted cloud archive. `v-verify-backups` cross-checks every non-suspended HestiaCP user's latest `backup.conf` entry against the live remote bucket (`b2 ls --long` / `rclone lsl`) or local `.tar` archive (`tar -tf`), verifying:
+
+- The expected `.tar` archive actually exists on the remote backend
+- The archive is non-empty (`>= 10 KB`) and matches HestiaCP's recorded `SIZE` within tolerance
+- The archive age does not exceed `--max-age-days=8`
+
+It runs automatically after `v-backup-users` and single-user B2 retries, writing a machine-readable report to `/var/log/hestia/backup-verify.status` (`status=B2_VERIFIED_OK` or `status=BACKUP_VERIFY_FAILED`), and can also be executed manually at any time:
+
+```bash
+v-verify-backups
+```
+
 ---
 
 ## Architecture Reference

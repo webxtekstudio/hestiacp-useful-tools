@@ -1,0 +1,252 @@
+#!/bin/bash
+# HestiaCP Backup Archive & Remote Storage Verifier
+# Cross-checks active HestiaCP user backup metadata against remote object storage
+# (Backblaze B2 / rclone) and/or local tar archives to catch missing, stale, empty,
+# or truncated backups without downloading multi-gigabyte archives.
+
+set -uo pipefail
+
+HESTIA="${HESTIA:-/usr/local/hestia}"
+STATUS_FILE="${STATUS_FILE:-/var/log/hestia/backup-verify.status}"
+MAX_AGE_DAYS="${MAX_AGE_DAYS:-8}"
+MIN_ARCHIVE_BYTES="${MIN_ARCHIVE_BYTES:-10240}"
+QUIET="FALSE"
+
+usage() {
+    cat <<EOF
+Usage: v-verify-backups [--max-age-days=N] [--status-file=PATH] [--quiet] [--help]
+
+Verifies that every active (non-suspended) HestiaCP user has a recent, non-empty,
+size-consistent backup archive on the configured backup backend (B2, rclone, or local).
+Writes a machine-readable status summary to /var/log/hestia/backup-verify.status.
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --max-age-days=*) MAX_AGE_DAYS="${arg#*=}" ;;
+        --status-file=*) STATUS_FILE="${arg#*=}" ;;
+        --quiet|-q) QUIET="TRUE" ;;
+        --help|-h) usage; exit 0 ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+[[ "$MAX_AGE_DAYS" =~ ^[0-9]+$ ]] || MAX_AGE_DAYS=8
+[[ "$MIN_ARCHIVE_BYTES" =~ ^[0-9]+$ ]] || MIN_ARCHIVE_BYTES=10240
+
+BACKUP="/backup"
+BACKUP_SYSTEM="local"
+if [ -f "$HESTIA/conf/hestia.conf" ]; then
+    # shellcheck disable=SC1091
+    source "$HESTIA/conf/hestia.conf" 2>/dev/null || true
+fi
+
+tmp_remote=$(umask 077 && mktemp /tmp/v-verify-backups.remote.XXXXXX) || exit 1
+tmp_out=$(umask 077 && mktemp /tmp/v-verify-backups.out.XXXXXX) || { rm -f "$tmp_remote"; exit 1; }
+trap 'rm -f "$tmp_remote" "$tmp_out" 2>/dev/null' EXIT INT TERM
+
+NOW_EPOCH=$(date +%s)
+CHECKED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+BACKEND="local"
+BACKEND_ERROR=""
+
+if [[ ",${BACKUP_SYSTEM}," == *",b2,"* ]] || [ -f "$HESTIA/conf/b2.backup.conf" ]; then
+    if [ -f "$HESTIA/conf/b2.backup.conf" ] && grep -q "^BUCKET=" "$HESTIA/conf/b2.backup.conf" 2>/dev/null; then
+        BACKEND="b2"
+        BUCKET=""
+        B2_KEYID=""
+        B2_KEY=""
+        # shellcheck disable=SC1091
+        source "$HESTIA/conf/b2.backup.conf" 2>/dev/null || true
+        if ! command -v b2 >/dev/null 2>&1 && [ -x /usr/local/bin/b2 ]; then
+            PATH="/usr/local/bin:$PATH"
+        fi
+        if [ -z "$BUCKET" ] || [ -z "$B2_KEYID" ] || [ -z "$B2_KEY" ]; then
+            BACKEND_ERROR="B2_CONFIG_INCOMPLETE"
+        elif ! command -v b2 >/dev/null 2>&1; then
+            BACKEND_ERROR="B2_CLI_MISSING"
+        else
+            b2_raw=""
+            if ! b2_raw=$(B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null) && \
+               ! b2_raw=$(B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null); then
+                BACKEND_ERROR="B2_BUCKET_LIST_FAILED"
+            else
+                printf '%s\n' "$b2_raw" | awk 'NF >= 6 && $NF ~ /\.tar$/ { print $(NF-1) "|" $NF }' > "$tmp_remote"
+            fi
+        fi
+    fi
+elif [[ ",${BACKUP_SYSTEM}," == *",rclone,"* ]] && [ -f "$HESTIA/conf/rclone.backup.conf" ]; then
+    BACKEND="rclone"
+    HOST=""
+    BPATH=""
+    # shellcheck disable=SC1091
+    source "$HESTIA/conf/rclone.backup.conf" 2>/dev/null || true
+    if [ -z "$HOST" ] || ! command -v rclone >/dev/null 2>&1; then
+        BACKEND_ERROR="RCLONE_UNAVAILABLE"
+    else
+        remote_target="${HOST}:${BPATH%/}"
+        [ -z "$BPATH" ] && remote_target="${HOST}:"
+        if ! rclone_raw=$(rclone lsl "$remote_target" 2>/dev/null); then
+            BACKEND_ERROR="RCLONE_LIST_FAILED"
+        else
+            printf '%s\n' "$rclone_raw" | awk 'NF >= 4 && $NF ~ /\.tar$/ { print $1 "|" $NF }' > "$tmp_remote"
+        fi
+    fi
+fi
+
+ACTIVE_USERS=0
+VERIFIED_USERS=0
+FAILED_USERS=0
+TOTAL_BYTES=0
+DETAIL_LINES=()
+
+for user_dir in "$HESTIA/data/users"/*; do
+    [ -d "$user_dir" ] || continue
+    user=$(basename "$user_dir")
+    user_conf="$user_dir/user.conf"
+    [ -f "$user_conf" ] || continue
+    if grep -q "^SUSPENDED='yes'" "$user_conf" 2>/dev/null; then
+        continue
+    fi
+
+    ACTIVE_USERS=$((ACTIVE_USERS + 1))
+
+    if [ -n "$BACKEND_ERROR" ]; then
+        FAILED_USERS=$((FAILED_USERS + 1))
+        DETAIL_LINES+=("FAIL $user $BACKEND_ERROR")
+        continue
+    fi
+
+    bkp_conf="$user_dir/backup.conf"
+    latest_line=""
+    [ -f "$bkp_conf" ] && latest_line=$(tail -n 1 "$bkp_conf" 2>/dev/null || true)
+    if [ -z "$latest_line" ]; then
+        FAILED_USERS=$((FAILED_USERS + 1))
+        DETAIL_LINES+=("FAIL $user NO_BACKUP_RECORD")
+        continue
+    fi
+
+    archive=$(printf '%s' "$latest_line" | grep -o "BACKUP='[^']*'" | cut -d"'" -f2)
+    b_size_mib=$(printf '%s' "$latest_line" | grep -o "SIZE='[^']*'" | cut -d"'" -f2)
+    b_date=$(printf '%s' "$latest_line" | grep -o "DATE='[^']*'" | cut -d"'" -f2)
+    b_time=$(printf '%s' "$latest_line" | grep -o "TIME='[^']*'" | cut -d"'" -f2)
+
+    [[ "$b_size_mib" =~ ^[0-9]+$ ]] || b_size_mib=0
+    if [ -z "$archive" ] || [ -z "$b_date" ]; then
+        FAILED_USERS=$((FAILED_USERS + 1))
+        DETAIL_LINES+=("FAIL $user MALFORMED_BACKUP_RECORD")
+        continue
+    fi
+
+    b_epoch=$(date -d "${b_date} ${b_time:-00:00:00}" +%s 2>/dev/null || echo 0)
+    age_days=999
+    if [ "$b_epoch" -gt 0 ]; then
+        age_days=$(( (NOW_EPOCH - b_epoch) / 86400 ))
+        [ "$age_days" -lt 0 ] && age_days=0
+    fi
+
+    actual_bytes=""
+    local_tar=""
+
+    if [ "$BACKEND" = "b2" ] || [ "$BACKEND" = "rclone" ]; then
+        actual_bytes=$(awk -F'|' -v target="$archive" '
+            {
+                p = $2
+                sub(/^.*\//, "", p)
+                if (p == target) {
+                    sz = $1
+                }
+            }
+            END { if (sz != "") print sz }
+        ' "$tmp_remote")
+
+        if [ -z "$actual_bytes" ]; then
+            FAILED_USERS=$((FAILED_USERS + 1))
+            DETAIL_LINES+=("FAIL $user MISSING_REMOTE_ARCHIVE archive=$archive backend=$BACKEND")
+            continue
+        fi
+    else
+        if [ -f "${BACKUP%/}/$archive" ]; then
+            local_tar=$(readlink -f "${BACKUP%/}/$archive" 2>/dev/null || echo "${BACKUP%/}/$archive")
+        else
+            local_tar=$(find "${BACKUP%/}" -maxdepth 4 -type f -name "$archive" -print -quit 2>/dev/null || true)
+        fi
+        if [ -z "$local_tar" ] || [ ! -f "$local_tar" ]; then
+            FAILED_USERS=$((FAILED_USERS + 1))
+            DETAIL_LINES+=("FAIL $user MISSING_LOCAL_ARCHIVE archive=$archive")
+            continue
+        fi
+        actual_bytes=$(stat -c '%s' "$local_tar" 2>/dev/null || echo 0)
+        if ! tar -tf "$local_tar" >/dev/null 2>&1; then
+            FAILED_USERS=$((FAILED_USERS + 1))
+            DETAIL_LINES+=("FAIL $user CORRUPT_LOCAL_TAR archive=$archive bytes=$actual_bytes")
+            continue
+        fi
+    fi
+
+    [[ "$actual_bytes" =~ ^[0-9]+$ ]] || actual_bytes=0
+    if [ "$actual_bytes" -lt "$MIN_ARCHIVE_BYTES" ]; then
+        FAILED_USERS=$((FAILED_USERS + 1))
+        DETAIL_LINES+=("FAIL $user TRUNCATED_OR_EMPTY archive=$archive bytes=$actual_bytes min_bytes=$MIN_ARCHIVE_BYTES")
+        continue
+    fi
+
+    if [ "$b_size_mib" -ge 2 ]; then
+        min_expected_bytes=$(( (b_size_mib - 1) * 1048576 * 75 / 100 ))
+        if [ "$actual_bytes" -lt "$min_expected_bytes" ]; then
+            FAILED_USERS=$((FAILED_USERS + 1))
+            DETAIL_LINES+=("FAIL $user SIZE_MISMATCH archive=$archive bytes=$actual_bytes expected_mib=$b_size_mib")
+            continue
+        fi
+    fi
+
+    if [ "$age_days" -gt "$MAX_AGE_DAYS" ]; then
+        FAILED_USERS=$((FAILED_USERS + 1))
+        DETAIL_LINES+=("FAIL $user STALE_BACKUP archive=$archive age_days=$age_days max_age_days=$MAX_AGE_DAYS")
+        continue
+    fi
+
+    VERIFIED_USERS=$((VERIFIED_USERS + 1))
+    TOTAL_BYTES=$((TOTAL_BYTES + actual_bytes))
+    DETAIL_LINES+=("OK $user archive=$archive bytes=$actual_bytes expected_mib=$b_size_mib age_days=$age_days")
+done
+
+OVERALL_STATUS="BACKUP_VERIFIED_OK"
+if [ "$BACKEND" = "b2" ] && [ "$FAILED_USERS" -eq 0 ] && [ "$VERIFIED_USERS" -gt 0 ]; then
+    OVERALL_STATUS="B2_VERIFIED_OK"
+elif [ "$FAILED_USERS" -gt 0 ] || [ "$VERIFIED_USERS" -eq 0 ]; then
+    OVERALL_STATUS="BACKUP_VERIFY_FAILED"
+fi
+
+{
+    echo "checked_at=${CHECKED_AT}"
+    echo "backend=${BACKEND}"
+    echo "active_users=${ACTIVE_USERS}"
+    echo "verified_users=${VERIFIED_USERS}"
+    echo "failed_users=${FAILED_USERS}"
+    echo "total_bytes=${TOTAL_BYTES}"
+    echo "status=${OVERALL_STATUS}"
+    for line in "${DETAIL_LINES[@]}"; do
+        echo "$line"
+    done
+} > "$tmp_out"
+
+mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || true
+chmod 0644 "$tmp_out"
+cp -f "$tmp_out" "$STATUS_FILE" 2>/dev/null || true
+chmod 0644 "$STATUS_FILE" 2>/dev/null || true
+
+if [ "$QUIET" != "TRUE" ]; then
+    cat "$tmp_out"
+fi
+
+if [ "$FAILED_USERS" -gt 0 ] || [ "$VERIFIED_USERS" -eq 0 ]; then
+    exit 1
+fi
+exit 0

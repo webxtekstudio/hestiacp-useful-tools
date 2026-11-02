@@ -141,6 +141,11 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$FAIL_COUNT" -eq 0 ] && [ "$YESTERDAY" != "$
     [ $((SUCCESS_COUNT + FAIL_COUNT)) -gt 0 ] && REPORT_DATE="$YESTERDAY"
 fi
 
+if [ -x "$HESTIA/bin/v-verify-backups" ]; then
+    verify_summary=$("$HESTIA/bin/v-verify-backups" 2>/dev/null | awk -F= '/^(status|verified_users|active_users|failed_users)=/ {kv[$1]=$2} END {printf "%s verified=%s/%s failed=%s", kv["status"], kv["verified_users"], kv["active_users"], kv["failed_users"]}')
+    [ -n "$verify_summary" ] && echo "$(date +"%Y-%m-%d %H:%M:%S") Remote backup verification: ${verify_summary}" >> "$LOG_FILE"
+fi
+
 upload_global_log_to_b2
 
 [ "$SUCCESS_COUNT" -eq 0 ] && [ "$FAIL_COUNT" -eq 0 ] && exit 0
