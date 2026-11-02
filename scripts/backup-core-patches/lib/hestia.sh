@@ -15,10 +15,12 @@ patch_b2_functions() {
     [ ! -f "$script" ] && return 1
     grep -q "hestia-custom-b2-v5.4-verify" "$script" 2>/dev/null && return 0
 
-    if grep -q "hestia-custom-b2-v" "$script" 2>/dev/null && [ -f "${script}.original" ]; then
-        cp "${script}.original" "$script" 2>/dev/null || true
+    if grep -q "hestia-custom-b2-v" "$script" 2>/dev/null; then
+        [ -f "${script}.original" ] && cp "${script}.original" "$script" 2>/dev/null || true
+    else
+        # Fresh upstream HestiaCP file (e.g. after apt upgrade) — refresh .original snapshot
+        cp -f "$script" "${script}.original" 2>/dev/null || true
     fi
-    [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
     if ! grep -q "^b2_backup() {" "$script" || ! grep -q "^b2_download() {" "$script" || ! grep -q "^b2_delete() {" "$script"; then
         return 1
@@ -244,7 +246,7 @@ fi
 PATCH_EOF
         sed -n "$line_num,\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-custom-hook-v1" "$temp" 2>/dev/null; then
+        if grep -q "hestia-custom-hook-v1" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
             _log "[$(date)] : Patched v-backup-user (Local Organization Hook)"
             return 0
@@ -260,10 +262,11 @@ patch_delete_command() {
     [ ! -f "$script" ] && return 1
     grep -q "hestia-backup-symlink-handler-v2" "$script" 2>/dev/null && return 0
 
-    if grep -q "hestia-backup-symlink-handler" "$script" 2>/dev/null && [ -f "${script}.original" ]; then
-        cp "${script}.original" "$script" 2>/dev/null || true
+    if grep -q "hestia-backup-symlink-handler" "$script" 2>/dev/null; then
+        [ -f "${script}.original" ] && cp "${script}.original" "$script" 2>/dev/null || true
+    else
+        cp -f "$script" "${script}.original" 2>/dev/null || true
     fi
-    [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
     local temp
     temp=$(umask 077 && mktemp /tmp/patch-delete.XXXXXX) || return 1
@@ -287,7 +290,7 @@ patch_delete_command() {
 PATCH_EOF
         sed -n "$((line_num+1)),\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-backup-symlink-handler-v2" "$temp" 2>/dev/null; then
+        if grep -q "hestia-backup-symlink-handler-v2" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
             _log "[$(date)] : Patched v-delete-user-backup (symlink-aware v2)"
             return 0
@@ -325,7 +328,7 @@ patch_v_backup_user_db_repair() {
 PATCH_EOF
         sed -n "$line_num,\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-custom-db-repair" "$temp" 2>/dev/null; then
+        if grep -q "hestia-custom-db-repair" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
             _log "[$(date)] : Patched v-backup-user (DB Auto-Repair)"
             return 0
@@ -356,7 +359,7 @@ patch_v_backup_users_interactive() {
 PATCH_EOF
         sed -n "$((line_num+1)),\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-custom-interactive" "$temp" 2>/dev/null; then
+        if grep -q "hestia-custom-interactive" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
             _log "[$(date)] : Patched v-backup-users (Interactive Console Mode)"
             return 0
@@ -387,7 +390,7 @@ patch_v_backup_user_notify() {
 PATCH_EOF
         sed -n "$((line_num+1)),\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-custom-notify-hook" "$temp" 2>/dev/null; then
+        if grep -q "hestia-custom-notify-hook" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
             _log "[$(date)] : Patched v-backup-user (Individual HTML Email)"
             return 0
@@ -418,7 +421,7 @@ exit
 PATCH_EOF
         sed -n "$((line_num+1)),\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-custom-notify-global-hook" "$temp" 2>/dev/null; then
+        if grep -q "hestia-custom-notify-global-hook" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
             _log "[$(date)] : Patched v-backup-users (Global HTML Email)"
             return 0
@@ -451,7 +454,7 @@ fi
 PATCH_EOF
         sed -n "$line_num,\$p" "$script" >> "$temp"
 
-        if grep -q "hestia-custom-retention-hook" "$temp" 2>/dev/null; then
+        if grep -q "hestia-custom-retention-hook" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
             mv "$temp" "$script" && chmod 755 "$script"
             _log "[$(date)] : Patched v-backup-users (Optional Retention Hook)"
             return 0
