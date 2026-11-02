@@ -108,6 +108,7 @@ fi
 
 ACTIVE_USERS=0
 VERIFIED_USERS=0
+PENDING_USERS=0
 FAILED_USERS=0
 TOTAL_BYTES=0
 DETAIL_LINES=()
@@ -133,8 +134,25 @@ for user_dir in "$HESTIA/data/users"/*; do
     latest_line=""
     [ -f "$bkp_conf" ] && latest_line=$(tail -n 1 "$bkp_conf" 2>/dev/null || true)
     if [ -z "$latest_line" ]; then
+        u_date=$(extract_conf_val "$(grep -E "^(DATE|TIME)=" "$user_conf" 2>/dev/null | tr '\n' ' ')" "DATE")
+        u_time=$(extract_conf_val "$(grep -E "^(DATE|TIME)=" "$user_conf" 2>/dev/null | tr '\n' ' ')" "TIME")
+        u_epoch=0
+        if [ -n "$u_date" ]; then
+            u_epoch=$(date -d "${u_date} ${u_time:-00:00:00}" +%s 2>/dev/null || date -d "${u_date}" +%s 2>/dev/null || echo 0)
+        fi
+        [ "$u_epoch" -le 0 ] && u_epoch=$(stat -c '%Y' "$user_dir" 2>/dev/null || echo 0)
+        u_age_days=999
+        if [ "$u_epoch" -gt 0 ]; then
+            u_age_days=$(( (NOW_EPOCH - u_epoch) / 86400 ))
+            [ "$u_age_days" -lt 0 ] && u_age_days=0
+        fi
+        if [ "$u_age_days" -le "$MAX_AGE_DAYS" ]; then
+            PENDING_USERS=$((PENDING_USERS + 1))
+            DETAIL_LINES+=("PENDING $user PENDING_FIRST_BACKUP account_age_days=$u_age_days")
+            continue
+        fi
         FAILED_USERS=$((FAILED_USERS + 1))
-        DETAIL_LINES+=("FAIL $user NO_BACKUP_RECORD")
+        DETAIL_LINES+=("FAIL $user NO_BACKUP_RECORD account_age_days=$u_age_days")
         continue
     fi
 
@@ -224,10 +242,14 @@ for user_dir in "$HESTIA/data/users"/*; do
 done
 
 OVERALL_STATUS="BACKUP_VERIFIED_OK"
-if [ "$BACKEND" = "b2" ] && [ "$FAILED_USERS" -eq 0 ] && [ "$VERIFIED_USERS" -gt 0 ]; then
-    OVERALL_STATUS="B2_VERIFIED_OK"
-elif [ "$FAILED_USERS" -gt 0 ] || [ "$VERIFIED_USERS" -eq 0 ]; then
+if [ "$FAILED_USERS" -gt 0 ]; then
     OVERALL_STATUS="BACKUP_VERIFY_FAILED"
+elif [ "$VERIFIED_USERS" -eq 0 ] && [ "$PENDING_USERS" -gt 0 ]; then
+    OVERALL_STATUS="BACKUP_PENDING_FIRST_RUN"
+elif [ "$VERIFIED_USERS" -eq 0 ]; then
+    OVERALL_STATUS="BACKUP_VERIFY_FAILED"
+elif [ "$BACKEND" = "b2" ]; then
+    OVERALL_STATUS="B2_VERIFIED_OK"
 fi
 
 {
@@ -235,6 +257,7 @@ fi
     echo "backend=${BACKEND}"
     echo "active_users=${ACTIVE_USERS}"
     echo "verified_users=${VERIFIED_USERS}"
+    echo "pending_users=${PENDING_USERS}"
     echo "failed_users=${FAILED_USERS}"
     echo "total_bytes=${TOTAL_BYTES}"
     echo "status=${OVERALL_STATUS}"
@@ -252,7 +275,7 @@ if [ "$QUIET" != "TRUE" ]; then
     cat "$tmp_out"
 fi
 
-if [ "$FAILED_USERS" -gt 0 ] || [ "$VERIFIED_USERS" -eq 0 ]; then
+if [ "$FAILED_USERS" -gt 0 ] || { [ "$VERIFIED_USERS" -eq 0 ] && [ "$PENDING_USERS" -eq 0 ]; }; then
     exit 1
 fi
 exit 0
