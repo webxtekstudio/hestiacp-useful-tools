@@ -448,6 +448,60 @@ if [ "$MODE" = "status" ]; then
     exit 0
 fi
 
+sync_nginx_edge_hardening() {
+    local quiet="${1:-false}"
+    if [ -d /etc/nginx ] && command -v nginx >/dev/null 2>&1; then
+        local nginx_hardening_changed=false
+        local newly_written_files=()
+        for dconf_dir in /home/*/conf/web/*; do
+            [ -d "$dconf_dir" ] || continue
+            [ -f "$dconf_dir/nginx.conf" ] || continue
+            local dom_name
+            dom_name=$(basename "$dconf_dir")
+            local h_conf="$dconf_dir/nginx.conf_hardening"
+            local h_ssl_conf="$dconf_dir/nginx.ssl.conf_hardening"
+            if sed "s/__DOMAIN__/${dom_name}/g" << 'EOF' | write_file_if_changed "$h_conf" 0644
+# Managed by v-harden-server (hestiacp-useful-tools)
+# Edge block for PHP execution in uploads, wp-config probes, and path traversal (LFI)
+location ~* /(?:wp-content/uploads|uploads)/.*\.php(?:[0-9]|s|tml|ar)?$ {
+    access_log /var/log/nginx/domains/__DOMAIN__.log main;
+    deny all;
+    return 403;
+}
+location = /__hestia_edge_block__ {
+    internal;
+    access_log /var/log/nginx/domains/__DOMAIN__.log main;
+    return 403;
+}
+if ($request_uri ~* "(?:/wp-config(?:\.php|[-_.][a-z0-9]+)|\.\./|\.\.\\|%2e%2e)") {
+    rewrite ^ /__hestia_edge_block__ last;
+}
+EOF
+            then
+                nginx_hardening_changed=true
+                newly_written_files+=("$h_conf")
+            fi
+            if [ -f "$dconf_dir/nginx.ssl.conf" ] && [ ! -L "$h_ssl_conf" ]; then
+                ln -sf "$h_conf" "$h_ssl_conf"
+                nginx_hardening_changed=true
+                newly_written_files+=("$h_ssl_conf")
+            fi
+        done
+
+        if [ "$nginx_hardening_changed" = true ]; then
+            if nginx -t >/dev/null 2>&1; then
+                systemctl reload nginx >/dev/null 2>&1 || true
+                [ "$quiet" = "false" ] && echo -e "  -> ${GREEN}[Pillar 5]${NC} Nginx edge hardening (uploads PHP + wp-config/LFI block) updated & reloaded"
+            else
+                [ "$quiet" = "false" ] && echo -e "  -> ${YELLOW}[Pillar 5 Warning]${NC} nginx -t reported an issue -- rolling back newly added nginx.conf_hardening files"
+                rm -f "${newly_written_files[@]}"
+            fi
+        elif [ "$quiet" = "false" ]; then
+            echo -e "  -> ${GREEN}[Pillar 5]${NC} Nginx edge hardening (uploads PHP + wp-config/LFI block) verified & active"
+        fi
+    fi
+}
+
 # =============================================================================
 # ACTION: CRON HEAL (QUIET POST-UPDATE SYNC)
 # =============================================================================
@@ -459,6 +513,7 @@ if [ "$MODE" = "cron_heal" ]; then
         echo "[$(date -Is)] Healing Fail2Ban <-> iptables desync after HestiaCP update"
         systemctl restart fail2ban || true
     fi
+    sync_nginx_edge_hardening true
     if systemctl is-enabled --quiet crowdsec-firewall-bouncer 2>/dev/null; then
         systemctl is-active --quiet crowdsec || systemctl restart crowdsec || true
         systemctl is-active --quiet crowdsec-firewall-bouncer || systemctl restart crowdsec-firewall-bouncer || true
@@ -763,54 +818,7 @@ EOF
         fi
     fi
 
-    if [ -d /etc/nginx ] && command -v nginx >/dev/null 2>&1; then
-        local nginx_hardening_changed=false
-        local newly_written_files=()
-        for dconf_dir in /home/*/conf/web/*; do
-            [ -d "$dconf_dir" ] || continue
-            [ -f "$dconf_dir/nginx.conf" ] || continue
-            local dom_name
-            dom_name=$(basename "$dconf_dir")
-            local h_conf="$dconf_dir/nginx.conf_hardening"
-            local h_ssl_conf="$dconf_dir/nginx.ssl.conf_hardening"
-            if sed "s/__DOMAIN__/${dom_name}/g" << 'EOF' | write_file_if_changed "$h_conf" 0644
-# Managed by v-harden-server (hestiacp-useful-tools)
-# Edge block for PHP execution in uploads, wp-config probes, and path traversal (LFI)
-location ~* /(?:wp-content/uploads|uploads)/.*\.php(?:[0-9]|s|tml|ar)?$ {
-    access_log /var/log/nginx/domains/__DOMAIN__.log main;
-    deny all;
-    return 403;
-}
-location = /__hestia_edge_block__ {
-    internal;
-    access_log /var/log/nginx/domains/__DOMAIN__.log main;
-    return 403;
-}
-if ($request_uri ~* "(?:/wp-config(?:\.php|[-_.][a-z0-9]+)|\.\./|\.\.\\|%2e%2e)") {
-    rewrite ^ /__hestia_edge_block__ last;
-}
-EOF
-            then
-                nginx_hardening_changed=true
-                newly_written_files+=("$h_conf")
-            fi
-            if [ -f "$dconf_dir/nginx.ssl.conf" ] && [ ! -L "$h_ssl_conf" ]; then
-                ln -sf "$h_conf" "$h_ssl_conf"
-                nginx_hardening_changed=true
-                newly_written_files+=("$h_ssl_conf")
-            fi
-        done
-
-        if [ "$nginx_hardening_changed" = true ]; then
-            if nginx -t >/dev/null 2>&1; then
-                systemctl reload nginx >/dev/null 2>&1 || true
-                echo -e "  -> ${GREEN}[Pillar 5]${NC} Nginx edge hardening (uploads PHP + wp-config/LFI block) updated & reloaded"
-            else
-                echo -e "  -> ${YELLOW}[Pillar 5 Warning]${NC} nginx -t reported an issue -- rolling back newly added nginx.conf_hardening files"
-                rm -f "${newly_written_files[@]}"
-            fi
-        fi
-    fi
+    sync_nginx_edge_hardening false
 }
 
 # =============================================================================
