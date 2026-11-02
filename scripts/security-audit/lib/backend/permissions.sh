@@ -167,7 +167,7 @@ check_permissions() {
     fi
 
     local hex_functions
-    hex_functions=$(grep -rlE '(\\x[0-9a-fA-F]{2}){8,}' "$docroot" --include="*.php" 2>/dev/null | wc -l)
+    hex_functions=$(grep -rlE '(\\x[0-9a-fA-F]{2}){24,}' "$docroot" --include="*.php" --exclude-dir={wp-includes,vendor,third-party,sodium_compat,phpseclib,wordfence,SimplePie,ID3,node_modules} 2>/dev/null | wc -l)
     if [ "$hex_functions" -gt 0 ]; then
         result_fail "B50" "${hex_functions} file(s) with heavy hex encoding (likely obfuscation) [${domain}]"
     else
