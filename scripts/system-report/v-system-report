@@ -508,7 +508,7 @@ check_mysql_status() {
             [ ! -f "$error_log" ] && error_log="/var/log/mysql.err"
             [ ! -f "$error_log" ] && error_log="/var/log/mariadb/mariadb.log"
             
-            if [ -f "$error_log" ]; then
+            if [ -s "$error_log" ]; then
                 local today=$(date +%Y-%m-%d)
                 local errors_today=$(grep "$today" "$error_log" 2>/dev/null | grep -ciE "(error|crash|corrupt|failed)" | head -1 || echo "0")
                 errors_today=$(echo "$errors_today" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
@@ -533,6 +533,14 @@ check_mysql_status() {
                     else
                         log_message "${YELLOW}[WARN] Old table crashes found in logs (not today): $crash_count${NC}"
                     fi
+                fi
+            elif command -v journalctl >/dev/null 2>&1; then
+                local j_crashes=$(journalctl -u mariadb --since "today" --no-pager 2>/dev/null | grep -ciE "marked as crashed|corrupt" || echo "0")
+                j_crashes=$(echo "$j_crashes" | tr -d '\n\r ' | grep -oE '^[0-9]+$' || echo "0")
+                [ -z "$j_crashes" ] && j_crashes=0
+                if [ "$j_crashes" -gt 0 ] 2>/dev/null; then
+                    log_message "${RED}[FAIL] Table crashes detected in systemd journal today: $j_crashes${NC}"
+                    ((issues++))
                 fi
             fi
             
@@ -1416,11 +1424,22 @@ check_email_blacklist() {
     
     log_message "${GREEN}[OK] Server IP: $server_ip${NC}"
     
-    local blacklists=("zen.spamhaus.org" "bl.spamcop.net" "b.barracudacentral.org" "dnsbl.sorbs.net")
+    local o1 o2 o3 o4 reversed_ip
+    IFS='.' read -r o1 o2 o3 o4 <<< "$server_ip"
+    if [ -z "$o1" ] || [ -z "$o2" ] || [ -z "$o3" ] || [ -z "$o4" ]; then
+        log_message "${YELLOW}[WARN] Could not parse IPv4 octets for DNSBL lookup${NC}"
+        module_health_score["email_blacklist"]=70
+        module_health_level["email_blacklist"]="FAIR"
+        detailed_report["email_blacklist"]="Unable to parse IPv4 octets for DNSBL lookup"
+        return 0
+    fi
+    reversed_ip="${o4}.${o3}.${o2}.${o1}"
+
+    local blacklists=("zen.spamhaus.org" "bl.spamcop.net" "b.barracudacentral.org")
     local blacklist_results=()
     
     for blacklist in "${blacklists[@]}"; do
-        local lookup_result=$(timeout 5 host -t A "$server_ip.$blacklist" 2>/dev/null)
+        local lookup_result=$(timeout 5 host -t A "${reversed_ip}.${blacklist}" 2>/dev/null)
         local has_address=$(echo "$lookup_result" | grep -c "has address" || echo "0")
         has_address=$(echo "$has_address" | tr -d '\n\r ' | sed 's/^0*//')
         [ -z "$has_address" ] || ! [[ "$has_address" =~ ^[0-9]+$ ]] && has_address=0
@@ -1448,8 +1467,8 @@ check_email_blacklist() {
                         ((blacklisted++))
                         ((low_issues++))
                         ;;
-                    127.255.255.254)
-                        log_message "${GREEN}[OK] $blacklist DNS lookup returned test record (127.255.255.254) — IP not listed${NC}"
+                    127.255.255.*)
+                        log_message "${GREEN}[OK] $blacklist DNS lookup returned resolver status ($return_code) — IP not listed${NC}"
                         ;;
                     *)
                         log_message "${YELLOW}[WARN] Listed on $blacklist (Code: $return_code)${NC}"
@@ -1459,10 +1478,17 @@ check_email_blacklist() {
                         ;;
                 esac
             else
-                log_message "${RED}[FAIL] Listed on $blacklist${NC}"
-                blacklist_results+=("$blacklist")
-                ((blacklisted++))
-                ((high_issues++))
+                case "$return_code" in
+                    127.255.255.*)
+                        log_message "${GREEN}[OK] $blacklist DNS lookup returned resolver status ($return_code) — IP not listed${NC}"
+                        ;;
+                    *)
+                        log_message "${RED}[FAIL] Listed on $blacklist (Code: $return_code)${NC}"
+                        blacklist_results+=("$blacklist")
+                        ((blacklisted++))
+                        ((high_issues++))
+                        ;;
+                esac
             fi
         else
             log_message "${GREEN}[OK] Not listed on $blacklist${NC}"
