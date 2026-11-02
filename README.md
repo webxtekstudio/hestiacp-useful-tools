@@ -61,6 +61,7 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - **Pillar 3: Interactive TTY Shell:** Automatically detects manual terminal sessions and streams live console logs via `tee`, while remaining perfectly silent for nocturnal cron jobs.
 - **Pillar 4: Enterprise HTML Notifications:** Replaces basic TXT messages with AWS-style Dark Mode Multipart HTML reports (inclusive of physical `.log` file attachments and Global Administration Batch summaries).
 - **Native Optional Smart Retention:** Patches `v-backup-users` with a disabled-by-default retention hook powered by `v-prune-backups`, giving classic `.tar` backups dry-run-first daily/weekly/monthly thinning across local, B2, or rclone storage. Hestia's native `BACKUPS` count and Restic pruning still remain available.
+- **Remote & Local Backup Verification (`v-verify-backups`):** Cross-checks every non-suspended HestiaCP user's latest `backup.conf` entry against the live remote bucket (`b2 ls --long` / `rclone lsl`) or local `.tar` archive (`tar -tf`), verifying existence, byte-size tolerance, and freshness (`<= 8` days, with a `PENDING_FIRST_BACKUP` grace window for newly created accounts) into `/var/log/hestia/backup-verify.status`.
 
 #### [GitHub Mirror (`v-github-mirror`)](scripts/github-mirror/)
 - A cron-based auto-pull script that securely mirrors private GitHub/GitLab repositories straight into a specified user's `private` directory (safely away from public web access).

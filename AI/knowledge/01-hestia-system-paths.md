@@ -124,6 +124,8 @@ This reference document maps the verified system paths for HestiaCP running on D
 | **Backup Notify Hook** | `/usr/local/hestia/bin/v-backup-users-notify-hook` | Sends global backup summary and uploads batch log when remote B2 is configured |
 | **Backup Retention** | `/usr/local/hestia/bin/v-prune-backups` | Optional classic backup retention command |
 | **Backup Retention Config** | `/etc/hestiacp-backup-retention.conf` | Retention policy for classic backups |
+| **Backup Verifier** | `/usr/local/hestia/bin/v-verify-backups` | Verifies remote B2/rclone or local `.tar` archive existence, byte size, and freshness |
+| **Backup Verify Status** | `/var/log/hestia/backup-verify.status` | Machine-readable verification status written by `v-verify-backups` |
 | **Remote Backup Config** | `/usr/local/hestia/conf/b2.backup.conf` | Native Hestia B2 remote backup configuration when B2 is enabled |
 | **Backup APT Hook** | `/etc/apt/apt.conf.d/99hestia-custom-patches` | `DPkg::Post-Invoke` hook that auto-reapplies `backup-core-patches` after HestiaCP APT updates |
 | **GitHub Mirror** | `/usr/local/hestia/bin/v-github-mirror` | Zero-Trust root-staged Git sync script |

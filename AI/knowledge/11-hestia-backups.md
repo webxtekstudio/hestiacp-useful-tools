@@ -9,6 +9,7 @@ The current architecture is:
 - optionally patched by `backup-core-patches`
 - optional remote backup hosts via native Hestia backup-host support (`b2`, `rclone`, `ftp`, `sftp`)
 - optional classic retention via `v-prune-backups`
+- post-backup remote/local archive verification via `v-verify-backups`
 
 This means you must verify the live machine before concluding how backups are stored or whether the weekly schedule was missed.
 
@@ -27,6 +28,8 @@ This means you must verify the live machine before concluding how backups are st
 | **Global Notify Hook** | `/usr/local/hestia/bin/v-backup-users-notify-hook` |
 | **Retention Command** | `/usr/local/hestia/bin/v-prune-backups` |
 | **Retention Config** | `/etc/hestiacp-backup-retention.conf` |
+| **Backup Verifier** | `/usr/local/hestia/bin/v-verify-backups` |
+| **Backup Verify Status** | `/var/log/hestia/backup-verify.status` |
 | **B2 Config** | `/usr/local/hestia/conf/b2.backup.conf` |
 | **APT Persistence Hook** | `/etc/apt/apt.conf.d/99hestia-custom-patches` |
 
@@ -38,12 +41,13 @@ When installed, the patch layer keeps the native Hestia workflow but extends it:
 - Hestia-compatible symlinks can remain at the root `/backup/`
 - the global backup batch log may be uploaded to remote storage
 - single-user retries (`v-backup-user <user>`) append `Upload to B2: ... (SINGLE-USER RETRY: <user>)` to `/var/log/hestia/backup.log` so automated monitors can see recovered uploads
+- `v-verify-backups` runs automatically after `v-backup-users` and single-user B2 retries, cross-checking every active user's latest `backup.conf` entry against the live remote bucket (`b2 ls --long` / `rclone lsl`) or local `.tar` archive (`tar -tf`) and writing `/var/log/hestia/backup-verify.status` (newly created accounts `<= 8` days old without a backup yet report `PENDING_FIRST_BACKUP`)
 - retention can be applied per backend without replacing the native backup batch
 - remote paths may be organized by year and month
 - `/etc/apt/apt.conf.d/99hestia-custom-patches` (`DPkg::Post-Invoke`) automatically re-applies core patches if an APT upgrade of the `hestia` package overwrites `/usr/local/hestia/bin/v-backup-user` or `/usr/local/hestia/func/backup.sh`
 
 Implication:
-- a valid remote upload log is real backup evidence
+- a valid remote upload log plus `status=B2_VERIFIED_OK` (or `LOCAL_VERIFIED_OK`) in `/var/log/hestia/backup-verify.status` confirms archive existence, byte size, and freshness
 - absence of a flat `/backup/user.DATE.tar` file does not mean the backup failed
 
 ## 4. Operational Verification Checklist
@@ -54,7 +58,8 @@ When the user asks whether backups are healthy, run this set first:
 sudo -n date -u +"%Y-%m-%d %H:%M UTC"
 sudo -n grep -nEi "backup|v-backup" /var/spool/cron/crontabs/hestiaweb
 sudo -n /usr/local/hestia/bin/v-list-backup-host b2 2>/dev/null || sudo -n /usr/local/hestia/bin/v-list-backup-host sftp 2>/dev/null || echo "No remote host configured"
-sudo -n ls -l /usr/local/hestia/bin/v-backup-user-hook /usr/local/hestia/bin/v-backup-users-notify-hook /usr/local/hestia/bin/v-prune-backups 2>/dev/null
+sudo -n ls -l /usr/local/hestia/bin/v-backup-user-hook /usr/local/hestia/bin/v-backup-users-notify-hook /usr/local/hestia/bin/v-prune-backups /usr/local/hestia/bin/v-verify-backups 2>/dev/null
+sudo -n /usr/local/hestia/bin/v-verify-backups 2>/dev/null || sudo -n cat /var/log/hestia/backup-verify.status 2>/dev/null
 sudo -n tail -n 60 /usr/local/hestia/log/backup.log 2>/dev/null
 # If backup.log is empty (after logrotate), check the rotated log for recent evidence:
 sudo -n grep -E "SUMMARY|Upload to B2|Upload global|Size:|Runtime:" /usr/local/hestia/log/backup.log.1 2>/dev/null | tail -30
@@ -133,7 +138,7 @@ When `BACKUP_SYSTEM` is set to a remote-only backend (e.g., `b2` without `local`
   ```bash
   sudo -n /usr/local/hestia/bin/v-backup-user <user>
   ```
-- When `backup-core-patches` (`hestia-custom-b2-v5.3-retry`) is active, standalone `v-backup-user <user>` runs append `Upload to B2: ... (SINGLE-USER RETRY: <user>)` to `/var/log/hestia/backup.log`. If an earlier upload error for `<user>` is marked `REMEDIATED:` or followed by a newer `Upload to B2: .../<user>/...` (`SINGLE-USER RETRY: <user>`), treat that user's backup as recovered/OK.
+- When `backup-core-patches` (`hestia-custom-b2-v5.4-verify`) is active, standalone `v-backup-user <user>` runs append `Upload to B2: ... (SINGLE-USER RETRY: <user>)` to `/var/log/hestia/backup.log` and refresh `/var/log/hestia/backup-verify.status` via `v-verify-backups`. If an earlier upload error for `<user>` is marked `REMEDIATED:` or followed by a newer `Upload to B2: .../<user>/...` (`SINGLE-USER RETRY: <user>`) and `v-verify-backups` reports `OK <user>`, treat that user's backup as recovered/OK.
 - Backblaze B2 CLI v4 uses `B2_APPLICATION_KEY_ID` / `B2_APPLICATION_KEY` environment variables with `b2 file upload <bucket> <local_file> <remote_path>` and `b2 ls b2://<bucket>/<prefix>`. Never recommend deprecated B2 CLI v3 subcommands (`b2 authorize-account` or `b2 upload-file`).
 
 ### Check whether the batch is stuck

@@ -112,6 +112,7 @@ Log lines alone cannot catch a truncated upload or an accidentally deleted cloud
 - The expected `.tar` archive actually exists on the remote backend
 - The archive is non-empty (`>= 10 KB`) and matches HestiaCP's recorded `SIZE` within tolerance
 - The archive age does not exceed `--max-age-days=8`
+- Newly created HestiaCP accounts (`<= 8` days old in `user.conf`) without their first weekly archive yet are marked `PENDING_FIRST_BACKUP` rather than failing verification
 
 It runs automatically after `v-backup-users` and single-user B2 retries, writing a machine-readable report to `/var/log/hestia/backup-verify.status` (`status=B2_VERIFIED_OK` or `status=BACKUP_VERIFY_FAILED`), and can also be executed manually at any time:
 
@@ -130,5 +131,6 @@ The `install.sh` script applies idempotent patches to these files:
 3. **`backup.sh`** -> Updates Hestia's B2 upload, download, delete, and rotation paths.
 4. **`v-delete-user-backup`** -> Makes deletion follow organized backup symlinks safely.
 5. **`v-prune-backups`** -> Adds the dry-run-first retention engine used by the native `v-backup-users` hook.
+6. **`v-verify-backups`** -> Verifies remote (`b2` / `rclone`) and local `.tar` archives against `backup.conf` after batch runs and single-user B2 retries.
 
 > **Note on updates:** If a HestiaCP update overwrites core files, re-run `bash install.sh` from this repository to re-apply the patches.
