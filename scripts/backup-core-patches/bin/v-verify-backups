@@ -48,7 +48,13 @@ fi
 
 tmp_remote=$(umask 077 && mktemp /tmp/v-verify-backups.remote.XXXXXX) || exit 1
 tmp_out=$(umask 077 && mktemp /tmp/v-verify-backups.out.XXXXXX) || { rm -f "$tmp_remote"; exit 1; }
-trap 'rm -f "$tmp_remote" "$tmp_out" 2>/dev/null' EXIT INT TERM
+tmp_b2info=$(umask 077 && mktemp /tmp/v-verify-backups.b2.XXXXXX) || { rm -f "$tmp_remote" "$tmp_out"; exit 1; }
+trap 'rm -f "$tmp_remote" "$tmp_out" "$tmp_b2info" "${tmp_b2info}-wal" "${tmp_b2info}-shm" 2>/dev/null' EXIT INT TERM
+
+extract_conf_val() {
+    local line="$1" key="$2"
+    printf '%s\n' "$line" | sed -nE "s/.*(^|[[:space:]])${key}='([^']*)'.*/\2/p" | tail -n 1
+}
 
 NOW_EPOCH=$(date +%s)
 CHECKED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -73,8 +79,8 @@ if [[ ",${BACKUP_SYSTEM}," == *",b2,"* ]] || [ -f "$HESTIA/conf/b2.backup.conf" 
             BACKEND_ERROR="B2_CLI_MISSING"
         else
             b2_raw=""
-            if ! b2_raw=$(B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null) && \
-               ! b2_raw=$(B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null); then
+            if ! b2_raw=$(B2_ACCOUNT_INFO="$tmp_b2info" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null) && \
+               ! b2_raw=$(B2_ACCOUNT_INFO="$tmp_b2info" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null); then
                 BACKEND_ERROR="B2_BUCKET_LIST_FAILED"
             else
                 printf '%s\n' "$b2_raw" | awk 'NF >= 6 && $NF ~ /\.tar$/ { print $(NF-1) "|" $NF }' > "$tmp_remote"
@@ -132,10 +138,10 @@ for user_dir in "$HESTIA/data/users"/*; do
         continue
     fi
 
-    archive=$(printf '%s' "$latest_line" | grep -o "BACKUP='[^']*'" | cut -d"'" -f2)
-    b_size_mib=$(printf '%s' "$latest_line" | grep -o "SIZE='[^']*'" | cut -d"'" -f2)
-    b_date=$(printf '%s' "$latest_line" | grep -o "DATE='[^']*'" | cut -d"'" -f2)
-    b_time=$(printf '%s' "$latest_line" | grep -o "TIME='[^']*'" | cut -d"'" -f2)
+    archive=$(extract_conf_val "$latest_line" "BACKUP")
+    b_size_mib=$(extract_conf_val "$latest_line" "SIZE")
+    b_date=$(extract_conf_val "$latest_line" "DATE")
+    b_time=$(extract_conf_val "$latest_line" "TIME")
 
     [[ "$b_size_mib" =~ ^[0-9]+$ ]] || b_size_mib=0
     if [ -z "$archive" ] || [ -z "$b_date" ]; then
@@ -144,7 +150,7 @@ for user_dir in "$HESTIA/data/users"/*; do
         continue
     fi
 
-    b_epoch=$(date -d "${b_date} ${b_time:-00:00:00}" +%s 2>/dev/null || echo 0)
+    b_epoch=$(date -d "${b_date} ${b_time:-00:00:00}" +%s 2>/dev/null || date -d "${b_date}" +%s 2>/dev/null || echo 0)
     age_days=999
     if [ "$b_epoch" -gt 0 ]; then
         age_days=$(( (NOW_EPOCH - b_epoch) / 86400 ))
