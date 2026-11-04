@@ -73,9 +73,9 @@ WP_FILTER_LOCAL="/etc/fail2ban/filter.d/wordpress-xmlrpc.local"
 RC_FILTER_LOCAL="/etc/fail2ban/filter.d/roundcube-auth.local"
 RC_JAIL_LOCAL="/etc/fail2ban/jail.d/98-hestia-roundcube.local"
 CUSTOM_F2B_WL="/etc/fail2ban/jail.d/99-custom-whitelist.local"
-IPV6_GUARD_BIN="/usr/local/sbin/hestia-ipv6-guard"
+IPV6_GUARD_BIN="/opt/webxtek-scripts/hestia-ipv6-guard.sh"
 IPV6_GUARD_SVC="/etc/systemd/system/hestia-ipv6-guard.service"
-CS_SSH_EXEMPT_BIN="/usr/local/sbin/crowdsec-ssh-exempt"
+CS_SSH_EXEMPT_BIN="/opt/webxtek-scripts/crowdsec-ssh-exempt.sh"
 CS_BOUNCER_DROPIN="/etc/systemd/system/crowdsec-firewall-bouncer.service.d/ssh-exempt.conf"
 CS_LOCAL_PARSER="/etc/crowdsec/parsers/s01-parse/hestiacp-local-logs.yaml"
 CS_LOCAL_SCENARIOS="/etc/crowdsec/scenarios/hestiacp-local-scenarios.yaml"
@@ -659,6 +659,7 @@ ClientAliveCountMax 2'
     fi
 
     if command -v nft >/dev/null 2>&1; then
+        install -d -m 0755 /opt/webxtek-scripts
         write_file_if_changed "$IPV6_GUARD_BIN" 0755 << 'EOF' || true
 #!/bin/bash
 # Mirrors HestiaCP's global IPv4 ACCEPT port rules into an isolated IPv6 nftables table
@@ -1212,6 +1213,7 @@ EOF
     done
 
     # 7. Install SSH Port Anti-Lockout Exemption (ExecStartPost hook)
+    install -d -m 0755 /opt/webxtek-scripts
     cat << 'EOF' > "$CS_SSH_EXEMPT_BIN"
 #!/bin/bash
 # Exempts the active SSH port at index 0 of CrowdSec's nftables input chains so
