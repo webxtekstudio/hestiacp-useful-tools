@@ -5,13 +5,13 @@
 ---
 
 ## 🚀 1. How to Install (The Easy Way)
-Instead of copying files manually, use the module installer to place the script, monitor helper, and default config:
+Instead of copying files manually, use the module installer to place the script, monitor helper, and default config (`0600 root:root`), and automatically activate the Exim ACL rules and monitor cron:
 ```bash
 cd /root/hestiacp-useful-tools/scripts/exim-limit
 bash install.sh
 ```
 
-Then apply the Exim patch and install the monitor cron:
+Whenever you edit `/etc/hestiacp-exim-limit.conf`, re-run `v-add-exim-limit` to apply the updated settings:
 
 ```bash
 v-add-exim-limit
@@ -25,8 +25,9 @@ If you want to look at the files, here is exactly where the installer places the
 
 ## ⚙️ 3. How to Configure
 By default, the script will:
-- Block outgoing emails larger than 25MB (while allowing users to receive large incoming emails).
+- Block outgoing emails larger than `MAX_MESSAGE_SIZE_MB=25` (25MB) while allowing users to receive large incoming emails.
 - Block unauthenticated external senders that forge any local HestiaCP domain (`+local_domains`) in the visual `From:` header (`BLOCK_HEADER_FROM_SPOOF="TRUE"`), closing the loophole where attackers use an empty `Return-Path: <>` bounce envelope or multi-address `From:` headers to bypass HestiaCP's default `acl_check_rcpt` `sender_domains` check.
+- Block unauthenticated external bots using bracketed IP literals as HELO (e.g. `EHLO [10.88.0.4]`) and automatically repair upstream HestiaCP bug `#5798` (malformed `\\}` brace in `acl_check_mail` PTR lookup).
 
 > **Using External ESPs (SendGrid, Amazon SES, Mailgun, Brevo):**
 > Because the `acl_check_data` rule includes `hosts = !+relay_from_hosts : !+whitelist`, any unauthenticated third-party service that legitimately sends emails with `From: @yourdomain.com` **into** a local mailbox on this server should have its outbound IP/CIDR added to HestiaCP's native whitelist at `/etc/exim4/white-blocks.conf` (one IP or CIDR per line, no Exim restart needed).

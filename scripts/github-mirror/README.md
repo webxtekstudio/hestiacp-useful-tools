@@ -1,54 +1,65 @@
 # 🛠️ GitHub Mirror (`github-mirror`)
 
-*Automatically pushes and clones private GitHub/GitLab repositories straight into your HestiaCP server. Perfect for keeping static sites (like Astro or React) automatically synced to your server for local backups.*
+*Automatically clones and syncs private or public GitHub/GitLab repositories into a HestiaCP user's isolated `private/` directory using a **Zero-Trust Pull-Only Architecture** — so nightly HestiaCP backups (`v-backup-users`) include up-to-date source code snapshots without ever exposing Git credentials to tenant accounts or `public_html`.*
 
 ---
 
 ## 🚀 1. How to Install (The Easy Way)
-Instead of copying files manually, use the module installer to place the script and default configs. To add the recommended sync schedule, run the repository root installer with `--setup-crons`.
+Instead of copying files manually, use the module installer to place the script, default configs (`0600 root:root`), and pin GitHub's official Ed25519 SSH host key in `/root/.ssh/known_hosts`. To add the recommended 12-hour sync schedule, run the repository root installer with `--setup-crons`.
 ```bash
 cd /root/hestiacp-useful-tools/scripts/github-mirror
 bash install.sh
 ```
 
 ## 📂 2. File Paths (Where is everything?)
-If you want to look at the files, here is exactly where the installer places them:
 * **The Executable Script:** `/usr/local/hestia/bin/v-github-mirror`
-* **The Target URLs List:** `/etc/hestiacp-github-mirror.conf` (Where you put your GitHub links)
-* **The Settings File:** `/etc/hestiacp-github-mirror.settings` (Where you set Emails)
+* **The Target URLs List:** `/etc/hestiacp-github-mirror.conf` (`0600 root:root` — where you list your repositories)
+* **The Optional Read-Only PAT File:** `/etc/hestiacp-github-mirror.token` (`0400`/`0600 root:root` — Fine-Grained Read-Only GitHub Personal Access Token for HTTPS private repos)
+* **The Settings File:** `/etc/hestiacp-github-mirror.settings` (`0600 root:root` — notification & backup retention settings)
+* **Isolated Root Staging Directory:** `/var/lib/hestiacp-github-mirror` (`0711 root:root`)
+* **Execution Log:** `/var/log/hestia/github-mirror.log` (`0640`)
 
 ## ⚙️ 3. How to Configure
-You need to tell the script WHICH repositories to clone and to WHICH user's folder.
+You need to tell the script WHICH repositories to clone and into WHICH user's `private/` folder.
 
 1. Open `/etc/hestiacp-github-mirror.conf` in your editor (`nano /etc/hestiacp-github-mirror.conf`).
-2. Add your repositories using this dummy-proof format divided by `|` pipes:
-   `username|git@github.com:your-name/your-repo.git|main|web/domain.com/public_html|overwrite`
-   *(This tells it: For Hestia user "username", clone that repo, using branch "main", into that folder, and "overwrite" it).*
-3. Save the file.
-4. **Important!** Since it's a private repo, you must go to GitHub -> Repository Settings -> Deploy Keys, and add your Server's Root SSH public key. (To get the key, type: `cat /root/.ssh/id_rsa.pub`).
+2. Add your repositories using the pipe-delimited (`|`) format:
+   ```text
+   # Format: USER|REPO_URL|BRANCH|DESTINATION_PATH_RELATIVE_TO_HOME|RETENTION_MODE|RETENTION_COUNT
+   admin|https://github.com/your-org/repo.git|main|web/example.com/private/TOOL-GITHUB-MIRROR|overwrite
+   client1|git@github.com:your-org/website-source.git|production|web/example.com/private/WEBSITE-GITHUB-MIRROR|versioned|5
+   ```
+3. **Authentication for Private Repositories (Choose Option A or Option B):**
+   * **Option A — Fine-Grained Read-Only Token over HTTPS (Recommended):**
+     Create a GitHub Fine-Grained Personal Access Token with **`Contents: Read-only`** permission, save it into `/etc/hestiacp-github-mirror.token`, and lock permissions:
+     ```bash
+     chmod 400 /etc/hestiacp-github-mirror.token
+     chown root:root /etc/hestiacp-github-mirror.token
+     ```
+     The script injects the token transiently as root via HTTP header (`GIT_CONFIG_VALUE_0`) during staging — it is **never** written to `.git/config` or command-line arguments.
+   * **Option B — Root SSH Deploy Key:**
+     Add `/root/.ssh/id_ed25519.pub` (or `/root/.ssh/id_rsa.pub`) as a Read-Only Deploy Key on your GitHub repository and use `git@github.com:org/repo.git`.
 
 ## ⛔ 4. Crucial Rules (What NOT to do)
-* **DO NOT** edit the `.sh` executable file directly. Your changes will be wiped on the next update! Always edit the `.conf` file in `/etc/`.
-* **DO NOT** change the permissions of the executable. It must remain `755` (rwxr-xr-x) and owned by `root:root` to function correctly inside Hestia.
-* **DO NOT** use HTTPS urls if your repo is private. Always use SSH URLs (`git@github.com:...`).
+* **DO NOT** mirror repositories directly into `public_html` unless intentional — always use `web/<domain>/private/<FOLDER>` so `.git` metadata and source files stay out of public web reach while still being included in HestiaCP user backups.
+* **DO NOT** edit the executable `/usr/local/hestia/bin/v-github-mirror` directly. Always edit `/etc/hestiacp-github-mirror.conf` and `/etc/hestiacp-github-mirror.settings`.
 * **DO NOT** run this script as a normal user. It must be executed as `root`.
 
 ---
 
 ## 🔬 Advanced Architecture Notes (Geeks Only)
 
-### Features under the hood
-*   **Secure Permissions:** Automatically fixes file ownership (`chown user:user`) after pulling so HestiaCP doesn't break.
-*   **Flexible Retention:** Choose between **Overwrite** (incremental git mirror) or **Versioned** (keeps the last 5 pull versions separately).
-*   **Email Alerts:** Sends an HTML Server log to the Admin via Exim if a git clone/pull fails.
+### Zero-Trust Pull-Only Security Model
+1. **Pull-Only Root Staging:** Network `git ls-remote` / `git fetch` / `git clone --bare` runs exclusively as `root` inside `/var/lib/hestiacp-github-mirror` (and scrubs staged metadata once synced).
+2. **Offline Tenant Repositories:** Local fetches/resets inside `/home/<user>/...` run as the unprivileged HestiaCP user with `protocol.allow=never`, `GIT_SSH_COMMAND=/bin/false`, and `core.hooksPath=/dev/null`.
+3. **Sanitized `.git/config` (`0700`):** Before and after each sync, `_sanitize_user_git_repo` atomically overwrites the tenant's `.git/config` (removing all `remote "origin"` URLs, hooks, filters, and `fsmonitor` directives) and locks the mirror directory to `0700 <user>:<user>`. Even if a tenant account is compromised, the attacker cannot read GitHub credentials or push back upstream.
+
+### Flexible Retention Modes
+* **`overwrite`:** Keeps a single live mirror synced to the latest commit on the configured branch.
+* **`versioned|<N>`:** Keeps the last `N` timestamped snapshots (`v_YYYYMMDD_HHMMSS`).
+* **`backup`:** Keeps GFS-style Daily/Weekly/Monthly snapshots when enabled in `/etc/hestiacp-github-mirror.settings`.
 
 ### CLI Testing Commands
-You can test the module without activating the cron loop:
 * `/usr/local/hestia/bin/v-github-mirror` (Runs the sync engine)
-* `/usr/local/hestia/bin/v-github-mirror --test-email` (Sends a fake crash alert to verify your SMTP config)
-* `/usr/local/hestia/bin/v-github-mirror --force-notification` (Useful to hook up to a weekly cron to receive heartbeat status emails)
-
-### Security & Sanitization
-- Replaced `eval echo "~$user"` with `getent passwd "$user"` to definitively eliminate bash command injection risks if the configuration file is contaminated.
-- Replaced pipeline `ls -d | sort` with `find -print0 | sort -z` to safely handle repositories with exotic file names and spaces.
-- Bound by `set -o pipefail` and `trap ERR` to email crashes.
+* `/usr/local/hestia/bin/v-github-mirror --test-email` (Sends a test alert to verify your SMTP config)
+* `/usr/local/hestia/bin/v-github-mirror --force-notification` (Used by the weekly Sunday `06:00` cron to send a heartbeat summary email even when all syncs succeed)

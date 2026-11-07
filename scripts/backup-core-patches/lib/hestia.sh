@@ -27,8 +27,8 @@ patch_b2_functions() {
     fi
 
     local temp repl_file
-    temp=$(mktemp /tmp/patch-b2-v5.XXXXXX) || return 1
-    repl_file=$(mktemp /tmp/patch-b2-v5-body.XXXXXX) || { rm -f "$temp"; return 1; }
+    temp=$(mktemp /run/patch-b2-v5.XXXXXX) || return 1
+    repl_file=$(mktemp /run/patch-b2-v5-body.XXXXXX) || { rm -f "$temp"; return 1; }
     chmod 600 "$temp" "$repl_file"
 
     cat > "$repl_file" << 'PATCH_EOF'
@@ -232,7 +232,7 @@ patch_v_backup_user() {
 
     [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
-    local temp=$(mktemp /tmp/patch-backup-user.XXXXXX)
+    local temp=$(mktemp /run/patch-backup-user.XXXXXX)
     local line_num=$(grep -n 'log_event "$OK" "$ARGUMENTS"' "$script" | cut -d: -f1 | head -1)
 
     if [ -n "$line_num" ]; then
@@ -269,7 +269,7 @@ patch_delete_command() {
     fi
 
     local temp
-    temp=$(umask 077 && mktemp /tmp/patch-delete.XXXXXX) || return 1
+    temp=$(umask 077 && mktemp /run/patch-delete.XXXXXX) || return 1
     local line_num=$(grep -n 'rm -f "$backup_folder/$2"' "$script" | cut -d: -f1 | head -1)
 
     if [ -n "$line_num" ]; then
@@ -306,9 +306,13 @@ patch_v_backup_user_db_repair() {
     [ ! -f "$script" ] && return 1
     grep -q "hestia-custom-db-repair" "$script" 2>/dev/null && return 0
 
-    [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
+    if ! grep -q "hestia-custom-" "$script" 2>/dev/null; then
+        cp -f "$script" "${script}.original" 2>/dev/null || true
+    elif [ ! -f "${script}.original" ]; then
+        cp "$script" "${script}.original" 2>/dev/null || true
+    fi
 
-    local temp=$(mktemp /tmp/patch-db-repair.XXXXXX)
+    local temp=$(mktemp /run/patch-db-repair.XXXXXX)
     local line_num=$(grep -n 'case $TYPE in' "$script" | cut -d: -f1 | head -1)
 
     if [ -n "$line_num" ]; then
@@ -344,7 +348,13 @@ patch_v_backup_users_interactive() {
     [ ! -f "$script" ] && return 1
     grep -q "hestia-custom-interactive" "$script" 2>/dev/null && return 0
 
-    local temp=$(mktemp /tmp/patch-interactive.XXXXXX)
+    if ! grep -q "hestia-custom-" "$script" 2>/dev/null; then
+        cp -f "$script" "${script}.original" 2>/dev/null || true
+    elif [ ! -f "${script}.original" ]; then
+        cp "$script" "${script}.original" 2>/dev/null || true
+    fi
+
+    local temp=$(mktemp /run/patch-interactive.XXXXXX)
     local line_num=$(grep -n 'nice -n 19 ionice -c2 -n7 $BIN/v-backup-user $user >> $log' "$script" | cut -d: -f1 | head -1)
 
     if [ -n "$line_num" ]; then
@@ -375,7 +385,7 @@ patch_v_backup_user_notify() {
     [ ! -f "$script" ] && return 1
     grep -q "hestia-custom-notify-hook" "$script" 2>/dev/null && return 0
 
-    local temp=$(mktemp /tmp/patch-notify.XXXXXX)
+    local temp=$(mktemp /run/patch-notify.XXXXXX)
     local line_num=$(grep -n '\$SENDMAIL -s "$subj" "$email" "$notify"' "$script" | cut -d: -f1 | head -1)
 
     if [ -n "$line_num" ]; then
@@ -406,7 +416,7 @@ patch_v_backup_users_notify() {
     [ ! -f "$script" ] && return 1
     grep -q "hestia-custom-notify-global-hook" "$script" 2>/dev/null && return 0
 
-    local temp=$(mktemp /tmp/patch-global-notify.XXXXXX)
+    local temp=$(mktemp /run/patch-global-notify.XXXXXX)
     local line_num=$(grep -n '^exit' "$script" | tail -1 | cut -d: -f1)
 
     if [ -n "$line_num" ]; then
@@ -440,7 +450,7 @@ patch_v_backup_users_retention() {
 
     [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
 
-    local temp=$(mktemp /tmp/patch-retention-hook.XXXXXX)
+    local temp=$(mktemp /run/patch-retention-hook.XXXXXX)
     local line_num=$(grep -n '^exit' "$script" | tail -1 | cut -d: -f1)
 
     if [ -n "$line_num" ]; then
@@ -475,7 +485,7 @@ patch_cron_rm_silence() {
     for script in "${scripts[@]}"; do
         if [ -f "$script" ]; then
             if ! grep -q 'echo "rm -f $BACKUP' "$script" 2>/dev/null; then
-                [ ! -f "${script}.original" ] && cp "$script" "${script}.original" 2>/dev/null
+                cp -f "$script" "${script}.original" 2>/dev/null || true
                 sed -i 's|echo "rm \$BACKUP|echo "rm -f \$BACKUP|g' "$script"
                 patched=$((patched+1))
             fi

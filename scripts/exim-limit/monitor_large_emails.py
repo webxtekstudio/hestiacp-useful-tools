@@ -70,9 +70,18 @@ def get_admin_email():
 
     return read_hestia_conf_value(os.path.join(HESTIA_DIR, "conf", "hestia.conf"), "CONTACT")
 
+def get_threshold_mb():
+    val = read_config_value("MAX_MESSAGE_SIZE_MB")
+    try:
+        n = int(val)
+        return n if n >= 1 else 25
+    except Exception:
+        return 25
+
 HOSTNAME = get_hostname()
 ADMIN_EMAIL = get_admin_email()
 SENDER_EMAIL = read_config_value("SENDER_EMAIL") or f"exim-monitor@{HOSTNAME}"
+THRESHOLD_SIZE_MB = get_threshold_mb()
 
 def send_email(subject, html_body):
     if not ADMIN_EMAIL:
@@ -143,7 +152,7 @@ def send_alert(alerts, is_test=False):
         intro = "This is a test email to validate the notification system. No action is required."
         subject = "[TEST] Large Email Block Alert"
     else:
-        title = "🚫 Blocked Emails (>25MB)"
+        title = f"🚫 Blocked Emails (>{THRESHOLD_SIZE_MB}MB)"
         intro = "The system detected and blocked the following attempts to send oversized emails:"
         subject = f"[ALERT] {len(alerts)} Large Emails Blocked"
 

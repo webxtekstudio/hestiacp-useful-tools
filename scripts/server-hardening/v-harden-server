@@ -247,18 +247,24 @@ check_f2b_desync_count() {
 write_file_if_changed() {
     local dest="$1"
     local mode="$2"
-    local dir base tmp
+    local dir base stage_tmp tmp
     dir="$(dirname "$dest")"
     base="$(basename "$dest")"
     install -d -m 0755 "$dir"
-    tmp=$(mktemp "${dir}/.${base}.tmp.XXXXXX")
-    chmod "$mode" "$tmp"
-    cat > "$tmp"
-    if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
-        chmod "$mode" "$dest" 2>/dev/null || true
-        rm -f "$tmp"
+    stage_tmp=$(mktemp "/run/.wfic.${base}.XXXXXX")
+    chmod "$mode" "$stage_tmp"
+    cat > "$stage_tmp"
+    if [ -f "$dest" ] && cmp -s "$stage_tmp" "$dest"; then
+        if [ "$(stat -c '%a' "$dest" 2>/dev/null)" != "${mode#0}" ]; then
+            chmod "$mode" "$dest" 2>/dev/null || true
+        fi
+        rm -f "$stage_tmp"
         return 1
     fi
+    tmp=$(mktemp "${dir}/.${base}.tmp.XXXXXX")
+    chmod "$mode" "$tmp"
+    cat "$stage_tmp" > "$tmp"
+    rm -f "$stage_tmp"
     mv -f "$tmp" "$dest"
     chmod "$mode" "$dest"
     return 0
@@ -526,6 +532,9 @@ if [ "$MODE" = "cron_heal" ]; then
         systemctl restart fail2ban || true
     fi
     sync_nginx_edge_hardening true
+    if [ -x /usr/local/hestia/bin/v-patch-nginx-txt-nocache ]; then
+        /usr/local/hestia/bin/v-patch-nginx-txt-nocache >/dev/null 2>&1 || true
+    fi
     if systemctl is-enabled --quiet crowdsec-firewall-bouncer 2>/dev/null; then
         systemctl is-active --quiet crowdsec || systemctl restart crowdsec || true
         systemctl is-active --quiet crowdsec-firewall-bouncer || systemctl restart crowdsec-firewall-bouncer || true
@@ -600,7 +609,9 @@ Dpkg::Options {
    "--force-confold";
 };
 EOF
-    [ -f /etc/crontab ] && chmod 0600 /etc/crontab
+    if [ -f /etc/crontab ] && [ "$(stat -c '%a' /etc/crontab 2>/dev/null)" != "600" ]; then
+        chmod 0600 /etc/crontab
+    fi
     echo -e "  -> ${GREEN}[Pillar 2]${NC} APT custom config preservation active ($APT_KEEP_FILE)"
 
     # --- Pillar 3: Lockout-Safe SSH Hardening ---

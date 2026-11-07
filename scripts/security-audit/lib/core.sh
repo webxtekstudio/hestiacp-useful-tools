@@ -408,7 +408,7 @@ send_email_report() {
 </html>"
 
     local temp_html
-    temp_html=$(mktemp /tmp/security_audit_email.XXXXXX) || return 1
+    temp_html=$(mktemp /run/security_audit_email.XXXXXX 2>/dev/null || mktemp /tmp/security_audit_email.XXXXXX) || return 1
     chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     
@@ -418,7 +418,7 @@ send_email_report() {
     # Try using PHPMailer from HestiaCP directly to ensure DKIM/formatting is perfect
     if [ -f "$HESTIA/web/inc/vendor/phpmailer/phpmailer/src/PHPMailer.php" ]; then
         local temp_php
-        temp_php=$(mktemp /tmp/send_sec_audit_email.XXXXXX) || { rm -f "$temp_html"; return 1; }
+        temp_php=$(mktemp /run/send_sec_audit_email.XXXXXX 2>/dev/null || mktemp /tmp/send_sec_audit_email.XXXXXX) || { rm -f "$temp_html"; return 1; }
         chmod 600 "$temp_php"
         cat > "$temp_php" << 'EOFPHP'
 <?php

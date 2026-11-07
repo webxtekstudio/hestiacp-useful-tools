@@ -81,12 +81,16 @@ log_wrapper "Monitor notifications will use /etc/hestiacp-exim-limit.conf or the
 
 # 2. Configuration
 # Default Settings
+MAX_MESSAGE_SIZE_MB=25
 LIMIT_OUTGOING_ONLY="TRUE"
 BLOCK_HEADER_FROM_SPOOF="TRUE"
 
 # Load external configuration if exists
 if [ -f "/etc/hestiacp-exim-limit.conf" ]; then
     source /etc/hestiacp-exim-limit.conf
+fi
+if ! [[ "${MAX_MESSAGE_SIZE_MB:-}" =~ ^[0-9]+$ ]] || [ "$MAX_MESSAGE_SIZE_MB" -lt 1 ]; then
+    MAX_MESSAGE_SIZE_MB=25
 fi
 
 # 3. Safety Check
@@ -103,18 +107,27 @@ fi
 UPDATE_NEEDED=0
 cp "$CONFIG_FILE" "$BACKUP_FILE"
 
-if grep -q "Message size exceeds the limit of 25MB" "$CONFIG_FILE"; then
-    # Patch exists, checking if it matches the desired configuration
+if grep -qE "Message size exceeds the limit of [0-9]+MB" "$CONFIG_FILE"; then
+    # Patch exists, check if MAX_MESSAGE_SIZE_MB changed
+    if ! grep -q "Message size exceeds the limit of ${MAX_MESSAGE_SIZE_MB}MB" "$CONFIG_FILE"; then
+        log_wrapper "Updating attachment size limit to ${MAX_MESSAGE_SIZE_MB}MB..."
+        sed -i -E "s/Message size exceeds the limit of [0-9]+MB/Message size exceeds the limit of ${MAX_MESSAGE_SIZE_MB}MB/g" "$CONFIG_FILE"
+        sed -i -E "s/\\{\\\$message_size\\}\\{[0-9]+M\\}/{\\\$message_size}{${MAX_MESSAGE_SIZE_MB}M}/g" "$CONFIG_FILE"
+        sed -i -E "s/# Deny messages larger than [0-9]+MB/# Deny messages larger than ${MAX_MESSAGE_SIZE_MB}MB/g" "$CONFIG_FILE"
+        UPDATE_NEEDED=1
+    fi
+
+    # Check if it matches the desired LIMIT_OUTGOING_ONLY configuration
     HAS_AUTH_LIMIT=$(grep -c "authenticated *= *" "$CONFIG_FILE")
     
     if [ "$LIMIT_OUTGOING_ONLY" == "TRUE" ]; then
         if [ "$HAS_AUTH_LIMIT" -eq 0 ]; then
             log_wrapper "Updating patch: Adding 'authenticated = *' to limit ONLY outgoing mails..."
-            sed -i '/condition      = ${if >{$message_size}{25M}}/a \         authenticated  = *' "$CONFIG_FILE"
-            sed -i 's/# Deny messages larger than 25MB with custom error message/# Deny messages larger than 25MB with custom error message (ONLY for authenticated users)/' "$CONFIG_FILE"
+            sed -i -E "/condition      = \\\$\{if >\\{\\\$message_size\\}\\{[0-9]+M\\}\\}/a \\         authenticated  = *" "$CONFIG_FILE"
+            sed -i -E "s/# Deny messages larger than ([0-9]+)MB with custom error message$/# Deny messages larger than \1MB with custom error message (ONLY for authenticated users)/" "$CONFIG_FILE"
             UPDATE_NEEDED=1
         else
-            log_wrapper "Configuration correct: Limiting ONLY outgoing mails."
+            log_wrapper "Configuration correct: Limiting ONLY outgoing mails (${MAX_MESSAGE_SIZE_MB}MB)."
         fi
     else
         # LIMIT_OUTGOING_ONLY = FALSE (Limit ALL)
@@ -123,21 +136,21 @@ if grep -q "Message size exceeds the limit of 25MB" "$CONFIG_FILE"; then
             sed -i '/authenticated  = \*/d' "$CONFIG_FILE"
             UPDATE_NEEDED=1
         else
-            log_wrapper "Configuration correct: Limiting ALL mails."
+            log_wrapper "Configuration correct: Limiting ALL mails (${MAX_MESSAGE_SIZE_MB}MB)."
         fi
     fi
 else
-    # New Installation of 25MB Limit
-    log_wrapper "Applying 25MB attachment limit patch..."
+    # New Installation of Attachment Size Limit
+    log_wrapper "Applying ${MAX_MESSAGE_SIZE_MB}MB attachment limit patch..."
     
     AUTH_LINE=""
     if [ "$LIMIT_OUTGOING_ONLY" == "TRUE" ]; then
         AUTH_LINE="\n         authenticated  = *"
     fi
 
-    sed -i "s/acl_check_data:/acl_check_data:\n  # Warn admin about large message before rejecting\n  warn   condition      = \${if >{\$message_size}{25M}}${AUTH_LINE}\n         log_message    = Large message rejected: from \$sender_address to \$recipients size \$message_size\n         continue       =\n\n  # Deny messages larger than 25MB with custom error message (ONLY for authenticated users)\n  deny   message        = Message size exceeds the limit of 25MB. Please use Google Drive, WeTransfer, Dropbox, OneDrive or similar services to share large files.\n         condition      = \${if >{\$message_size}{25M}}${AUTH_LINE}\n/" "$CONFIG_FILE"
+    sed -i "s/acl_check_data:/acl_check_data:\n  # Warn admin about large message before rejecting\n  warn   condition      = \${if >{\$message_size}{${MAX_MESSAGE_SIZE_MB}M}}${AUTH_LINE}\n         log_message    = Large message rejected: from \$sender_address to \$recipients size \$message_size\n         continue       =\n\n  # Deny messages larger than ${MAX_MESSAGE_SIZE_MB}MB with custom error message (ONLY for authenticated users)\n  deny   message        = Message size exceeds the limit of ${MAX_MESSAGE_SIZE_MB}MB. Please use Google Drive, WeTransfer, Dropbox, OneDrive or similar services to share large files.\n         condition      = \${if >{\$message_size}{${MAX_MESSAGE_SIZE_MB}M}}${AUTH_LINE}\n/" "$CONFIG_FILE"
     
-    sed -i 's/^message_size_limit = 25M/# message_size_limit = 25M/' "$CONFIG_FILE"
+    sed -i 's/^message_size_limit = [0-9]\+M/# message_size_limit = 25M/' "$CONFIG_FILE"
     UPDATE_NEEDED=1
 fi
 
@@ -200,9 +213,12 @@ else
     rm -f "$BACKUP_FILE"
 fi
 
-# 4. Setup Cron Job
-echo "0 * * * * root $HESTIA/bin/monitor_large_emails.py" > /etc/cron.d/exim-large-monitor
-chmod 644 /etc/cron.d/exim-large-monitor
+# 4. Setup Cron Job (only write if missing or changed to avoid touching FIM-watched /etc/cron.d unnecessarily)
+CRON_LINE="0 * * * * root $HESTIA/bin/monitor_large_emails.py"
+if [ ! -f /etc/cron.d/exim-large-monitor ] || [ "$(cat /etc/cron.d/exim-large-monitor 2>/dev/null)" != "$CRON_LINE" ]; then
+    printf '%s\n' "$CRON_LINE" > /etc/cron.d/exim-large-monitor
+    chmod 644 /etc/cron.d/exim-large-monitor
+fi
 log_wrapper "Cron job ensured at /etc/cron.d/exim-large-monitor."
 
 log_wrapper "Installation Complete."

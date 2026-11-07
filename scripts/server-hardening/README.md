@@ -22,9 +22,9 @@ Out of the box on cloud VPS providers, HestiaCP has four subtle architectural bl
 | **1. Kernel Network Hardening** | SYN flood cookies, `rp_filter` anti-spoofing, ICMP redirect & source-route blocks, `fs.suid_dumpable=0`, `kernel.panic=10` (keeps `cubic`) | `/etc/sysctl.d/99-hestiacp-hardening.conf` |
 | **2. APT Config Preservation** | Prevents `apt upgrade` from overwriting custom `/etc` configs + locks `/etc/crontab` (`0600`) | `/etc/apt/apt.conf.d/99-keep-custom-configs` |
 | **3. Lockout-Safe SSH Hardening** | `MaxAuthTries 3`, keepalives, and `PasswordAuthentication no` **only** if a valid SSH public key is verified in `authorized_keys` (tested with `sshd -t` + auto-rollback) | `/etc/ssh/sshd_config.d/00-hardening.conf` |
-| **4. IPv6 Firewall Mirror** | Dynamically mirrors HestiaCP's open ports from `rules.conf` (+ essential `icmpv6` Neighbor Discovery) into an isolated `nftables` IPv6 firewall | `hestia-ipv6-guard.service` (`table ip6 hestia_ipv6_guard`) |
-| **5. Web/Webmail F2B & Sync** | Covers WordPress (`xmlrpc.php` + `wp-login.php`), fixes Roundcube behind Nginx proxy (`roundcube-auth.local`), validates via `fail2ban-client -t` with auto-rollback, and heals Fail2Ban ↔ `iptables` desyncs | `/etc/fail2ban/filter.d/*.local` |
-| **6. CrowdSec Collaborative IPS** | Isolates LAPI on `127.0.0.1:8099`, auto-detects `hestia.conf` stack (`Nginx-only` or `Nginx+Apache2`, `VSFTPD`/`ProFTPD`, `Exim4`/`Postfix`/`Dovecot`, `MariaDB`/`PgSQL`, `Roundcube`), protects `:8083` + Multi-CMS logins + Nextcloud WebDAV sync whitelist (validated via `crowdsec -t`), runs `nftables` bouncer immune to `iptables -F`, and **exempts the active SSH port** | `table ip crowdsec` + `crowdsec-ssh-exempt` |
+| **4. IPv6 Firewall Mirror** | Dynamically mirrors HestiaCP's open ports from `rules.conf` (+ essential `icmpv6` Neighbor Discovery) into an isolated `nftables` IPv6 firewall | `/opt/webxtek-scripts/hestia-ipv6-guard.sh` + `hestia-ipv6-guard.service` (`table ip6 hestia_ipv6_guard`) |
+| **5. Web/Webmail F2B, Sync & Nginx Edge** | Covers WordPress (`xmlrpc.php` + `wp-login.php`), fixes Roundcube behind Nginx proxy (`roundcube-auth.local`), validates via `fail2ban-client -t` with auto-rollback, heals Fail2Ban ↔ `iptables` desyncs, and deploys **Nginx Edge Hardening** blocking PHP execution in `uploads/` and `wp-config.php`/LFI probes (supports `# custom-override` per-domain opt-out) | `/etc/fail2ban/filter.d/*.local` + `/home/*/conf/web/*/nginx.conf_hardening` |
+| **6. CrowdSec Collaborative IPS** | Isolates LAPI on `127.0.0.1:8099`, auto-detects `hestia.conf` stack (`Nginx-only` or `Nginx+Apache2`, `VSFTPD`/`ProFTPD`, `Exim4`/`Postfix`/`Dovecot`, `MariaDB`/`PgSQL`, `Roundcube`), protects `:8083` + Multi-CMS logins + Nextcloud WebDAV sync whitelist (validated via `crowdsec -t`), runs `nftables` bouncer immune to `iptables -F`, and **exempts the active SSH port** | `table ip crowdsec` + `/opt/webxtek-scripts/crowdsec-ssh-exempt.sh` |
 
 ---
 
@@ -67,4 +67,4 @@ bash install.sh --harden
 bash install.sh --crowdsec
 ```
 
-When `bash install.sh --setup-crons` is enabled, a daily silent self-healing check (`v-harden-server --cron-heal`) runs at `04:50` (right after HestiaCP's `04:41` auto-update) to resync IPv6 rules, heal any Fail2Ban chain desync, and verify CrowdSec + SSH anti-lockout rules.
+When `bash install.sh --setup-crons` is enabled, a daily silent self-healing check (`v-harden-server --cron-heal`) runs at `04:50` (right after HestiaCP's `04:41` auto-update) to resync IPv6 rules, heal any Fail2Ban chain desync, sync `nginx.conf_hardening` and `v-patch-nginx-txt-nocache` across newly added domains, and verify CrowdSec + SSH anti-lockout rules.

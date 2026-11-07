@@ -46,9 +46,9 @@ if [ -f "$HESTIA/conf/hestia.conf" ]; then
     source "$HESTIA/conf/hestia.conf" 2>/dev/null || true
 fi
 
-tmp_remote=$(umask 077 && mktemp /tmp/v-verify-backups.remote.XXXXXX) || exit 1
-tmp_out=$(umask 077 && mktemp /tmp/v-verify-backups.out.XXXXXX) || { rm -f "$tmp_remote"; exit 1; }
-tmp_b2info=$(umask 077 && mktemp /tmp/v-verify-backups.b2.XXXXXX) || { rm -f "$tmp_remote" "$tmp_out"; exit 1; }
+tmp_remote=$(umask 077 && (mktemp /run/v-verify-backups.remote.XXXXXX 2>/dev/null || mktemp /tmp/v-verify-backups.remote.XXXXXX)) || exit 1
+tmp_out=$(umask 077 && (mktemp /run/v-verify-backups.out.XXXXXX 2>/dev/null || mktemp /tmp/v-verify-backups.out.XXXXXX)) || { rm -f "$tmp_remote"; exit 1; }
+tmp_b2info=$(umask 077 && (mktemp /run/v-verify-backups.b2.XXXXXX 2>/dev/null || mktemp /tmp/v-verify-backups.b2.XXXXXX)) || { rm -f "$tmp_remote" "$tmp_out"; exit 1; }
 trap 'rm -f "$tmp_remote" "$tmp_out" "$tmp_b2info" "${tmp_b2info}-wal" "${tmp_b2info}-shm" 2>/dev/null' EXIT INT TERM
 
 extract_conf_val() {

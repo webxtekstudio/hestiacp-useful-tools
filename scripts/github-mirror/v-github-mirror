@@ -258,7 +258,7 @@ send_html_email() {
 </html>"
 
     local temp_html
-    temp_html=$(mktemp /tmp/github_mirror_email.XXXXXX) || return 1
+    temp_html=$(mktemp /run/github_mirror_email.XXXXXX 2>/dev/null || mktemp /tmp/github_mirror_email.XXXXXX) || return 1
     chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     

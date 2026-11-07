@@ -17,7 +17,7 @@ A housekeeper script. It safely deletes old logs, temp files, and spam emails to
 Upgrades the native HestiaCP backup engine. Automatically organizes your server backups into clean Yearly/Monthly folders (`YYYY/MM`), repairs corrupted databases before exporting them, sends modern Dark-Mode HTML emails instead of plain text, and patches `v-backup-users` with an optional dry-run-first retention hook for classic `.tar` backups.
 
 ### 3. [exim-limit](./exim-limit/)
-A spam protector. Automatically blocks any outgoing emails larger than 10MB to prevent your server from being blacklisted by Google or Microsoft.
+An email reputation and anti-spoofing protector. Blocks outgoing emails larger than 25MB (with friendly bounce notifications and admin alerts) and blocks unauthenticated external senders forging any local HestiaCP domain (`+local_domains`) in the visual `From:` header.
 
 ### 4. [fix-web-permissions](./fix-web-permissions/)
 **⚠️ Powerful Tool:** Natively fixes broken `public_html` file ownerships (usually caused by FTP uploads) and hardens your WordPress/CMS security against hackers.
@@ -39,6 +39,9 @@ Balances Dovecot & Exim Fail2Ban thresholds (`2h` ban after `5` attempts via `.l
 
 ### 10. [server-hardening](./server-hardening/)
 **🛡️ Recommended Tool:** Automates 6 upgrade-safe & crash-safe HestiaCP hardening pillars — Kernel sysctl, APT config preservation, lockout-safe SSH, Dual-Stack IPv6 Firewall Mirror (`nftables`), Web/Roundcube Fail2Ban filters + desync auto-healer, and **CrowdSec Collaborative IPS** (isolated on `127.0.0.1:8099`, auto-detecting `hestia.conf` stack + Multi-CMS & Nextcloud sync protection + SSH anti-lockout).
+
+### 11. [nginx-txt-nocache](./nginx-txt-nocache/)
+Removes `.txt` from Nginx static `expires max` blocks across PHP-FPM templates, active domain configs, and reverse-proxy `PROXY_EXT` definitions so `robots.txt`, `llms.txt`, `ads.txt`, and `security.txt` always serve fresh content without 1-year browser/CDN caching.
 
 ---
 

@@ -10,11 +10,11 @@ Built and battle-tested for real production environments. A contribution to the 
 
 ### 1. 📖 Guides & Optimizations
 
-Step-by-step guides to optimize your server infrastructure.
+Step-by-step guides to optimize your server infrastructure:
 
-- **[PHP-FPM Optimization Guide](php_optimize/):** Calculate RAM limits and choose between `ondemand`, `dynamic`, and `static` PHP modes based on server size and traffic.
-- **[MariaDB Optimization Guide](mariadb_optimize/):** Configure `innodb_buffer_pool_size` to dramatically improve database performance and reduce CPU load.
-- **[SWAP Setup Guide](swap_setup/):** 1-click script to configure SWAP memory, essential for low-RAM environments (1GB/2GB VPS).
+- **[PHP-FPM Optimization Guide](php_optimize/php_optimization_guide.md):** Calculate RAM limits and choose between `ondemand`, `dynamic`, and `static` PHP modes based on server size and traffic.
+- **[MariaDB Optimization Guide](mariadb_optimize/mariadb_optimization_guide.md):** Configure `innodb_buffer_pool_size`, `innodb_log_file_size`, and `table_open_cache` for MariaDB 10.11 / 11.8 LTS to dramatically improve database performance and reduce CPU load.
+- **[SWAP Setup Guide](swap_setup/swap_setup_guide.md):** 1-click script to configure SWAP memory and `vm.swappiness=10`, essential for low-RAM environments (1GB/2GB VPS).
 
 ---
 
@@ -48,6 +48,20 @@ Curated Markdown files covering HestiaCP CLI commands, PHP-FPM tuning, Exim trou
 ### 3. ⚙️ Custom Scripts (`/scripts`)
 
 Automation and maintenance scripts to enhance HestiaCP's default capabilities.
+
+| Module & Dedicated Guide | CLI Command | Default Cron Schedule | Primary Purpose |
+| :--- | :--- | :--- | :--- |
+| **[System Cleanup Guide](scripts/clean-garbage/README.md)** | `v-clean-garbage` | `30 4 * * 0` (Sun 04:30) | Cleans journald, rotated logs, PHP sessions, temp files, mail queue & spam |
+| **[Backup Core Patches Guide](scripts/backup-core-patches/README.md)** | `v-backup-users` / `v-prune-backups` / `v-verify-backups` | `10 5 * * *` (Hestia native) | `YYYY/MM_MONTH/user` layout, DB auto-repair, Dark-Mode HTML emails, B2 retry, retention & verification |
+| **[GitHub Mirror Guide](scripts/github-mirror/README.md)** | `v-github-mirror` | `0 */12 * * *` (every 12h + Sun 06:00) | Zero-trust pull-only mirror of private/public Git repos into `/home/<user>/web/<domain>/private/` |
+| **[Exim Limit & Anti-Spoof Guide](scripts/exim-limit/README.md)** | `v-add-exim-limit` / `monitor_large_emails.py` | `0 * * * *` (hourly monitor) | Enforces 25MB attachment limit + blocks external `From:` spoofing on `+local_domains` & IP-literal HELOs |
+| **[System Health Report Guide](scripts/system-report/README.md)** | `v-system-report` | `0 8 * * 0` (Sun 08:00) | HTML health digest (CPU, RAM, Disk, Services, SSL expiry, RBL blacklists) |
+| **[Web Permissions Fixer Guide](scripts/fix-web-permissions/README.md)** | `v-fix-web-permissions` | On-demand rescue | Fixes `public_html` ownerships, hardens CMS configs (`640`), flags exposed `.git` |
+| **[Security Audit Guide](scripts/security-audit/README.md)** | `v-security-audit` | `0 7 * * 0` (Sun 07:00) | 4-layer A–F security scanner (System, YARA Backend, TLS/Headers, OWASP Pentest) |
+| **[Server Hardening & CrowdSec Guide](scripts/server-hardening/README.md)** | `v-harden-server` | `50 4 * * *` (daily 04:50 healer) | 6-pillar hardening: sysctl, APT, SSH, IPv6 nftables mirror, Nginx edge + Fail2Ban `.local`, CrowdSec IPS |
+| **[Logrotate Optimizer Guide](scripts/logrotate-optimize/README.md)** | `v-optimize-logrotate` | Event-driven (`logrotate.d`) | Upgrades Nginx & Apache rotation from `weekly rotate 4` to `daily rotate 14` |
+| **[Fail2Ban Email Optimizer Guide](scripts/fail2ban-optimize/README.md)** | `v-optimize-fail2ban` | Daemon (`jail.d/*.local`) | Relaxes Dovecot/Exim bans (`5` retries / `2h` ban) so typos don't cause 7-day lockouts |
+| **[Nginx `.txt` Cache Hardener Guide](scripts/nginx-txt-nocache/README.md)** | `v-patch-nginx-txt-nocache` | Auto-healed daily (`04:50`) | Removes `.txt` from static `expires max` rules so `robots.txt`/`llms.txt`/`ads.txt` stay fresh |
 
 #### [System Cleanup (`v-clean-garbage`)](scripts/clean-garbage/)
 - Cleans old system logs (Journalctl), rotated logs, and temp files.
@@ -130,16 +144,24 @@ cd /root/hestiacp-useful-tools
 ### Step 2: Run the installer
 
 ```bash
+# Interactive mode (recommended — lets you choose standard vs full install with CrowdSec + Crons):
 bash install.sh
+
+# — OR Non-Interactive CLI Flags —
+bash install.sh --all          # Install all modules + CrowdSec IPS + Automated Cron Jobs
+bash install.sh --setup-crons  # Configure recommended cron schedules only
+bash install.sh --harden       # Run only the 5-pillar Server Hardening module
+bash install.sh --crowdsec     # Run Server Hardening + CrowdSec Collaborative IPS (6 pillars)
+bash install.sh --fail2ban     # Run only the Fail2Ban Email Optimizer
 ```
 
-This installs all tools to `/usr/local/hestia/bin/` and creates default configs in `/etc/`.
+This installs the selected tools to `/usr/local/hestia/bin/` and creates default configs in `/etc/` (existing configs are never overwritten on re-runs).
 
 > **That's it for backups.** This ensures your server natively supports organized storage without extra configs.
 
-### Step 3: Set up a schedule
+### Step 3: Set up a schedule (if not already enabled in Step 2)
 
-The backup module uses the native HestiaCP cron system. No extra crons are needed! For the other tools:
+The backup module uses the native HestiaCP cron system. If you chose the Standard install in Step 2 and want to add the automated maintenance schedules later:
 
 ```bash
 bash install.sh --setup-crons

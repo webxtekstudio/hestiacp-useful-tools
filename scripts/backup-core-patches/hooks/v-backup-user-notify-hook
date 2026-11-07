@@ -59,7 +59,7 @@ RUNTIME=$(html_escape "$RUNTIME")
 
 # Build Multipart MIME Email safely via mktemp (0600)
 BOUNDARY="--==_boundary_$(date +%Y%m%d%H%M%S)_$$==--"
-TEMP_MAIL=$(mktemp /tmp/backup_notify.XXXXXX) || exit 1
+TEMP_MAIL=$(mktemp /run/backup_notify.XXXXXX 2>/dev/null || mktemp /tmp/backup_notify.XXXXXX) || exit 1
 chmod 600 "$TEMP_MAIL"
 trap 'rm -f "$TEMP_MAIL" 2>/dev/null' EXIT INT TERM
 

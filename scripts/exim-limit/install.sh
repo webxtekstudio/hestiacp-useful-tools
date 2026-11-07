@@ -53,3 +53,8 @@ else
     chmod 600 "/etc/hestiacp-exim-limit.conf"
     echo "  -> [INFO] Config exists (permissions verified 0600): /etc/hestiacp-exim-limit.conf"
 fi
+
+if [ -f "/etc/exim4/exim4.conf.template" ] && command -v update-exim4.conf >/dev/null 2>&1; then
+    echo "  -> Ensuring Exim limit & anti-spoofing rules are active..."
+    "$target_bin"
+fi

@@ -21,10 +21,16 @@
 | [`AI/knowledge/`](./AI/knowledge/) | HestiaCP reference guides (paths, CLI, backups, Exim4/Dovecot, PHP-FPM, MariaDB, SSL, security, disaster recovery) |
 | [`AI/DevOps-AI-Prompts/`](./AI/DevOps-AI-Prompts/) | Standalone example prompts (`System-Monitor-Prompt.md`, `DevOps-Agent-Prompt.md`) |
 | [`scripts/security-audit/`](./scripts/security-audit/) | `v-security-audit` — 70-check HestiaCP & Linux security scanner (`lib/core.sh`, `lib/system/`, `lib/hestia.sh`, `lib/wordpress.sh`, `lib/malware.sh`) |
-| [`scripts/server-hardening/`](./scripts/server-hardening/) | `v-harden-server` — 6-pillar upgrade-safe HestiaCP hardening (Kernel sysctl, APT config keep, lockout-safe SSH, IPv6 nftables mirror, WP Fail2Ban sync & CrowdSec IPS) |
-| [`scripts/backup-core-patches/`](./scripts/backup-core-patches/) | Surgical patches for HestiaCP `v-backup-user` / `backup.sh` enabling Backblaze B2 / SFTP hooks, per-user retention, and notifications |
+| [`scripts/server-hardening/`](./scripts/server-hardening/) | `v-harden-server` — 6-pillar upgrade-safe HestiaCP hardening (Kernel sysctl, APT config keep, lockout-safe SSH, IPv6 nftables mirror, Nginx edge + WP/Roundcube Fail2Ban sync & CrowdSec IPS) |
+| [`scripts/backup-core-patches/`](./scripts/backup-core-patches/) | Surgical patches for HestiaCP `v-backup-user` / `backup.sh` enabling Backblaze B2 / SFTP hooks, `v-prune-backups` retention, `v-verify-backups`, and HTML notifications |
 | [`scripts/system-report/`](./scripts/system-report/) | `v-system-report` — automated HTML system health and resource report |
-| [`scripts/fix-permissions/`](./scripts/fix-permissions/) | `v-fix-web-permissions` — safe ownership and permission repair for HestiaCP web directories |
+| [`scripts/fix-web-permissions/`](./scripts/fix-web-permissions/) | `v-fix-web-permissions` — CMS-aware ownership and permission repair for HestiaCP web directories |
+| [`scripts/clean-garbage/`](./scripts/clean-garbage/) | `v-clean-garbage` — safe cleanup of system logs, rotated logs, PHP sessions, temp dirs, and mail/trash retention |
+| [`scripts/github-mirror/`](./scripts/github-mirror/) | `v-github-mirror` — zero-trust pull-only Git repository mirror into tenant `private/` directories |
+| [`scripts/exim-limit/`](./scripts/exim-limit/) | `v-add-exim-limit` & `monitor_large_emails.py` — attachment size limit, `+local_domains` `From:` header anti-spoofing, and alert monitor |
+| [`scripts/logrotate-optimize/`](./scripts/logrotate-optimize/) | `v-optimize-logrotate` — upgrades Apache & Nginx log rotation from weekly to daily (`rotate 14`) |
+| [`scripts/fail2ban-optimize/`](./scripts/fail2ban-optimize/) | `v-optimize-fail2ban` — balances Dovecot & Exim Fail2Ban thresholds via `.local` precedence |
+| [`scripts/nginx-txt-nocache/`](./scripts/nginx-txt-nocache/) | `v-patch-nginx-txt-nocache` — removes `.txt` from static `expires max` blocks and `PROXY_EXT` defaults |
 | [`mariadb_optimize/`](./mariadb_optimize/) | MariaDB configuration tuning for HestiaCP workloads |
 | [`php_optimize/`](./php_optimize/) | PHP-FPM pool and OPcache optimization scripts |
 | [`swap_setup/`](./swap_setup/) | Automated swapfile creation and `vm.swappiness` tuning |

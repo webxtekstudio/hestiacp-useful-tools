@@ -99,7 +99,7 @@ Done! Logs will now rotate daily, keeping 14 days of compressed history.
 
 ## What it changes
 
-Only two files are modified (originals are backed up to `/etc/logrotate.d/.backups/`):
+Only two files are modified (originals are backed up to `/var/backups/hestiacp-useful-tools/logrotate-optimize/`):
 
 | File | Before | After |
 |------|--------|-------|
@@ -112,13 +112,13 @@ Everything else (sharedscripts, postrotate hooks, create permissions) is preserv
 
 ## Rollback
 
-Backups are saved automatically. To revert:
+Backups are saved automatically outside `/etc/logrotate.d/` so `logrotate` never parses backup files. To revert:
 
 ```bash
 # Find the backup
-ls /etc/logrotate.d/.backups/
+ls /var/backups/hestiacp-useful-tools/logrotate-optimize/
 
 # Restore
-cp /etc/logrotate.d/.backups/apache2.bak.YYYYMMDD-HHMMSS /etc/logrotate.d/apache2
-cp /etc/logrotate.d/.backups/nginx.bak.YYYYMMDD-HHMMSS /etc/logrotate.d/nginx
+cp /var/backups/hestiacp-useful-tools/logrotate-optimize/apache2.bak.YYYYMMDD-HHMMSS /etc/logrotate.d/apache2
+cp /var/backups/hestiacp-useful-tools/logrotate-optimize/nginx.bak.YYYYMMDD-HHMMSS /etc/logrotate.d/nginx
 ```

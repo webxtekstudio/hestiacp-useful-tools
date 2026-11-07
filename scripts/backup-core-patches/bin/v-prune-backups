@@ -76,8 +76,8 @@ fi
 NOW_EPOCH=$(date +%s)
 WEEKLY_WINDOW_DAYS=$((KEEP_DAILY_FOR_DAYS + KEEP_WEEKLY_FOR_WEEKS * 7))
 
-tmp_records=$(mktemp /tmp/v-prune-backups.records.XXXXXX) || exit 1
-tmp_decisions=$(mktemp /tmp/v-prune-backups.decisions.XXXXXX) || { rm -f "$tmp_records"; exit 1; }
+tmp_records=$(mktemp /run/v-prune-backups.records.XXXXXX 2>/dev/null || mktemp /tmp/v-prune-backups.records.XXXXXX) || exit 1
+tmp_decisions=$(mktemp /run/v-prune-backups.decisions.XXXXXX 2>/dev/null || mktemp /tmp/v-prune-backups.decisions.XXXXXX) || { rm -f "$tmp_records"; exit 1; }
 chmod 600 "$tmp_records" "$tmp_decisions"
 trap 'rm -f "$tmp_records" "$tmp_decisions"' EXIT INT TERM
 

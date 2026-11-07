@@ -1236,7 +1236,7 @@ send_html_email() {
 </html>"
 
     local temp_html
-    temp_html=$(mktemp /tmp/garbage_email.XXXXXX) || return 1
+    temp_html=$(mktemp /run/garbage_email.XXXXXX 2>/dev/null || mktemp /tmp/garbage_email.XXXXXX) || return 1
     chmod 600 "$temp_html"
     echo "$html_body" > "$temp_html"
     

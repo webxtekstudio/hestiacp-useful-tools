@@ -25,8 +25,9 @@ rm -f "$target_bin"
 install -o root -g root -m 0755 "$SCRIPT_DIR/v-optimize-logrotate" "$target_bin"
 echo "  -> [OK] Installed script: $target_bin"
 
-echo ""
-echo "To apply the optimization, run:"
-echo "  v-optimize-logrotate              # Apply + force immediate rotation"
-echo "  v-optimize-logrotate --dry-run    # Preview changes without applying"
-echo ""
+if grep -q "weekly" /etc/logrotate.d/apache2 /etc/logrotate.d/nginx 2>/dev/null; then
+    echo "  -> Applying daily logrotate optimization (rotate 14)..."
+    "$target_bin" --no-force
+else
+    echo "  -> [INFO] Apache/Nginx logrotate already set to daily rotation"
+fi

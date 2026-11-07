@@ -128,9 +128,8 @@ The `install.sh` script applies idempotent patches to these files:
 
 1. **`v-backup-user`** -> Runs database auto-repair, triggers folder organization, and replaces the basic notifier with the HTML notification hook.
 2. **`v-backup-users`** -> Adds interactive terminal output, triggers the global backup report, and runs the optional retention hook on loop exit.
-3. **`backup.sh`** -> Updates Hestia's B2 upload, download, delete, and rotation paths.
+3. **`backup.sh`** -> Updates Hestia's B2 upload (with 3-attempt exponential-backoff retry and temp cleanup on failure), download, delete, and rotation paths.
 4. **`v-delete-user-backup`** -> Makes deletion follow organized backup symlinks safely.
 5. **`v-prune-backups`** -> Adds the dry-run-first retention engine used by the native `v-backup-users` hook.
 6. **`v-verify-backups`** -> Verifies remote (`b2` / `rclone`) and local `.tar` archives against `backup.conf` after batch runs and single-user B2 retries.
-
-> **Note on updates:** If a HestiaCP update overwrites core files, re-run `bash install.sh` from this repository to re-apply the patches.
+7. **APT Auto-Healer (`/etc/apt/apt.conf.d/99-hestia-custom-backup-hooks`)** -> Automatically re-runs `install.sh` via `DPkg::Post-Invoke` whenever `apt`/`dpkg` updates HestiaCP packages, ensuring custom core patches and fresh `.original` backups are preserved across every HestiaCP release without manual intervention.

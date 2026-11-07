@@ -49,16 +49,18 @@ nano /etc/mysql/mariadb.conf.d/50-server.cnf
 Scroll down until you find the `[mysqld]` section. Look for `innodb_buffer_pool_size`. 
 If it has a `#` in front of it, remove the `#` to uncomment it, and change the value. If it doesn't exist, add it under `[mysqld]`.
 
-Example for a server with 8GB of RAM:
+Example for a server with 8GB of RAM (MariaDB 10.11 / 11.8 LTS):
 ```ini
 [mysqld]
 ...
 innodb_buffer_pool_size = 4G
-innodb_buffer_pool_instances = 4  # Rule: 1 instance per 1GB of buffer pool
+innodb_log_file_size = 512M
+table_open_cache = 4000
+max_connections = 150
 ...
 ```
 
-*Note: `innodb_buffer_pool_instances` divides the pool into smaller chunks to prevent CPU bottlenecking. Set it to the number of GBs of your pool (e.g., if pool is 4G, instances is 4). If pool is under 1G, leave instances at 1.*
+*Note: Do **not** add `innodb_buffer_pool_instances` on modern HestiaCP servers running MariaDB 10.8, 10.11, or 11.8 LTS — MariaDB removed multiple buffer pool instances in 10.8+ in favor of a single unified, lock-free buffer pool.*
 
 ### Step 3: Restart MariaDB
 Apply the changes by restarting the database service:
