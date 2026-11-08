@@ -72,6 +72,7 @@ SSH_DROPIN="/etc/ssh/sshd_config.d/00-hardening.conf"
 WP_FILTER_LOCAL="/etc/fail2ban/filter.d/wordpress-xmlrpc.local"
 RC_FILTER_LOCAL="/etc/fail2ban/filter.d/roundcube-auth.local"
 RC_JAIL_LOCAL="/etc/fail2ban/jail.d/98-hestia-roundcube.local"
+HESTIA_ACTION_LOCAL="/etc/fail2ban/action.d/hestia.local"
 CUSTOM_F2B_WL="/etc/fail2ban/jail.d/99-custom-whitelist.local"
 IPV6_GUARD_BIN="/opt/webxtek-scripts/hestia-ipv6-guard.sh"
 IPV6_GUARD_SVC="/etc/systemd/system/hestia-ipv6-guard.service"
@@ -233,15 +234,72 @@ check_f2b_desync_count() {
         local jail="${pair%%:*}"
         local chain="fail2ban-${pair##*:}"
         if fail2ban-client status "$jail" >/dev/null 2>&1; then
-            local f2b_bans ipt_rules
+            local f2b_bans ipt_rules diff
             f2b_bans=$(fail2ban-client status "$jail" 2>/dev/null | awk '/Currently banned:/{print $NF}')
             ipt_rules=$(iptables -L "$chain" -n 2>/dev/null | grep -cE 'REJECT|DROP' || true)
-            if [ "${f2b_bans:-0}" -gt 0 ] && [ "${ipt_rules:-0}" -eq 0 ]; then
+            f2b_bans=${f2b_bans:-0}
+            ipt_rules=${ipt_rules:-0}
+            diff=$((f2b_bans - ipt_rules))
+            if [ "$f2b_bans" -gt 0 ] && { [ "$ipt_rules" -eq 0 ] || [ "$diff" -gt $((f2b_bans / 5 + 1)) ]; }; then
                 desync=$((desync + 1))
             fi
         fi
     done
     echo "$desync"
+}
+
+heal_f2b_desync() {
+    command -v fail2ban-client >/dev/null 2>&1 || return 0
+    local hestia_root="${HESTIA:-/usr/local/hestia}"
+    local banlist="$hestia_root/data/firewall/banlist.conf"
+    local pairs="wordpress-xmlrpc:WEB roundcube-auth:WEB phpmyadmin-auth:WEB dovecot-iptables:MAIL exim-iptables:MAIL ssh-iptables:SSH vsftpd-iptables:FTP proftpd-iptables:FTP mysqld-iptables:DB hestia-iptables:HESTIA recidive:RECIDIVE"
+    for pair in $pairs; do
+        local jail="${pair%%:*}"
+        local chain_short="${pair##*:}"
+        local chain="fail2ban-${chain_short}"
+        if fail2ban-client status "$jail" >/dev/null 2>&1; then
+            local banned_ips bip
+            banned_ips=$(fail2ban-client status "$jail" 2>/dev/null | sed -n 's/.*Banned IP list:[[:space:]]*//p')
+            [ -n "$banned_ips" ] || continue
+            if [ -x "$hestia_root/bin/v-add-firewall-chain" ]; then
+                "$hestia_root/bin/v-add-firewall-chain" "$chain_short" >/dev/null 2>&1 || true
+            fi
+            for bip in $banned_ips; do
+                [[ "$bip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?$ ]] || continue
+                if ! iptables -C "$chain" -s "$bip" -j DROP 2>/dev/null; then
+                    if [ -x "$hestia_root/bin/v-add-firewall-ban" ]; then
+                        "$hestia_root/bin/v-add-firewall-ban" "$bip" "$chain_short" >/dev/null 2>&1 || true
+                    fi
+                    if [ ! -f "$banlist" ] || grep -q "IP='$bip' CHAIN='$chain_short'" "$banlist" 2>/dev/null; then
+                        if ! iptables -C "$chain" -s "$bip" -j DROP 2>/dev/null; then
+                            iptables -I "$chain" 1 -s "$bip" -j DROP 2>/dev/null || true
+                        fi
+                    fi
+                fi
+            done
+        fi
+    done
+    if [ "$(check_f2b_desync_count)" -gt 0 ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl restart fail2ban >/dev/null 2>&1 || true
+    fi
+}
+
+sanitize_tenant_web_logs() {
+    local home_root="${HESTIA_HOME_ROOT:-/home}"
+    [ -d "$home_root" ] && [ ! -L "$home_root" ] || return 0
+    local pubhtml debug_log
+    for pubhtml in "$home_root"/*/web/*/public_html; do
+        [ -d "$pubhtml" ] && [ ! -L "$pubhtml" ] || continue
+        debug_log="$pubhtml/wp-content/debug.log"
+        if [ -f "$debug_log" ] && [ ! -L "$debug_log" ]; then
+            if [ ! -s "$debug_log" ]; then
+                rm -f "$debug_log" 2>/dev/null || true
+            else
+                chmod 0640 "$debug_log" 2>/dev/null || true
+            fi
+        fi
+        find -P "$pubhtml" -maxdepth 4 -type f -name '*.log' \( -perm -o+r -o -perm -o+w -o -perm -o+x -o -perm -g+w \) -exec chmod 0640 {} + 2>/dev/null || true
+    done
 }
 
 write_file_if_changed() {
@@ -528,9 +586,10 @@ if [ "$MODE" = "cron_heal" ]; then
         "$IPV6_GUARD_BIN" >/dev/null 2>&1 || true
     fi
     if [ "$(check_f2b_desync_count)" -gt 0 ]; then
-        echo "[$(date -Is)] Healing Fail2Ban <-> iptables desync after HestiaCP update"
-        systemctl restart fail2ban || true
+        echo "[$(date -Is)] Healing Fail2Ban <-> iptables desync/drift"
+        heal_f2b_desync
     fi
+    sanitize_tenant_web_logs
     sync_nginx_edge_hardening true
     if [ -x /usr/local/hestia/bin/v-patch-nginx-txt-nocache ]; then
         /usr/local/hestia/bin/v-patch-nginx-txt-nocache >/dev/null 2>&1 || true
@@ -803,6 +862,23 @@ EOF
             f2b_files_changed=true
         fi
 
+        if [ -f /etc/fail2ban/action.d/hestia.conf ]; then
+            if write_file_if_changed "$HESTIA_ACTION_LOCAL" 0644 << 'EOF'
+# Managed by v-harden-server (hestiacp-useful-tools)
+# Serializes concurrent Fail2Ban workers and ensures IPs already present in
+# banlist.conf after an unclean stop/reboot still get inserted into iptables.
+[Definition]
+actionstart = /usr/bin/flock -w 30 /run/hestia-firewall.lock /usr/local/hestia/bin/v-add-firewall-chain <name>
+actionstop = /usr/bin/flock -w 30 /run/hestia-firewall.lock /usr/local/hestia/bin/v-delete-firewall-chain <name>
+actioncheck = /usr/sbin/iptables -n -L INPUT | grep -q 'fail2ban-<name>[ \t]'
+actionban = /usr/bin/flock -w 30 /run/hestia-firewall.lock /bin/sh -c 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"; /usr/local/hestia/bin/v-add-firewall-ban <ip> <name>; if grep -q "IP=\x27<ip>\x27 CHAIN=\x27<name>\x27" /usr/local/hestia/data/firewall/banlist.conf 2>/dev/null && ! iptables -C fail2ban-<name> -s <ip> -j DROP 2>/dev/null; then iptables -I fail2ban-<name> 1 -s <ip> -j DROP 2>/dev/null || true; fi'
+actionunban = /usr/bin/flock -w 30 /run/hestia-firewall.lock /usr/bin/env HESTIA_F2B_CALLER=1 /usr/local/hestia/bin/v-delete-firewall-ban <ip> <name>
+EOF
+            then
+                f2b_files_changed=true
+            fi
+        fi
+
         local webmail_sys
         webmail_sys=$(get_hestia_conf_val WEBMAIL_SYSTEM)
         if [ "$webmail_sys" = "roundcube" ] && [ -f /var/log/roundcube/errors.log ] && [ -f /etc/fail2ban/action.d/hestia.conf ]; then
@@ -824,24 +900,25 @@ EOF
 
         if [ "$f2b_files_changed" = true ]; then
             if ! fail2ban-client -t >/dev/null 2>&1; then
-                echo -e "  -> ${YELLOW}[Pillar 5 Warning]${NC} fail2ban-client -t reported an issue -- rolling back Roundcube jail override to protect Fail2Ban"
-                rm -f "$RC_JAIL_LOCAL" "$RC_FILTER_LOCAL"
+                echo -e "  -> ${YELLOW}[Pillar 5 Warning]${NC} fail2ban-client -t reported an issue -- rolling back local Fail2Ban overrides to protect Fail2Ban"
+                rm -f "$RC_JAIL_LOCAL" "$RC_FILTER_LOCAL" "$HESTIA_ACTION_LOCAL"
             fi
         fi
 
         if systemctl is-active --quiet fail2ban; then
             if [ "$(check_f2b_desync_count)" -gt 0 ]; then
-                systemctl restart fail2ban
+                heal_f2b_desync
                 echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters verified & chain desync healed"
             elif [ "$f2b_files_changed" = true ]; then
                 fail2ban-client reload >/dev/null 2>&1 || systemctl reload fail2ban >/dev/null 2>&1 || true
-                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters (WP + Roundcube) updated & reloaded"
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters (WP + Roundcube + action) updated & reloaded"
             else
-                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters (WP + Roundcube) verified & active"
+                echo -e "  -> ${GREEN}[Pillar 5]${NC} Fail2Ban .local filters (WP + Roundcube + action) verified & active"
             fi
         fi
     fi
 
+    sanitize_tenant_web_logs
     sync_nginx_edge_hardening false
 }
 

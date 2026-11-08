@@ -397,7 +397,10 @@ try:
                                     fst = os.fstat(ffd)
                                     if stat.S_ISREG(fst.st_mode) and fst.st_nlink == 1:
                                         os.fchown(ffd, uid, gid)
-                                        if (fst.st_mode & 0o022) != 0:
+                                        if entry.name.endswith(".log"):
+                                            if (fst.st_mode & 0o027) != 0:
+                                                os.fchmod(ffd, 0o640)
+                                        elif (fst.st_mode & 0o022) != 0:
                                             os.fchmod(ffd, 0o664)
                                 finally:
                                     os.close(ffd)
@@ -470,7 +473,10 @@ try:
                             entry_bad_owner = (est.st_uid != uid or est.st_gid != gid)
                             if entry_bad_owner:
                                 owner_mismatch = True
-                            need_perm = (not skip_perm) and ((est.st_mode & 0o022) != 0)
+                            is_log = entry.name.endswith(".log")
+                            perm_mask = 0o027 if is_log else 0o022
+                            desired_fmode = 0o640 if is_log else file_mode
+                            need_perm = (not skip_perm) and ((est.st_mode & perm_mask) != 0)
                             need_chown = (mode_flag == "live") and entry_bad_owner
                             if need_perm or need_chown:
                                 try:
@@ -482,10 +488,10 @@ try:
                                     if stat.S_ISREG(fst.st_mode) and fst.st_nlink == 1:
                                         if need_chown:
                                             os.fchown(ffd, uid, gid)
-                                        if not skip_perm and (fst.st_mode & 0o022) != 0:
+                                        if not skip_perm and (fst.st_mode & perm_mask) != 0:
                                             overperm_files += 1
                                             if mode_flag == "live":
-                                                os.fchmod(ffd, file_mode)
+                                                os.fchmod(ffd, desired_fmode)
                                 finally:
                                     os.close(ffd)
 
@@ -771,7 +777,17 @@ fix_wordpress_extras() {
     local user="$2"
 
     harden_file "$pubhtml/wp-config.php" "$WP_CONFIG_PERM" "wp-config.php"
-    harden_file "$pubhtml/wp-content/debug.log" "640" "wp-content/debug.log"
+    if [ -f "$pubhtml/wp-content/debug.log" ] && [ ! -L "$pubhtml/wp-content/debug.log" ] && [ ! -s "$pubhtml/wp-content/debug.log" ]; then
+        if [ "$AUDIT_ONLY" = true ]; then
+            log_warn "wp-content/debug.log is empty (0 bytes) — should be removed"
+        elif [ "$DRY_RUN" = true ]; then
+            log_dry "Would remove empty 0-byte wp-content/debug.log"
+        else
+            rm -f "$pubhtml/wp-content/debug.log" 2>/dev/null && log_fix "Removed empty 0-byte wp-content/debug.log"
+        fi
+    else
+        harden_file "$pubhtml/wp-content/debug.log" "640" "wp-content/debug.log"
+    fi
 
     for writable_dir in "wp-content/uploads" "wp-content/cache" "wp-content/w3tc-config" "wp-content/upgrade" "wp-content/wc-logs"; do
         restore_writable "$pubhtml/$writable_dir" "WP $writable_dir" "$user" "755"

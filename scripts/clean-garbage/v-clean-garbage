@@ -78,6 +78,7 @@ CLEAN_SPAM_MAIL="TRUE"
 # USER CLEANUP (TRUE/FALSE)
 #------------------------------------------
 CLEAN_USER_TRASH="TRUE"
+CLEAN_WEB_LOGS="TRUE"
 
 #------------------------------------------
 # SSD TRIM (only enable if you have SSD)
@@ -1053,6 +1054,42 @@ if [ "$CLEAN_USER_TRASH" = "TRUE" ] || [ "$CLEAN_USER_TRASH" = "true" ]; then
         echo "OK ($trash_cleaned users)"
     fi
     TASKS_SUCCESS+=("User trash cleanup")
+fi
+
+if [ "$CLEAN_WEB_LOGS" = "TRUE" ] || [ "$CLEAN_WEB_LOGS" = "true" ]; then
+    echo -n "[$(date)] : Tenant web logs (0-byte debug.log & world-readable *.log)... "
+    weblog_fixed=0
+    for u_dir in "$HESTIA/data/users"/*; do
+        [ -d "$u_dir" ] && [ ! -L "$u_dir" ] || continue
+        u_name=$(basename "$u_dir")
+        [[ "$u_name" =~ ^[a-zA-Z0-9._-]+$ ]] || continue
+        id -u "$u_name" >/dev/null 2>&1 || continue
+        u_home=$(getent passwd "$u_name" | cut -d: -f6)
+        [ -n "$u_home" ] && [ -d "$u_home/web" ] && [ ! -L "$u_home" ] && [ ! -L "$u_home/web" ] || continue
+        c=$(runuser -u "$u_name" -- sh -c '
+            home_web="$1/web"
+            count=0
+            [ -d "$home_web" ] && [ ! -L "$home_web" ] || { echo 0; exit 0; }
+            for dom_dir in "$home_web"/*; do
+                [ -d "$dom_dir" ] && [ ! -L "$dom_dir" ] || continue
+                pubhtml="$dom_dir/public_html"
+                [ -d "$pubhtml" ] && [ ! -L "$pubhtml" ] || continue
+                if [ -f "$pubhtml/wp-content/debug.log" ] && [ ! -L "$pubhtml/wp-content/debug.log" ]; then
+                    if [ ! -s "$pubhtml/wp-content/debug.log" ]; then
+                        rm -f "$pubhtml/wp-content/debug.log" 2>/dev/null && count=$((count + 1))
+                    else
+                        chmod 0640 "$pubhtml/wp-content/debug.log" 2>/dev/null || true
+                    fi
+                fi
+                n=$(find -P "$pubhtml" -maxdepth 4 -type f -name "*.log" \( -perm -o+r -o -perm -o+w -o -perm -o+x -o -perm -g+w \) -print -exec chmod 0640 {} + 2>/dev/null | wc -l)
+                count=$((count + n))
+            done
+            echo "$count"
+        ' _ "$u_home" 2>/dev/null || echo "0")
+        [[ "$c" =~ ^[0-9]+$ ]] && weblog_fixed=$((weblog_fixed + c))
+    done
+    echo "OK ($weblog_fixed files)"
+    TASKS_SUCCESS+=("Tenant web logs hygiene")
 fi
 
 echo ""

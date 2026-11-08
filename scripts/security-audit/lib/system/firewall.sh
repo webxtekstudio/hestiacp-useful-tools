@@ -36,10 +36,11 @@ check_firewall() {
         wp_banned=$(echo "$wp_jail" | grep "Currently banned" | awk '{print $NF}')
         result_pass "S15b" "WordPress jail is active (${wp_banned} currently banned)"
 
-        # Check that the filter covers wp-login.php, not just xmlrpc.php
+        # Check that the filter covers wp-login.php, not just xmlrpc.php (.local override or .conf)
         local wp_filter="/etc/fail2ban/filter.d/wordpress-xmlrpc.conf"
-        if [ -f "$wp_filter" ]; then
-            if grep -q 'wp-login' "$wp_filter" 2>/dev/null; then
+        local wp_filter_local="/etc/fail2ban/filter.d/wordpress-xmlrpc.local"
+        if [ -f "$wp_filter_local" ] || [ -f "$wp_filter" ]; then
+            if grep -q 'wp-login' "$wp_filter_local" "$wp_filter" 2>/dev/null; then
                 result_pass "S15c" "WordPress filter covers wp-login.php brute-force"
             else
                 result_fail "S15c" "WordPress filter does NOT cover wp-login.php (only xmlrpc.php) — brute-force attacks on wp-login will go unblocked"

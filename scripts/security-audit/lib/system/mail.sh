@@ -56,6 +56,8 @@ check_mail() {
                 local domain
                 domain=$(echo "$line" | grep "^DOMAIN=" | cut -d"'" -f2)
                 if [ -z "$domain" ]; then continue; fi
+                if echo "$line" | grep -q "SUSPENDED='yes'"; then continue; fi
+                if echo "$line" | grep -q "ACCOUNTS='0'" && echo "$line" | grep -q "CATCHALL=''"; then continue; fi
                 total_mail_domains=$((total_mail_domains + 1))
 
                 local dkim_key="/home/${user}/conf/mail/${domain}/dkim.pem"
@@ -114,6 +116,8 @@ check_dns_mail_advanced() {
                 local domain
                 domain=$(echo "$line" | grep "^DOMAIN=" | cut -d"'" -f2)
                 if [ -z "$domain" ]; then continue; fi
+                if echo "$line" | grep -q "SUSPENDED='yes'"; then continue; fi
+                if echo "$line" | grep -q "ACCOUNTS='0'" && echo "$line" | grep -q "CATCHALL=''"; then continue; fi
                 checked_domains=$((checked_domains + 1))
 
                 local dmarc

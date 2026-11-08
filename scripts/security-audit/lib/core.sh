@@ -677,8 +677,13 @@ file_age_days() {
 
 parse_sshd_config() {
     local key="$1"
-    local val
-    val=$(grep -ihE "^\s*${key}\s+" /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null | head -1 | awk '{print $2}')
+    local val=""
+    if command -v sshd >/dev/null 2>&1; then
+        val=$({ sshd -T 2>/dev/null || true; } | awk -v k="$(echo "$key" | tr '[:upper:]' '[:lower:]')" '$1==k && !v {v=$2} END{print v}')
+    fi
+    if [ -z "$val" ]; then
+        val=$(grep -ihE "^\s*${key}\s+" /etc/ssh/sshd_config.d/*.conf /etc/ssh/sshd_config 2>/dev/null | head -1 | awk '{print $2}')
+    fi
     echo "${val:-__unset__}"
 }
 

@@ -71,6 +71,7 @@ CLEAN_SPAM_MAIL="TRUE"
 # USER CLEANUP (TRUE/FALSE)
 #==========================================
 CLEAN_USER_TRASH="TRUE"
+CLEAN_WEB_LOGS="TRUE"
 
 #==========================================
 # SSD TRIM (only enable if you have SSD)
