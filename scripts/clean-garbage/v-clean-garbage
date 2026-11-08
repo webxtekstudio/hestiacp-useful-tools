@@ -450,7 +450,7 @@ if [ "$CLEAN_PHP_SESSIONS" = "TRUE" ] || [ "$CLEAN_PHP_SESSIONS" = "true" ]; the
         u_home=$(getent passwd "$u_name" | cut -d: -f6)
         [ -n "$u_home" ] && [ ! -L "$u_home" ] && [ -d "$u_home/tmp" ] && [ ! -L "$u_home/tmp" ] || continue
         before_kb=$(measure_cleanup "$u_home/tmp")
-        c=$(runuser -u "$u_name" -- find "$u_home/tmp" -maxdepth 1 -type f -name 'sess_*' -mtime +${PHP_SESSIONS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
+        c=$(cd / && runuser -u "$u_name" -- find "$u_home/tmp" -maxdepth 1 -type f -name 'sess_*' -mtime +${PHP_SESSIONS_RETENTION_DAYS} -delete 2>/dev/null -print | wc -l)
         after_kb=$(measure_cleanup "$u_home/tmp")
         diff_kb=$((before_kb - after_kb))
         [ "$diff_kb" -gt 0 ] 2>/dev/null && sess_cleaned_kb=$((sess_cleaned_kb + diff_kb))
@@ -966,7 +966,7 @@ if [ "$CLEAN_SPAM_MAIL" = "TRUE" ] || [ "$CLEAN_SPAM_MAIL" = "true" ]; then
         if [ "$mail_owner" != "mail" ] && [ "$mail_owner" != "$u_name" ]; then
             continue
         fi
-        c=$(runuser -u "$mail_owner" -- sh -c '
+        c=$(cd / && runuser -u "$mail_owner" -- sh -c '
             home_mail="$1"
             days="$2"
             total=0
@@ -1010,7 +1010,7 @@ if [ "$CLEAN_USER_TRASH" = "TRUE" ] || [ "$CLEAN_USER_TRASH" = "true" ]; then
         id -u "$u_name" >/dev/null 2>&1 || continue
         u_home=$(getent passwd "$u_name" | cut -d: -f6)
         [ -n "$u_home" ] && [ -d "$u_home" ] && [ ! -L "$u_home" ] || continue
-        res=$(runuser -u "$u_name" -- sh -c '
+        res=$(cd / && runuser -u "$u_name" -- sh -c '
             tdir="$1/.local/share/Trash"
             days="$2"
             [ ! -L "$1/.local" ] && [ ! -L "$1/.local/share" ] && [ -d "$tdir" ] && [ ! -L "$tdir" ] || exit 0
@@ -1066,8 +1066,9 @@ if [ "$CLEAN_WEB_LOGS" = "TRUE" ] || [ "$CLEAN_WEB_LOGS" = "true" ]; then
         id -u "$u_name" >/dev/null 2>&1 || continue
         u_home=$(getent passwd "$u_name" | cut -d: -f6)
         [ -n "$u_home" ] && [ -d "$u_home/web" ] && [ ! -L "$u_home" ] && [ ! -L "$u_home/web" ] || continue
-        c=$(runuser -u "$u_name" -- sh -c '
+        c=$(cd / && runuser -u "$u_name" -- sh -c '
             home_web="$1/web"
+            days="$2"
             count=0
             [ -d "$home_web" ] && [ ! -L "$home_web" ] || { echo 0; exit 0; }
             for dom_dir in "$home_web"/*; do
@@ -1081,11 +1082,15 @@ if [ "$CLEAN_WEB_LOGS" = "TRUE" ] || [ "$CLEAN_WEB_LOGS" = "true" ]; then
                         chmod 0640 "$pubhtml/wp-content/debug.log" 2>/dev/null || true
                     fi
                 fi
+                if [ -d "$pubhtml/wp-content/logs" ] && [ ! -L "$pubhtml/wp-content/logs" ]; then
+                    old_big=$(find -P "$pubhtml/wp-content/logs" -maxdepth 3 -type f \( -name "*.log" -o -name "*.txt" \) -size +100M -mtime +"$days" -delete -print 2>/dev/null | wc -l)
+                    count=$((count + old_big))
+                fi
                 n=$(find -P "$pubhtml" -maxdepth 4 -type f -name "*.log" \( -perm -o+r -o -perm -o+w -o -perm -o+x -o -perm -g+w \) -print -exec chmod 0640 {} + 2>/dev/null | wc -l)
                 count=$((count + n))
             done
             echo "$count"
-        ' _ "$u_home" 2>/dev/null || echo "0")
+        ' _ "$u_home" "${SERVICE_LOGS_RETENTION_DAYS:-30}" 2>/dev/null || echo "0")
         [[ "$c" =~ ^[0-9]+$ ]] && weblog_fixed=$((weblog_fixed + c))
     done
     echo "OK ($weblog_fixed files)"
