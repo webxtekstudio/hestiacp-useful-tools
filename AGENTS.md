@@ -34,6 +34,7 @@
 | [`mariadb_optimize/`](./mariadb_optimize/) | MariaDB configuration tuning for HestiaCP workloads |
 | [`php_optimize/`](./php_optimize/) | PHP-FPM pool and OPcache optimization scripts |
 | [`swap_setup/`](./swap_setup/) | Automated swapfile creation and `vm.swappiness` tuning |
+| [`tests/run-tests.sh`](./tests/run-tests.sh) | Automated syntax, unit/regression sandbox (`/run/hestia-test.*` with mocked `systemctl`/`fail2ban-client`/`iptables`), and public-repo privacy test suite |
 
 ---
 
