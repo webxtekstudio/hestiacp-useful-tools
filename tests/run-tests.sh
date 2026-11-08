@@ -52,10 +52,17 @@ fi
 echo ""
 echo "[2/6] Testing Fail2Ban <-> iptables drift detection (check_f2b_desync_count)..."
 
-SAND_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hestia-test.XXXXXX")
+SAND_BASE="${TMPDIR:-/tmp}"
+[ -d /run ] && [ -w /run ] && SAND_BASE="/run"
+SAND_DIR=$(mktemp -d "${SAND_BASE}/hestia-test.XXXXXX")
 trap 'rm -rf "$SAND_DIR"' EXIT
 
 mkdir -p "$SAND_DIR/bin"
+cat > "$SAND_DIR/bin/systemctl" << 'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$SAND_DIR/bin/systemctl"
 
 # Extract check_f2b_desync_count from v-harden-server
 F2B_FN_SCRIPT="$SAND_DIR/f2b_fn.sh"
