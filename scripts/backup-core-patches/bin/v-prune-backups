@@ -173,9 +173,47 @@ list_rclone() {
 
 delete_local() {
     local path="$1"
-    rm -f "$path"
+    local base="${path##*/}"
+    local root="${RETENTION_LOCAL_ROOT%/}"
+    rm -f -- "$path"
+    if [ -n "$base" ] && [ -L "$root/$base" ]; then
+        rm -f -- "$root/$base"
+    fi
     if is_true "$RETENTION_DELETE_RELATED_LOGS"; then
-        rm -f "${path%.tar}.log"
+        rm -f -- "${path%.tar}.log"
+        if [ -n "$base" ] && [ -L "$root/${base%.tar}.log" ]; then
+            rm -f -- "$root/${base%.tar}.log"
+        fi
+    fi
+    local dir
+    dir=$(dirname "$path")
+    while [ -n "$dir" ] && [ "$dir" != "$root" ] && [[ "$dir" == "$root/"* ]]; do
+        rmdir "$dir" 2>/dev/null || break
+        dir=$(dirname "$dir")
+    done
+}
+
+sync_hestia_backup_metadata() {
+    local user="$1"
+    local path="$2"
+    local base="${path##*/}"
+    [ -n "$user" ] && [ -n "$base" ] || return 0
+    [[ "$user" =~ ^[a-zA-Z0-9._-]+$ ]] || return 0
+
+    # Only remove from backup.conf if no backend still keeps this archive
+    if awk -F'|' -v u="$user" -v b="$base" '$1 == "KEEP" && $4 == u && ($5 == b || $5 ~ "/" b "$") { found=1; exit } END { exit !found }' "$tmp_decisions"; then
+        return 0
+    fi
+
+    local bconf="$HESTIA/data/users/$user/backup.conf"
+    local uconf="$HESTIA/data/users/$user/user.conf"
+    if [ -f "$bconf" ] && grep -qF "BACKUP='$base'" "$bconf" 2>/dev/null; then
+        sed -i "/BACKUP='$base'/d" "$bconf"
+        if [ -f "$uconf" ]; then
+            local count
+            count=$(grep -c "^BACKUP=" "$bconf" 2>/dev/null || echo 0)
+            sed -i "s/^U_BACKUPS=.*/U_BACKUPS='$count'/" "$uconf"
+        fi
     fi
 }
 
@@ -321,10 +359,12 @@ sort -t'|' -k4,4 "$tmp_decisions" | while IFS='|' read -r action reason backend 
     printf '%-6s %-18s %-6s %-18s %s\n' "$action" "$reason" "$backend" "$user" "$path"
 
     if [ "$action" = "DELETE" ] && ! is_true "$RETENTION_DRY_RUN"; then
+        del_ok=0
         case "$backend" in
-            local) delete_local "$path" ;;
-            b2) delete_b2 "$path" "$id" || echo "WARN: failed to delete B2 object: $path" ;;
-            rclone) delete_rclone "$id" || echo "WARN: failed to delete rclone object: $path" ;;
+            local) delete_local "$path" && del_ok=1 ;;
+            b2) delete_b2 "$path" "$id" && del_ok=1 || echo "WARN: failed to delete B2 object: $path" ;;
+            rclone) delete_rclone "$id" && del_ok=1 || echo "WARN: failed to delete rclone object: $path" ;;
         esac
+        [ "$del_ok" -eq 1 ] && sync_hestia_backup_metadata "$user" "$path"
     fi
 done
