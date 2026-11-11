@@ -132,9 +132,13 @@ list_b2() {
 
     B2_AUTH_KEYID="$B2_KEYID"
     B2_AUTH_KEY="$B2_KEY"
+    local b2_tmpdir="${TMPDIR:-/tmp}"
+    if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+        b2_tmpdir="/var/cache/b2-staticx"
+    fi
 
-    if ! b2_out=$(B2_APPLICATION_KEY_ID="$B2_AUTH_KEYID" B2_APPLICATION_KEY="$B2_AUTH_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null) && \
-       ! b2_out=$(B2_APPLICATION_KEY_ID="$B2_AUTH_KEYID" B2_APPLICATION_KEY="$B2_AUTH_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null); then
+    if ! b2_out=$(TMPDIR="$b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_AUTH_KEYID" B2_APPLICATION_KEY="$B2_AUTH_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null) && \
+       ! b2_out=$(TMPDIR="$b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_AUTH_KEYID" B2_APPLICATION_KEY="$B2_AUTH_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null); then
         echo "WARN: failed to list Backblaze B2 bucket '$BUCKET' (check credentials/network)." >&2
         return 0
     fi
@@ -221,7 +225,11 @@ delete_b2() {
     local path="$1"
     local id="$2"
     [ -n "$id" ] || return 1
-    B2_APPLICATION_KEY_ID="$B2_AUTH_KEYID" B2_APPLICATION_KEY="$B2_AUTH_KEY" b2 delete-file-version "$path" "$id" >/dev/null 2>&1
+    local b2_tmpdir="${TMPDIR:-/tmp}"
+    if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+        b2_tmpdir="/var/cache/b2-staticx"
+    fi
+    TMPDIR="$b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_AUTH_KEYID" B2_APPLICATION_KEY="$B2_AUTH_KEY" b2 delete-file-version "$path" "$id" >/dev/null 2>&1
 }
 
 delete_rclone() {

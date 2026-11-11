@@ -70,10 +70,15 @@ upload_global_log_to_b2() {
     b2_log_name="backup-users-$(date +%Y-%m-%d_%H-%M-%S).log"
     b2_log_path="${b2_year}/${b2_month}/${b2_log_name}"
 
+    local b2_tmpdir="${TMPDIR:-/tmp}"
+    if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+        b2_tmpdir="/var/cache/b2-staticx"
+    fi
+
     echo "$(date +"%Y-%m-%d %H:%M:%S") Upload global backup log to B2: ${b2_log_path}" >> "$LOG_FILE"
     for attempt in 1 2 3; do
-        if B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file upload --no-progress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1 || \
-           B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 upload-file --noProgress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1; then
+        if TMPDIR="$b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file upload --no-progress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1 || \
+           TMPDIR="$b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 upload-file --noProgress "$BUCKET" "$LOG_FILE" "$b2_log_path" >/dev/null 2>&1; then
             break
         fi
         [ "$attempt" -lt 3 ] && sleep 5

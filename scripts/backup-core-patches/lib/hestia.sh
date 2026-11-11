@@ -13,7 +13,7 @@ export HESTIA="${HESTIA:-/usr/local/hestia}"
 patch_b2_functions() {
     local script="$HESTIA/func/backup.sh"
     [ ! -f "$script" ] && return 1
-    grep -q "hestia-custom-b2-v5.4-verify" "$script" 2>/dev/null && return 0
+    grep -q "hestia-custom-b2-v5.5-staticx-tmpdir" "$script" 2>/dev/null && return 0
 
     if grep -q "hestia-custom-b2-v" "$script" 2>/dev/null; then
         [ -f "${script}.original" ] && cp "${script}.original" "$script" 2>/dev/null || true
@@ -33,11 +33,16 @@ patch_b2_functions() {
 
     cat > "$repl_file" << 'PATCH_EOF'
 b2_backup() {
+	# hestia-custom-b2-v5.5-staticx-tmpdir
 	# hestia-custom-b2-v5.4-verify
 	# hestia-custom-b2-v5.3-retry
 	# hestia-custom-b2-v4-retention
 	# Defining backblaze b2 settings
 	source_conf "$HESTIA/conf/b2.backup.conf"
+	_b2_tmpdir="${TMPDIR:-/tmp}"
+	if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+		_b2_tmpdir="/var/cache/b2-staticx"
+	fi
 
 	_bkp_root="${BACKUP%/}"
 	if [ -z "$_bkp_root" ] || [ ! -d "$_bkp_root" ]; then
@@ -71,10 +76,10 @@ b2_backup() {
 	rc=1
 	_b2_err=""
 	for _b2_attempt in 1 2 3; do
-		_b2_err=$(B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file upload --no-progress "$BUCKET" "$user.$backup_new_date.tar" "$_b2_remote_path" 2>&1 >/dev/null)
+		_b2_err=$(TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file upload --no-progress "$BUCKET" "$user.$backup_new_date.tar" "$_b2_remote_path" 2>&1 >/dev/null)
 		rc=$?
 		if [ "$rc" -ne 0 ] && printf '%s' "$_b2_err" | grep -qiE "invalid choice|unrecognized|unknown|usage:"; then
-			_b2_err=$(B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 upload-file --noProgress "$BUCKET" "$user.$backup_new_date.tar" "$_b2_remote_path" 2>&1 >/dev/null)
+			_b2_err=$(TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 upload-file --noProgress "$BUCKET" "$user.$backup_new_date.tar" "$_b2_remote_path" 2>&1 >/dev/null)
 			rc=$?
 		fi
 		if [ "$rc" -eq 0 ]; then
@@ -103,7 +108,7 @@ b2_backup() {
 	fi
 
 	# Checking retention (compatible with both B2 CLI v4 b2:// URI and v3 positional bucket)
-	backup_list=$({ B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null || B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null; } | awk -v user="$user" '
+	backup_list=$({ TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null || TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null; } | awk -v user="$user" '
 		$NF ~ ("(^|/)" user "/" user "\\.[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\\.tar$") {
 			archive = $NF
 			sub(/^.*\//, "", archive)
@@ -115,7 +120,7 @@ b2_backup() {
 		backups_rm_number=$((backups_count - BACKUPS))
 		echo "$backup_list" | head -n "$backups_rm_number" | while IFS='|' read -r backup_archive backup_id backup_file_name; do
 			[ -z "$backup_id" ] && continue
-			if B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 delete-file-version "$backup_file_name" "$backup_id" > /dev/null 2>&1; then
+			if TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 delete-file-version "$backup_file_name" "$backup_id" > /dev/null 2>&1; then
 				echo -e "$(date "+%F %T") Rotated b2 backup: $backup_file_name"
 			else
 				echo -e "$(date "+%F %T") Failed to rotate b2 backup: $backup_file_name"
@@ -125,15 +130,19 @@ b2_backup() {
 }
 
 b2_download() {
-	# hestia-custom-b2-v5.2-download
+	# hestia-custom-b2-v5.5-download
 	source_conf "$HESTIA/conf/b2.backup.conf"
+	_b2_tmpdir="${TMPDIR:-/tmp}"
+	if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+		_b2_tmpdir="/var/cache/b2-staticx"
+	fi
 
 	_bkp_root="${BACKUP%/}"
 	if [ -z "$_bkp_root" ] || [ ! -d "$_bkp_root" ] || ! cd "$_bkp_root"; then
 		check_result "$E_NOTEXIST" "Failed to enter backup directory $_bkp_root"
 	fi
 
-	_b2_remote=$({ B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive 2>/dev/null || B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive 2>/dev/null; } | awk -v usr="$user" -v target="$1" '
+	_b2_remote=$({ TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive 2>/dev/null || TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive 2>/dev/null; } | awk -v usr="$user" -v target="$1" '
 		{
 			line = $0
 			base = line
@@ -154,24 +163,28 @@ b2_download() {
 	')
 	if [ -n "$_b2_remote" ]; then
 		for _b2_attempt in 1 2 3; do
-			if B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file download --no-progress "b2://$BUCKET/$_b2_remote" "$1" > /dev/null 2>&1 || \
-			   B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 download-file-by-name --noProgress "$BUCKET" "$_b2_remote" "$1" > /dev/null 2>&1; then
+			if TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file download --no-progress "b2://$BUCKET/$_b2_remote" "$1" > /dev/null 2>&1 || \
+			   TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 download-file-by-name --noProgress "$BUCKET" "$_b2_remote" "$1" > /dev/null 2>&1; then
 				return 0
 			fi
 			[ "$_b2_attempt" -lt 3 ] && sleep 5
 		done
 	fi
-	if ! B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file download --no-progress "b2://$BUCKET/$user/$1" "$1" > /dev/null 2>&1 && \
-	   ! B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 download-file-by-name --noProgress "$BUCKET" "$user/$1" "$1" > /dev/null 2>&1; then
+	if ! TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 file download --no-progress "b2://$BUCKET/$user/$1" "$1" > /dev/null 2>&1 && \
+	   ! TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 download-file-by-name --noProgress "$BUCKET" "$user/$1" "$1" > /dev/null 2>&1; then
 		check_result "$E_CONNECT" "b2 failed to download $user.$1"
 	fi
 }
 
 b2_delete() {
-	# hestia-custom-b2-v5.2-delete
+	# hestia-custom-b2-v5.5-delete
 	source_conf "$HESTIA/conf/b2.backup.conf"
+	_b2_tmpdir="${TMPDIR:-/tmp}"
+	if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+		_b2_tmpdir="/var/cache/b2-staticx"
+	fi
 
-	{ B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null || B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null; } | awk -v usr="$1" -v target="$2" '
+	{ TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null || TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null; } | awk -v usr="$1" -v target="$2" '
 		{
 			path = $NF
 			base = path
@@ -189,7 +202,7 @@ b2_delete() {
 		}
 	' | while IFS='|' read -r _did _dpath; do
 		[ -n "$_did" ] || continue
-		B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 delete-file-version "$_dpath" "$_did" > /dev/null 2>&1
+		TMPDIR="$_b2_tmpdir" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 delete-file-version "$_dpath" "$_did" > /dev/null 2>&1
 	done
 }
 PATCH_EOF
@@ -214,9 +227,9 @@ PATCH_EOF
 
     rm -f "$repl_file" 2>/dev/null
 
-    if grep -q "hestia-custom-b2-v5.4-verify" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
+    if grep -q "hestia-custom-b2-v5.5-staticx-tmpdir" "$temp" 2>/dev/null && bash -n "$temp" 2>/dev/null; then
         mv "$temp" "$script" && chmod 755 "$script"
-        _log "[$(date)] : Patched b2_backup/b2_download/b2_delete (v5.4 verify + retry + global log sync + B2 CLI v4/v3)"
+        _log "[$(date)] : Patched b2_backup/b2_download/b2_delete (v5.5 staticx tmpdir + verify + retry + global log sync + B2 CLI v4/v3)"
         return 0
     fi
 

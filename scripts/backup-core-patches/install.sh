@@ -61,6 +61,24 @@ fi
 echo "  -> Installed optional native retention hook: v-prune-backups"
 echo "  -> Installed backup integrity verifier: v-verify-backups"
 echo "  -> Installed Restic incremental & Master Key manager: v-restic-manager"
+
+# 2.3 Isolate Backblaze B2 StaticX runtime extraction outside world-writable /tmp
+install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null || true
+if [ -x /usr/local/bin/b2 ] && [ -d /usr/local/sbin ]; then
+    cat > /usr/local/sbin/b2 << 'B2_SHIM_EOF'
+#!/usr/bin/env bash
+# Managed by hestiacp-useful-tools: isolate Backblaze B2 StaticX extraction from /tmp
+_b2_tmp="${TMPDIR:-/tmp}"
+if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+    _b2_tmp="/var/cache/b2-staticx"
+fi
+TMPDIR="$_b2_tmp" exec /usr/local/bin/b2 "$@"
+B2_SHIM_EOF
+    chown root:root /usr/local/sbin/b2
+    chmod 0755 /usr/local/sbin/b2
+    echo "  -> Installed B2 StaticX TMPDIR isolation shim: /usr/local/sbin/b2 -> /var/cache/b2-staticx"
+fi
+
 "$HESTIA_BIN/v-verify-backups" --quiet >/dev/null 2>&1 || true
 
 # 3. Apply core Hestia patches (B2 paths, symlink delete, v-backup-user post-hook)

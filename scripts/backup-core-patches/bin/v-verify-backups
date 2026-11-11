@@ -179,9 +179,13 @@ if [[ ",${BACKUP_SYSTEM}," == *",b2,"* ]] || [ -f "$HESTIA/conf/b2.backup.conf" 
         elif ! command -v b2 >/dev/null 2>&1; then
             BACKEND_ERROR="B2_CLI_MISSING"
         else
+            b2_tmpdir="${TMPDIR:-/tmp}"
+            if [ "$(id -u)" -eq 0 ] && install -d -m 0700 -o root -g root /var/cache/b2-staticx 2>/dev/null; then
+                b2_tmpdir="/var/cache/b2-staticx"
+            fi
             b2_raw=""
-            if ! b2_raw=$(B2_ACCOUNT_INFO="$tmp_b2info" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null) && \
-               ! b2_raw=$(B2_ACCOUNT_INFO="$tmp_b2info" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null); then
+            if ! b2_raw=$(TMPDIR="$b2_tmpdir" B2_ACCOUNT_INFO="$tmp_b2info" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "b2://$BUCKET" --recursive --long 2>/dev/null) && \
+               ! b2_raw=$(TMPDIR="$b2_tmpdir" B2_ACCOUNT_INFO="$tmp_b2info" B2_APPLICATION_KEY_ID="$B2_KEYID" B2_APPLICATION_KEY="$B2_KEY" b2 ls "$BUCKET" --recursive --long 2>/dev/null); then
                 BACKEND_ERROR="B2_BUCKET_LIST_FAILED"
             else
                 printf '%s\n' "$b2_raw" | awk 'NF >= 6 && $NF ~ /\.tar$/ { print $(NF-1) "|" $NF }' > "$tmp_remote"
