@@ -53,7 +53,7 @@ EOF
 
 for arg in "$@"; do
     case "$arg" in
-        --init-master-key|--enroll|--run-daily|--status|--export-tar|--dump-tar)
+        --init-master-key|--enroll|--run-daily|--status|--export-tar|--dump-tar|--web-download)
             if [ -n "$ACTION" ] && [ "$ACTION" != "$arg" ]; then
                 echo "ERROR: Specify only one action flag." >&2
                 exit 2
@@ -638,7 +638,7 @@ do_export_tar() {
         exit 1
     fi
     chmod 0640 "$output_tar" 2>/dev/null || true
-    chown root:hestiaweb "$output_tar" 2>/dev/null || true
+    chown hestiaweb:hestiaweb "$output_tar" 2>/dev/null || chown root:hestiaweb "$output_tar" 2>/dev/null || true
 
     # 4. Optionally register in data/users/<user>/backup.conf so it appears in HestiaCP /list/backup/
     local u_dir="$HESTIA/data/users/$user"
@@ -652,10 +652,71 @@ do_export_tar() {
             new_cnt="$(grep -c "BACKUP=" "$u_dir/backup.conf" 2>/dev/null || echo 1)"
             sed -i "s/^U_BACKUPS=.*/U_BACKUPS='$new_cnt'/" "$u_dir/user.conf" 2>/dev/null || true
         fi
+        if [ -x "$BIN/v-add-user-notification" ]; then
+            "$BIN/v-add-user-notification" "$user" "Restic snapshot exported" "<p>Restic snapshot <code>$snapshot</code> was exported to <code>$archive_name</code> and is ready for download in <b>Backups</b>.</p>" >/dev/null 2>&1 || true
+        fi
         echo "[OK] Registered $archive_name in $u_dir/backup.conf (visible in HestiaCP BACKUP tab for instant Download/Restore)."
     fi
 
     echo "[OK] Exported HestiaCP-compatible archive: $output_tar ($(du -sh "$output_tar" | cut -f1))"
+    [ -n "${EXPORT_STAGE_DIR:-}" ] && rm -rf "$EXPORT_STAGE_DIR" 2>/dev/null || true
+    EXPORT_STAGE_DIR=""
+}
+
+do_web_download() {
+    load_hestia_restic_conf
+    local user="${POSITIONAL_ARGS[0]:-}"
+    local snapshot="${POSITIONAL_ARGS[1]:-latest}"
+    if [ -z "$user" ] || [[ ! "$user" =~ ^[A-Za-z0-9._-]+$ ]] || [[ ! "$snapshot" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "ERROR|Invalid user or snapshot"
+        exit 2
+    fi
+    local pw_file=""
+    if ! pw_file="$(resolve_restic_password_file "$user")"; then
+        echo "ERROR|Missing Restic key for $user"
+        exit 1
+    fi
+    local backup_root="${BACKUP:-/backup}"
+    local bconf_raw=""
+    bconf_raw="$(restic --repo "${REPO%/}/$user" --password-file "$pw_file" --no-lock dump "$snapshot" "$HESTIA_HOME_ROOT/$user/backup/backup.conf" 2>/dev/null || true)"
+    if [ -z "$bconf_raw" ]; then
+        echo "ERROR|Unable to read snapshot metadata"
+        exit 1
+    fi
+    local b_date b_time
+    b_date="$(printf '%s\n' "$bconf_raw" | sed -nE "s/.*(^|[[:space:]])DATE='([^']*)'.*/\2/p" | tail -n 1)"
+    b_time="$(printf '%s\n' "$bconf_raw" | sed -nE "s/.*(^|[[:space:]])TIME='([^']*)'.*/\2/p" | tail -n 1)"
+    local ts_slug="${b_date}_${b_time//:/-}"
+    local archive_name="${user}.${ts_slug}.tar"
+    local target_tar="${backup_root%/}/$archive_name"
+
+    if [ -s "$target_tar" ]; then
+        chmod 0640 "$target_tar" 2>/dev/null || true
+        chown hestiaweb:hestiaweb "$target_tar" 2>/dev/null || true
+        echo "READY|$archive_name"
+        exit 0
+    fi
+
+    local u_disk=0
+    if [ -f "$HESTIA/data/users/$user/user.conf" ]; then
+        u_disk="$(extract_kv_from_conf "$HESTIA/data/users/$user/user.conf" "U_DISK")"
+    fi
+    [[ "$u_disk" =~ ^[0-9]+$ ]] || u_disk=0
+
+    # Accounts <= 500 MB export synchronously in a few seconds for instant 1-click browser download
+    if [ "$u_disk" -le 500 ]; then
+        if do_export_tar >/dev/null 2>&1 && [ -s "$target_tar" ]; then
+            echo "READY|$archive_name"
+            exit 0
+        fi
+        echo "ERROR|Failed to export snapshot $snapshot"
+        exit 1
+    fi
+
+    # Larger accounts (> 500 MB) export asynchronously in background to prevent PHP/Nginx HTTP timeouts
+    nohup "$BIN/v-restic-manager" --export-tar "$user" "$snapshot" >> "$HESTIA_LOG" 2>&1 </dev/null &
+    echo "QUEUED|$archive_name"
+    exit 0
 }
 
 case "$ACTION" in
@@ -665,4 +726,5 @@ case "$ACTION" in
     --run-daily)       do_run_daily ;;
     --dump-tar)        do_dump_tar ;;
     --export-tar)      do_export_tar ;;
+    --web-download)    do_web_download ;;
 esac

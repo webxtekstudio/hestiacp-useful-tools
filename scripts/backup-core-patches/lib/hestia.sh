@@ -511,6 +511,92 @@ patch_cron_rm_silence() {
     return 1
 }
 
+# Phase 5: Install Restic Snapshot .tar Download endpoint & UI button
+patch_restic_web_download_ui() {
+    local dl_dir="$HESTIA/web/download/backup/incremental"
+    local dl_index="$dl_dir/index.php"
+    local tpl="$HESTIA/web/templates/pages/list_backup_incremental.php"
+    [ -d "$HESTIA/web" ] || return 0
+
+    mkdir -p "$dl_dir"
+    cat > "$dl_index" << 'PHP_EOF'
+<?php
+use function Hestiacp\quoteshellarg\quoteshellarg;
+
+ob_start();
+include $_SERVER["DOCUMENT_ROOT"] . "/inc/main.php";
+
+// Check token
+verify_csrf($_GET);
+
+if ($read_only === true || empty($_GET["snapshot"])) {
+	header("Location: /list/backup/incremental/");
+	exit();
+}
+
+$snapshot = quoteshellarg($_GET["snapshot"]);
+exec(
+	HESTIA_CMD . "v-restic-manager --web-download " . $user . " " . $snapshot,
+	$output,
+	$return_var,
+);
+
+$last_line = !empty($output) ? trim(end($output)) : "";
+if ($return_var === 0 && strpos($last_line, "READY|") === 0) {
+	$archive = substr($last_line, 6);
+	if (
+		$_SESSION["userContext"] === "admin" ||
+		(!empty($_SESSION["user"]) && strpos($archive, $_SESSION["user"] . ".") === 0)
+	) {
+		header("Content-type: application/x-tar");
+		header('Content-Disposition: attachment; filename="' . $archive . '";');
+		header("X-Accel-Redirect: /backup/" . $archive);
+		exit();
+	}
+}
+
+if ($return_var === 0 && strpos($last_line, "QUEUED|") === 0) {
+	$_SESSION["error_msg"] = _(
+		"Export of Restic snapshot to .tar archive has started in the background. It will appear in your Backups list shortly.",
+	);
+	header("Location: /list/backup/");
+	exit();
+}
+
+$_SESSION["error_msg"] = !empty($output)
+	? implode("<br>", $output)
+	: _("Error: Unable to export Restic snapshot.");
+header("Location: /list/backup/incremental/");
+exit();
+PHP_EOF
+    chown root:root "$dl_index" 2>/dev/null || true
+    chmod 0644 "$dl_index" 2>/dev/null || true
+
+    if [ -f "$tpl" ] && ! grep -q "hestia-custom-restic-download-btn" "$tpl" 2>/dev/null; then
+        [ ! -f "${tpl}.original" ] && cp -f "$tpl" "${tpl}.original" 2>/dev/null || true
+        local temp
+        temp=$(mktemp /run/patch-restic-ui.XXXXXX) || return 1
+        awk '
+            /fa-folder-open/ && !inserted {
+                print "\t\t\t\t\t\t<!-- hestia-custom-restic-download-btn -->"
+                print "\t\t\t\t\t\t<li class=\"units-table-row-action shortcut-d\" data-key-action=\"href\">"
+                print "\t\t\t\t\t\t\t<a href=\"/download/backup/incremental/?<?= tohtml(http_build_query([\"snapshot\" => $value[\x27short_id\x27], \"token\" => $_SESSION[\"token\"]])) ?>\" title=\"<?= tohtml( _(\"Download\")) ?>\"><i class=\"fas fa-file-arrow-down icon-lightblue icon-dim\"></i></a>"
+                print "\t\t\t\t\t\t</li>"
+                inserted = 1
+            }
+            { print }
+        ' "$tpl" > "$temp"
+        if grep -q "hestia-custom-restic-download-btn" "$temp" 2>/dev/null; then
+            chmod 0644 "$temp"
+            mv -f "$temp" "$tpl"
+            _log "[$(date)] : Patched list_backup_incremental.php (added Restic .tar Download button)"
+        else
+            rm -f "$temp"
+        fi
+    fi
+    return 0
+}
+
 # ── Entry point ──────────────────────────────────────────────────────
 apply_hestia_patches() {
     _log "[$(date)] : Applying Hestia patches..."
@@ -523,5 +609,6 @@ apply_hestia_patches() {
     patch_v_backup_users_notify || true
     patch_v_backup_users_retention || true
     patch_cron_rm_silence || true
+    patch_restic_web_download_ui || true
     return 0
 }
