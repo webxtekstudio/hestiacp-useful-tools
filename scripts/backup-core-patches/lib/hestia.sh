@@ -594,6 +594,37 @@ PHP_EOF
             rm -f "$temp"
         fi
     fi
+
+    if [ -f "$tpl" ] && ! grep -q "/list/backup/exclusions/" "$tpl" 2>/dev/null; then
+        local temp_tb
+        temp_tb=$(mktemp /run/patch-restic-tb.XXXXXX) || return 1
+        awk '
+            /<div class="toolbar-buttons">/ {
+                print
+                print "\t\t\t<a class=\"button button-secondary button-back js-button-back\" href=\"/list/backup/\">"
+                print "\t\t\t\t<i class=\"fas fa-arrow-left icon-blue\"></i><?= tohtml( _(\"Back\")) ?>"
+                print "\t\t\t</a>"
+                next
+            }
+            /Create Snapshot/ {
+                print
+                getline
+                print
+                print "\t\t\t<a href=\"/list/backup/exclusions/\" class=\"button button-secondary\">"
+                print "\t\t\t\t<i class=\"fas fa-folder-minus icon-orange\"></i><?= tohtml( _(\"Backup Exclusions\")) ?>"
+                print "\t\t\t</a>"
+                next
+            }
+            { print }
+        ' "$tpl" > "$temp_tb"
+        if grep -q "/list/backup/exclusions/" "$temp_tb" 2>/dev/null; then
+            chmod 0644 "$temp_tb"
+            mv -f "$temp_tb" "$tpl"
+            _log "[$(date)] : Patched list_backup_incremental.php (added Back and Backup Exclusions toolbar buttons)"
+        else
+            rm -f "$temp_tb"
+        fi
+    fi
     return 0
 }
 
