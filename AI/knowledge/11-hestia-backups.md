@@ -80,9 +80,10 @@ Interpretation rules:
   - when `tar_schedule=monthly` (`30 03 1 * *`), `.tar` archives are healthy up to `35` days old (`tar_max_age_days=35`) — do NOT falsely flag a 10–30 day old monthly `.tar` archive as a missed weekly backup!
   - when `tar_schedule=weekly`, `.tar` archives are healthy up to `8` days old
   - when `restic_enabled=yes`, daily Restic snapshots must be `<= 36` hours old (`restic_verified_users == active_users` and `restic_failed_users=0`)
-- remote upload events and verified Restic snapshot timestamps count as successful backup evidence
+- Evaluate TAR and Restic freshness separately: a recent TAR upload must not conceal an old daily Restic snapshot.
+- `B2_VERIFIED_OK` / `BACKUP_VERIFIED_OK` establishes metadata checks only. Read `checked_at`, `verification_scope`, `data_integrity` and `restore_test`; an old success is not current evidence and does not prove a working restore.
 
-### Restic & Master Recovery Key Operations (`v-restic-manager`)
+### Restic & Secondary Recovery Password Operations (`v-restic-manager`)
 
 - Check Restic configuration, Master Key presence, and per-user repository status (safe — never prints keys):
   ```bash
@@ -103,6 +104,16 @@ Interpretation rules:
   sudo -n /usr/local/hestia/bin/v-restic-manager --export-tar <user> [snapshot_id|latest]
   sudo -n /usr/local/hestia/bin/v-restic-manager --dump-tar <user> latest /tmp/<user>-raw.tar
   ```
+
+### Recovery password and provider security
+
+The toolkit keeps a secondary recovery password on the server at `/etc/hestiacp-restic-master.key` (0400) so future repositories can be enrolled automatically. Keep an independently protected offline copy and separately recoverable provider credentials. Do not read or print their contents into AI conversations or logs.
+
+`hard_delete=false` is rclone behavior, not an immutable retention policy. A credential with `deleteFiles` may permanently remove unprotected versions. Check actual provider capabilities and Object Lock mode/retention; a 14-day hidden-version lifecycle is not a guaranteed defense against a stolen deletion-capable key.
+
+### Export behavior
+
+Exports use per-user locks and temporary files beside the destination. They publish the final TAR only after successful construction and validation. A concurrent web request queues while the user export is running. Existing invalid cached archives are rebuilt. Restored directories used as packing roots must remain inside the isolated staging tree; symlinks cannot redirect root to live files outside that snapshot. Local exports are retained until explicitly removed; there is no automatic 24-hour deletion job in this helper.
 
 ## 5. Manual Operations
 
@@ -183,3 +194,15 @@ sudo -n ps aux | grep "v-backup" | grep -v grep
 ```bash
 sudo -n rm -f /usr/local/hestia/data/queue/backup.pipe
 ```
+
+<a id="recovery-drill"></a>
+## Recovery drill
+
+1. Use a disposable Hestia installation or isolated recovery VM with no live customer accounts. Disable outbound mail and scheduled application jobs in the recovery environment. Do not run restore commands against the production account as a test.
+2. Recover provider access and the secondary recovery password from their independent storage. Test an explicit older snapshot ID, not only `latest`. Do not print either credential.
+3. Check repository structure with `restic check`; use `check --read-data` or a rotating `--read-data-subset` policy when a data read is intended. These reads consume provider bandwidth and time.
+4. Run `v-restic-manager --export-tar <user> <snapshot> <output.tar> --no-register` on the recovery host, using the recovered password file and repository configuration. Inspect the TAR and its internal archives.
+5. Restore it with the recovery installation's `v-restore-user`. Verify file hashes, database import and queries, HTTP responses using local host mapping, mailbox contents, DNS/configuration and cron definitions. Validate those components before enabling jobs or outbound mail.
+6. Record the source revision, snapshot ID, recovery-host version, checked components, elapsed time and uncovered components. Archive listing, gzip CRC tests and an HTTP 200 alone are not a complete recovery result.
+
+References: [Restic integrity checks](https://restic.readthedocs.io/en/stable/045_working_with_repos.html#checking-integrity-and-consistency), [rclone B2 deletion behavior](https://rclone.org/b2/#b2-hard-delete), [Backblaze key capabilities](https://www.backblaze.com/docs/cloud-storage-application-key-capabilities).

@@ -1041,87 +1041,7 @@ INC_CTRL_EOF
     if [ -f "$HESTIA/bin/v-change-user-package" ] && ! grep -q "U_BACKUPS_INCREMENTAL=" "$HESTIA/bin/v-change-user-package" 2>/dev/null; then
         sed -i '/^U_BACKUPS=/a U_BACKUPS_INCREMENTAL=\x27${U_BACKUPS_INCREMENTAL:-0}\x27' "$HESTIA/bin/v-change-user-package"
     fi
-    if [ -f "$HESTIA/bin/v-list-user-backups-restic" ] && ! grep -q "U_BACKUPS_INCREMENTAL" "$HESTIA/bin/v-list-user-backups-restic" 2>/dev/null; then
-        cat > "$HESTIA/bin/v-list-user-backups-restic" << 'VLUBR_EOF'
-#!/bin/bash
-# info: backup system user with all its objects
-# options: USER NOTIFY
-#
-# example: v-backup-user admin yes
-#
-# This function is used for backing up user with all its domains and databases.
-
-#----------------------------------------------------------#
-#                Variables & Functions                     #
-#----------------------------------------------------------#
-
-# Argument definition
-user=$1
-format=${2-plain}
-# Includes
-# shellcheck source=/etc/hestiacp/hestia.conf
-source /etc/hestiacp/hestia.conf
-# shellcheck source=/usr/local/hestia/func/main.sh
-source $HESTIA/func/main.sh
-# shellcheck source=/usr/local/hestia/func/domain.sh
-source $HESTIA/func/domain.sh
-# shellcheck source=/usr/local/hestia/func/db.sh
-source $HESTIA/func/db.sh
-# shellcheck source=/usr/local/hestia/func/backup.sh
-source $HESTIA/func/backup.sh
-# load config file
-source_conf "$HESTIA/conf/hestia.conf"
-
-#----------------------------------------------------------#
-#                    Verifications                         #
-#----------------------------------------------------------#
-
-check_args '1' "$#" 'USER'
-is_format_valid 'user'
-is_system_enabled "$BACKUP_SYSTEM" 'BACKUP_SYSTEM'
-is_object_valid 'user' 'USER' "$user"
-is_object_unsuspended 'user' 'USER' "$user"
-
-# Perform verification if read-only mode is enabled
-check_hestia_demo_mode
-
-#----------------------------------------------------------#
-#                       Action                             #
-#----------------------------------------------------------#
-
-source_conf $HESTIA/conf/restic.conf
-
-function json_list() {
-	snapshots_json=$(restic --repo "${REPO%/}/$user" --password-file $USER_DATA/restic.conf --json snapshots)
-	if [ -n "$snapshots_json" ]; then
-		u_snapshots=$(printf '%s' "$snapshots_json" | grep -o '"short_id"' | wc -l)
-		if grep -q "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf"; then
-			update_user_value "$user" '$U_BACKUPS_INCREMENTAL' "$u_snapshots"
-		else
-			sed -i "s/^U_BACKUPS=/U_BACKUPS_INCREMENTAL='$u_snapshots'\nU_BACKUPS=/" "$USER_DATA/user.conf"
-		fi
-	fi
-	printf '%s\n' "$snapshots_json"
-}
-
-function plain_list() {
-	restic --repo "${REPO%/}/$user" --password-file $USER_DATA/restic.conf snapshots
-}
-
-# Listing data
-case $format in
-	json) json_list ;;
-	plain) plain_list ;;
-esac
-
-#----------------------------------------------------------#
-#                       Hestia                             #
-#----------------------------------------------------------#
-
-exit
-VLUBR_EOF
-        chmod 0755 "$HESTIA/bin/v-list-user-backups-restic"
-    fi
+    patch_restic_snapshot_counter || return 1
     return 0
 }
 
@@ -1139,4 +1059,52 @@ apply_hestia_patches() {
     patch_cron_rm_silence || true
     patch_restic_web_download_ui || true
     return 0
+}
+
+# Update only the known JSON-list function; preserve the rest of the upstream CLI.
+patch_restic_snapshot_counter() {
+    local cli="$HESTIA/bin/v-list-user-backups-restic"
+    [ -f "$cli" ] || return 0
+    local work patched
+    work=$(umask 077 && mktemp -d /run/hestia-restic-cli.XXXXXX) || return 1
+    patched=$(umask 077 && mktemp "${cli}.patch.XXXXXX") || { rm -rf -- "$work"; return 1; }
+    cat > "$work/function" << 'COUNTER_EOF'
+function json_list() {
+	# hestia-restic-counter-v2: preserve errors and validate JSON before updating
+	local snapshots_json u_snapshots
+	snapshots_json=$(restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json snapshots) || return $?
+	u_snapshots=$(printf '%s' "$snapshots_json" | jq -er 'if type == "array" and all(.[]; type == "object" and (.id | type == "string")) then length else error("Invalid Restic snapshot list") end') || return $?
+	if grep -q "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf"; then
+		update_user_value "$user" '$U_BACKUPS_INCREMENTAL' "$u_snapshots"
+	else
+		sed -i "s/^U_BACKUPS=/U_BACKUPS_INCREMENTAL='$u_snapshots'\nU_BACKUPS=/" "$USER_DATA/user.conf"
+	fi
+	printf '%s\n' "$snapshots_json"
+}
+COUNTER_EOF
+    if awk -v replacement="$work/function" '
+        /^function json_list\(\) \{/ {
+            while ((getline line < replacement) > 0) print line
+            close(replacement)
+            replacing = 1
+            found = 1
+            next
+        }
+        replacing && /^}/ { replacing = 0; next }
+        !replacing { print }
+        END { if (!found) exit 1 }
+    ' "$cli" > "$patched" && bash -n "$patched"; then
+        if ! cmp -s "$cli" "$patched"; then
+            chmod 0755 "$patched"
+            mv -f -- "$patched" "$cli"
+            _log "Patched Restic JSON counter error handling"
+        fi
+    else
+        _log "[WARN] Unsupported Restic JSON-list function; left CLI unchanged"
+        rm -f -- "$patched"
+        rm -rf -- "$work"
+        return 1
+    fi
+    rm -f -- "$patched"
+    rm -rf -- "$work"
 }

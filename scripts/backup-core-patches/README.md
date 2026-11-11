@@ -138,19 +138,19 @@ Instead of running heavy full `.tar` backups every night (or relying only on Res
 
 | Layer | Schedule | Bucket & Immutability (Dummy Example) | Retention & Purpose |
 | :--- | :--- | :--- | :--- |
-| **Layer 1 — Daily Restic (`v-restic-manager --run-daily`)** | `30 2 * * *` (Daily `02:30`) | `my-hestia-restic-backups` (**`Object Lock: Disabled`**, `rclone` `hard_delete = false`, B2 Custom Lifecycle: `daysFromHidingToDeleting = 14`, `unfinishedLargeFiles = 3`) | `7 daily + 4 weekly + 3 monthly` (~90 days block-deduplicated history for ~1.2× single-backup storage + 1-click Web Panel granular restore & `.tar` download) |
-| **Layer 2 — Monthly `.tar` (`v-backup-users`)** | `30 3 1 * *` (1st of month `03:30`) | `my-hestia-tar-backups` (**`Object Lock: Default 175 Days`**, B2 Custom Lifecycle: `daysFromUploadingToHiding = 180`, `daysFromHidingToDeleting = 1`, Hestia Package `Backups = 6`) | Standalone immutable WORM `.tar` archives immune even to root/API sabotage, auto-expiring after 6 months (`v-verify-backups` auto-reconciles `backup.conf` when old archives expire) |
+| **Layer 1 — Daily Restic (`v-restic-manager --run-daily`)** | `30 2 * * *` (Daily `02:30`) | `my-hestia-restic-backups` (**`Object Lock: Disabled`**, `rclone` `hard_delete = false`, B2 Custom Lifecycle: `daysFromHidingToDeleting = 14`, `unfinishedLargeFiles = 3`) | `7 daily + 4 weekly + 3 monthly` (calendar-based retention; actual history and storage depend on snapshot frequency and data churn) |
+| **Layer 2 — Monthly `.tar` (`v-backup-users`)** | `30 3 1 * *` (1st of month `03:30`) | `my-hestia-tar-backups` (**`Object Lock: Default 175 Days`**, B2 Custom Lifecycle: `daysFromUploadingToHiding = 180`, `daysFromHidingToDeleting = 1`, Hestia Package `Backups = 6`) | Standalone `.tar` versions protected for their configured Object Lock period; lifecycle deletion occurs only after retention permits it (`v-verify-backups` auto-reconciles `backup.conf` when old archives expire) |
 
 > ⚠️ **CRITICAL — Why Two Separate Buckets & Why Object Lock Must Be Disabled on the Restic Bucket:**
-> - **Monthly `.tar` Bucket (`my-hestia-tar-backups`):** Uses **Object Lock (`175 days`)** because `.tar` archives are written once and never modified until they expire after 180 days. Set your HestiaCP Hosting Package **Backups** limit to **`6`** (or higher) so HestiaCP never attempts to delete a locked `.tar` archive before the 6-month Object Lock expires.
-> - **Daily Restic Bucket (`my-hestia-restic-backups`):** **MUST have Object Lock (File Lock) DISABLED.** Restic needs to add/update key files in `keys/` (when enrolling the Master Recovery Key) and run `restic forget --prune` to repack and delete old pack files. If Object Lock is enabled on the Restic bucket, `restic prune` and key changes will fail with `403 Access Denied (File Lock)`. Instead, protect the Restic bucket with `hard_delete = false` in `rclone.conf` + a **14-day hidden-file lifecycle rule** (`daysFromHidingToDeleting = 14`).
+> - **Monthly `.tar` Bucket (`my-hestia-tar-backups`):** Configure retention for each new object version and verify the actual mode and expiry. A package limit of `6` aligns normal monthly runs with this example, but manual/extra runs may reach that count before older versions unlock. Object Lock can therefore make an attempted deletion fail; monitor it rather than assuming it cannot happen.
+> - **Daily Restic Bucket (`my-hestia-restic-backups`):** Use a mutable repository with no default or per-object retention on Restic packs. `forget --prune` needs to delete expired objects and can fail on locked versions. Enrolling another password creates a new key file. The bucket-level Object Lock feature alone is not the same as active per-object retention, and Backblaze does not allow that feature to be disabled once enabled. Prefer a separate bucket designed for the mutable repository. Normal rclone deletions can retain hidden versions with `hard_delete=false` and a lifecycle rule, but this is not protection against a deletion-capable credential.
 
 #### Cloud Storage Permissions & Multi-Provider Examples (Dummy Values)
 
 Always create **two separate, bucket-scoped Application Keys / IAM tokens** (one for the `.tar` bucket, one for the Restic bucket):
 
-1. **Backblaze B2 (Recommended — ~$0.005/GB/month):**
-   - **Application Key Permissions:** Select **`Read and Write`**, restrict to the specific bucket (`my-hestia-tar-backups` or `my-hestia-restic-backups`), and **check `Allow List All Bucket Names`** (required by both `b2` CLI v4 and `rclone` to resolve the bucket name to its internal ID).
+1. **Backblaze B2 (example configuration; consult current provider pricing):**
+   - **Application Key Permissions:** Restrict each key to its bucket/prefix and inspect the actual capabilities. Grant list/read/write as required by the chosen client; grant permanent deletion only when needed. `Allow List All Bucket Names` is a separate compatibility capability, not blanket access to other buckets' contents. Do not grant key administration, bucket administration or governance bypass to routine backup credentials.
    - **Bucket 1 (`my-hestia-tar-backups`) Lifecycle Settings:**
      - Object Lock: **Enabled (`Default retention: 175 days`)**
      - Lifecycle Rules → *Use custom lifecycle rules*:
@@ -212,10 +212,12 @@ Always create **two separate, bucket-scoped Application Keys / IAM tokens** (one
    ```bash
    v-add-backup-host-restic 'rclone:b2restic:my-hestia-restic-backups' -1 7 4 3 -1
    ```
-4. **Generate & save your offline Master Recovery Key (`0400 /etc/hestiacp-restic-master.key`):**
+4. **Generate a secondary recovery password and save a separate offline copy:**
    ```bash
    v-restic-manager --init-master-key --print
-   # Save the printed 48-character key in Bitwarden / 1Password!
+   # Run --print only in a trusted terminal; never capture the value in chat or logs.
+   # Store an independent copy securely off the server. The server copy remains at
+   # /etc/hestiacp-restic-master.key (0400 root:root) for enrollment of future users.
    ```
 5. **Run the initial snapshot & enroll the Master Key across all active users:**
    ```bash
@@ -228,7 +230,7 @@ Always create **two separate, bucket-scoped Application Keys / IAM tokens** (one
    30 2 * * * root /usr/local/hestia/bin/v-restic-manager --run-daily >> /var/log/hestia/restic-daily.log 2>&1
    ```
 
-#### 1-Click Web Panel `.tar` Download & CLI Export (`--export-tar` / `--dump-tar` / `--web-download`)
+#### Web Panel `.tar` Download & CLI Export (`--export-tar` / `--dump-tar` / `--web-download`)
 
 Out of the box, HestiaCP's **Backups → Incremental Backups** (`/list/backup/incremental/`) page only lets users browse or restore a Restic snapshot in place — it has no button to download a `.tar` archive or migrate an account to another HestiaCP server.
 
@@ -236,10 +238,10 @@ Because `v-backup-user-config` already stages `hestia/`, `pam/`, `db/`, `dns/`, 
 
 1. **Web Panel Download Button (`fa-file-arrow-down`), Top Menu `Snapshots: X` Counter, Sorting & In-Page Search:**
    - Injects a **Download (`.tar`)** action icon on every snapshot row in `/list/backup/incremental/` (plus **Back** and **Backup Exclusions** toolbar buttons).
-   - Adds a second stats line (**`snapshots: X`**) under **`BACKUP`** in the top navigation bar (`panel.php`), backed by `U_BACKUPS_INCREMENTAL` in `user.conf` (`< 1 ms`, zero remote Restic queries on page loads).
+   - Adds a second stats line (**`snapshots: X`**) under **`BACKUP`** in the top navigation bar (`panel.php`), backed by `U_BACKUPS_INCREMENTAL` in `user.conf` (read from cached account metadata).
    - Adds client-side **Sort by (`Date` / `Size` / `Name` / `Type`)** and in-page **Search (`?q=...`)** across `/list/backup/`, `/list/backup/incremental/`, and the snapshot file browser (`/list/backup/incremental/?snapshot=...&browse=yes`).
    - For accounts `<= 500 MB` (or already-exported snapshots), clicking **Download** reconstructs `/backup/<user>.<date>.tar` in a few seconds and immediately streams it to the browser via Nginx `X-Accel-Redirect`.
-   - For multi-gigabyte accounts (`> 500 MB`), clicking **Download** queues the export in the background so the browser never hits an HTTP/Cloudflare timeout, registers the resulting `.tar` in `/list/backup/`, and sends a HestiaCP bell notification when ready (with automatic 24-hour `/backup/` cleanup via `at now + 1 day`).
+   - Accounts above the synchronous threshold queue an export and receive a panel notification after completion. Exports for the same user are serialized. A TAR becomes downloadable only after it has been built and atomically published. Exported files occupy local backup space until explicitly deleted through Backups or an operator-managed retention policy; this helper does not schedule automatic 24-hour deletion.
 2. **CLI Export & Streaming (`--export-tar` / `--dump-tar`):**
 
 ```bash
@@ -255,7 +257,7 @@ v-restic-manager --dump-tar <username> latest /tmp/<username>-raw.tar [/home/<us
 
 #### Bare-Metal Emergency Restore (Total Server Loss — Using Only the Master Recovery Key)
 
-Even if the original HestiaCP server and all `/usr/local/hestia/data/users/*/restic.conf` files are completely destroyed, any user's Restic repository can be unlocked on a fresh HestiaCP server using only your offline Master Recovery Key (`/etc/hestiacp-restic-master.key`) and converted directly into a native HestiaCP `.tar` archive for `v-restore-user`:
+Even if the original HestiaCP server and all `/usr/local/hestia/data/users/*/restic.conf` files are completely destroyed, any user's Restic repository can be unlocked on a fresh HestiaCP server using a recovered secondary password, the repository URL and separate provider credentials, then exported into a native HestiaCP `.tar` archive for `v-restore-user`:
 
 ```bash
 # Option A — Reconstruct a native HestiaCP .tar archive using the Master Recovery Key and restore:
@@ -270,6 +272,15 @@ restic --password-file /path/to/master.key restore latest --target /restore/<use
 
 ---
 
+## Verification and recovery limits
+
+- `v-verify-backups` checks presence, size and freshness. Its status explicitly records `verification_scope=metadata`, `data_integrity=not_checked` and `restore_test=not_recorded`. A successful status is not a full data-integrity or recovery test.
+- The Restic path requires `jq`; invalid JSON or failed repository access must leave the last known snapshot counter unchanged.
+- `hard_delete = false` tells rclone to hide versions during normal deletion. It is not an access-control boundary: a key with `deleteFiles` can permanently delete unprotected versions. Check actual key capabilities, Object Lock mode, per-object retention and any governance-bypass capability. Do not grant unnecessary bucket/key administration permissions.
+- Use separate buckets for the mutable Restic repository and retained TAR versions. A mutable Restic repository must not receive a lifecycle rule that hides live pack files by upload age. Storage usage depends on data changes, retained versions, pruning and lifecycle processing; it has no fixed multiplier.
+- The recovery password is copied to the server for automatic enrollment. A separate off-server copy provides recovery availability, not protection against root reading the server copy. Keep provider credentials separately recoverable, and do not print secrets into AI prompts, tickets or logs.
+- Archive-layout and compression tests do not replace an isolated recovery drill. See the [backup knowledge manual](../../AI/knowledge/11-hestia-backups.md#recovery-drill).
+
 ## Architecture Reference
 
 The `install.sh` script applies idempotent patches to these files:
@@ -280,5 +291,5 @@ The `install.sh` script applies idempotent patches to these files:
 4. **`v-delete-user-backup`** -> Makes deletion follow organized backup symlinks safely.
 5. **`v-prune-backups`** -> Adds the dry-run-first retention engine used by the native `v-backup-users` hook.
 6. **`v-verify-backups`** -> Verifies remote (`b2` / `rclone`) and local `.tar` archives against `backup.conf` plus Restic incremental snapshots (`<= 36h`) after batch runs and single-user B2 retries.
-7. **`v-restic-manager`** -> Manages offline Master Recovery Key generation (`--init-master-key`), dual-key enrollment (`--enroll`), `0600` `restic.conf` hardening, `/home/<user>/backup` cleanup, and failure-only alert daily runs (`--run-daily`).
+7. **`v-restic-manager`** -> Manages secondary recovery password generation (`--init-master-key`), dual-key enrollment (`--enroll`), `0600` `restic.conf` hardening, `/home/<user>/backup` cleanup, and failure-only alert daily runs (`--run-daily`).
 8. **APT Auto-Healer (`/etc/apt/apt.conf.d/99hestia-custom-patches`)** -> Automatically re-runs `install.sh` via `DPkg::Post-Invoke` whenever `apt`/`dpkg` updates HestiaCP packages, ensuring custom core patches and fresh `.original` backups are preserved across every HestiaCP release without manual intervention.

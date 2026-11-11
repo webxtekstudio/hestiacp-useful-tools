@@ -118,13 +118,15 @@ if [ "${BACKUP_INCREMENTAL:-no}" = "yes" ] && [ -f "$HESTIA/conf/restic.conf" ];
         RESTIC_BACKEND_ERROR="RESTIC_CONFIG_INCOMPLETE"
     elif ! command -v restic >/dev/null 2>&1; then
         RESTIC_BACKEND_ERROR="RESTIC_CLI_MISSING"
+    elif ! command -v jq >/dev/null 2>&1; then
+        RESTIC_BACKEND_ERROR="RESTIC_JSON_PARSER_MISSING"
     fi
 fi
 
 tmp_remote=$(umask 077 && (mktemp /run/v-verify-backups.remote.XXXXXX 2>/dev/null || mktemp /tmp/v-verify-backups.remote.XXXXXX)) || exit 1
 tmp_out=$(umask 077 && (mktemp /run/v-verify-backups.out.XXXXXX 2>/dev/null || mktemp /tmp/v-verify-backups.out.XXXXXX)) || { rm -f "$tmp_remote"; exit 1; }
 tmp_b2info=$(umask 077 && (mktemp /run/v-verify-backups.b2.XXXXXX 2>/dev/null || mktemp /tmp/v-verify-backups.b2.XXXXXX)) || { rm -f "$tmp_remote" "$tmp_out"; exit 1; }
-trap 'rm -f "$tmp_remote" "$tmp_out" "$tmp_b2info" "${tmp_b2info}-wal" "${tmp_b2info}-shm" 2>/dev/null' EXIT INT TERM
+trap 'rm -f "$tmp_remote" "$tmp_out" "$tmp_b2info" "${tmp_b2info}-wal" "${tmp_b2info}-shm" "${tmp_publish:-}" 2>/dev/null' EXIT INT TERM
 
 extract_conf_val() {
     local line="$1" key="$2"
@@ -132,29 +134,30 @@ extract_conf_val() {
 }
 
 parse_restic_latest_json() {
-    local json_input="$1" compact sid raw_t epoch iso_utc
-    compact=$(printf '%s' "$json_input" | tr -d '\r\n\t ')
-    if [ "$compact" = "[]" ]; then
+    local json_input="$1" count records sid raw_t epoch iso_utc latest_epoch=0 latest_id="" latest_iso=""
+    if ! count=$(printf '%s' "$json_input" | jq -er 'if type == "array" and all(.[]; type == "object" and (.time | type == "string") and ((.short_id // .id) | type == "string")) then length else error("Invalid Restic snapshot list") end' 2>/dev/null); then
+        echo "PARSE_ERROR"
+        return 0
+    fi
+    if [ "$count" -eq 0 ]; then
         echo "EMPTY"
         return 0
     fi
-    [[ "$compact" == \[*\] ]] || { echo "PARSE_ERROR"; return 0; }
-    sid=$(printf '%s\n' "$compact" | sed -nE 's/.*"short_id":"([a-fA-F0-9]+)".*/\1/p' | tail -n 1)
-    if [ -z "$sid" ]; then
-        sid=$(printf '%s\n' "$compact" | sed -nE 's/.*"id":"([a-fA-F0-9]{8})[a-fA-F0-9]*".*/\1/p' | tail -n 1)
-    fi
-    raw_t=$(printf '%s\n' "$compact" | sed -nE 's/.*"time":"([^"]+)".*/\1/p' | tail -n 1)
-    if [ -z "$sid" ] || [ -z "$raw_t" ]; then
-        echo "PARSE_ERROR"
-        return 0
-    fi
-    epoch=$(date -d "$raw_t" +%s 2>/dev/null || echo "")
-    iso_utc=$(date -u -d "$raw_t" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
-    if [[ ! "$epoch" =~ ^[0-9]+$ ]] || [ -z "$iso_utc" ]; then
-        echo "PARSE_ERROR"
-        return 0
-    fi
-    echo "OK|${sid}|${epoch}|${iso_utc}"
+    records=$(printf '%s' "$json_input" | jq -r '.[] | [(.short_id // .id[0:8]), .time] | @tsv')
+    while IFS=$'\t' read -r sid raw_t; do
+        epoch=$(date -d "$raw_t" +%s 2>/dev/null || echo "")
+        iso_utc=$(date -u -d "$raw_t" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+        if [[ ! "$sid" =~ ^[a-fA-F0-9]+$ ]] || [[ ! "$epoch" =~ ^[0-9]+$ ]] || [ -z "$iso_utc" ]; then
+            echo "PARSE_ERROR"
+            return 0
+        fi
+        if [ "$epoch" -gt "$latest_epoch" ]; then
+            latest_epoch="$epoch"
+            latest_id="$sid"
+            latest_iso="$iso_utc"
+        fi
+    done <<< "$records"
+    echo "OK|${latest_id}|${latest_epoch}|${latest_iso}|${count}"
 }
 
 NOW_EPOCH=$(date +%s)
@@ -406,14 +409,16 @@ for user_dir in "$HESTIA/data/users"/*; do
                 user_restic_state="FAIL"
                 user_restic_msg="RESTIC_REPO_ACCESS_FAILED"
             else
-                u_snap_cnt=$(printf '%s' "$snap_json" | grep -o '"short_id"' | wc -l | tr -d '[:space:]')
-                [[ "$u_snap_cnt" =~ ^[0-9]+$ ]] || u_snap_cnt=0
-                if grep -q "^U_BACKUPS_INCREMENTAL=" "$user_conf" 2>/dev/null; then
-                    sed -i -E "s|^U_BACKUPS_INCREMENTAL='[^']*'|U_BACKUPS_INCREMENTAL='${u_snap_cnt}'|" "$user_conf" 2>/dev/null || true
-                elif grep -q "^U_BACKUPS=" "$user_conf" 2>/dev/null; then
-                    sed -i "s|^U_BACKUPS=|U_BACKUPS_INCREMENTAL='${u_snap_cnt}'\nU_BACKUPS=|" "$user_conf" 2>/dev/null || true
-                fi
                 snap_parsed=$(parse_restic_latest_json "$snap_json")
+                if [[ "$snap_parsed" == OK\|* ]] || [ "$snap_parsed" = EMPTY ]; then
+                    u_snap_cnt=0
+                    [[ "$snap_parsed" != OK\|* ]] || u_snap_cnt="${snap_parsed##*|}"
+                    if grep -q "^U_BACKUPS_INCREMENTAL=" "$user_conf" 2>/dev/null; then
+                        sed -i -E "s|^U_BACKUPS_INCREMENTAL='[^']*'|U_BACKUPS_INCREMENTAL='${u_snap_cnt}'|" "$user_conf" 2>/dev/null || true
+                    elif grep -q "^U_BACKUPS=" "$user_conf" 2>/dev/null; then
+                        sed -i "s|^U_BACKUPS=|U_BACKUPS_INCREMENTAL='${u_snap_cnt}'\nU_BACKUPS=|" "$user_conf" 2>/dev/null || true
+                    fi
+                fi
                 case "$snap_parsed" in
                     EMPTY)
                         if [ "$u_age_hours" -le "$MAX_RESTIC_AGE_HOURS" ]; then
@@ -425,7 +430,7 @@ for user_dir in "$HESTIA/data/users"/*; do
                         fi
                         ;;
                     OK\|*)
-                        IFS='|' read -r _ snap_id snap_epoch snap_iso <<< "$snap_parsed"
+                        IFS='|' read -r _ snap_id snap_epoch snap_iso _ <<< "$snap_parsed"
                         [[ "$snap_epoch" =~ ^[0-9]+$ ]] || snap_epoch=0
                         restic_age_hours=$(( (NOW_EPOCH - snap_epoch) / 3600 ))
                         [ "$restic_age_hours" -lt 0 ] && restic_age_hours=0
@@ -492,6 +497,9 @@ fi
 
 {
     echo "checked_at=${CHECKED_AT}"
+    echo "verification_scope=metadata"
+    echo "data_integrity=not_checked"
+    echo "restore_test=not_recorded"
     echo "backend=${BACKEND}"
     echo "tar_schedule=${TAR_SCHEDULE}"
     echo "tar_max_age_days=${MAX_AGE_DAYS}"
@@ -514,10 +522,12 @@ fi
     done
 } > "$tmp_out"
 
-mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || true
-chmod 0644 "$tmp_out"
-cp -f "$tmp_out" "$STATUS_FILE" 2>/dev/null || true
-chmod 0644 "$STATUS_FILE" 2>/dev/null || true
+mkdir -p "$(dirname "$STATUS_FILE")" || exit 1
+tmp_publish=$(umask 077 && mktemp "${STATUS_FILE}.tmp.XXXXXX") || exit 1
+if ! cat "$tmp_out" > "$tmp_publish" || ! chmod 0644 "$tmp_publish" || ! mv -f -- "$tmp_publish" "$STATUS_FILE"; then
+    echo "ERROR: Unable to publish backup verification status." >&2
+    exit 1
+fi
 
 if [ "$QUIET" != "TRUE" ]; then
     cat "$tmp_out"

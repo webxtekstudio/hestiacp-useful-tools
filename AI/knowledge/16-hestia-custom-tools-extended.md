@@ -168,3 +168,11 @@ Clones or updates configured Git repositories into user `/home/<user>/git/<repo>
 1. **Pull-Only Root Staging:** Network `git ls-remote` / `git fetch` / `git clone --bare` runs exclusively as `root` inside `/var/lib/hestiacp-github-mirror` using `/etc/hestiacp-github-mirror.token` (`Contents: Read-only` Fine-Grained PAT injected via transient `GIT_CONFIG_VALUE_0` HTTP header, never written to `.git/config` or command-line URLs).
 2. **Offline Tenant Repositories:** Local fetches/resets inside `/home/<user>/...` run as the unprivileged HestiaCP user with `protocol.allow=never`, `GIT_SSH_COMMAND=/bin/false`, and `core.hooksPath=/dev/null`.
 3. **Sanitized `.git/config` (`0700`):** Before and after each sync, `_sanitize_user_git_repo` atomically overwrites the tenant's `.git/config` (removing all `remote "origin"` URLs, hooks, filters, and `fsmonitor` directives) and locks the mirror directory to `0700 <user>:<user>`.
+
+## v-restic-manager and v-verify-backups
+
+`v-restic-manager` orchestrates snapshots, secondary recovery-password enrollment and TAR export. Exports are serialized per user and published atomically; retained exports consume local disk until removed. The recovery password has a server copy for enrollment and requires a separate offline copy.
+
+`v-verify-backups` publishes presence/size/freshness metadata atomically. It does not read every backup block or prove application recovery. Failed or malformed Restic listings must not replace a previously known snapshot count with zero.
+
+See [backup operations and the recovery drill](11-hestia-backups.md), and the [module installation guide](../../scripts/backup-core-patches/README.md), for current flags, provider permissions and verification limits.

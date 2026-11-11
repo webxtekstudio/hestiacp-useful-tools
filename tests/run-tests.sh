@@ -332,6 +332,28 @@ else
     fail "v-verify-backups did not flag stale 72h Restic snapshot (rc=$vb_stale_rc): $vb_stale_out"
 fi
 
+# Invalid provider output must not overwrite a known counter; array ordering must not select an old snapshot.
+echo "U_BACKUPS_INCREMENTAL='12'" >> "$VB_DIR/hestia/data/users/alice/user.conf"
+cat > "$VB_DIR/bin/restic" <<'EOF'
+#!/bin/bash
+printf '%s' "$MOCK_RESTIC_JSON"
+EOF
+vb_invalid_out=$(PATH="$VB_DIR/bin:$PATH" HESTIA="$VB_DIR/hestia" HESTIA_CRONTAB_FILE="$VB_DIR/crontab.hestiaweb" MOCK_RESTIC_JSON='not-json' bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-verify-backups" --status-file="$VB_DIR/status3.txt" 2>&1)
+vb_invalid_rc=$?
+if [ "$vb_invalid_rc" -ne 0 ] && grep -q "^U_BACKUPS_INCREMENTAL='12'" "$VB_DIR/hestia/data/users/alice/user.conf" && printf '%s' "$vb_invalid_out" | grep -q 'RESTIC_JSON_PARSE_FAILED'; then
+    pass "v-verify-backups preserves the cached count on malformed Restic JSON"
+else
+    fail "Malformed Restic JSON changed the cached count or was accepted"
+fi
+vb_ordered_json="[{\"short_id\":\"a1b2c3d4\",\"time\":\"$fresh_iso\"},{\"short_id\":\"deadbeef\",\"time\":\"$stale_iso\"}]"
+vb_ordered_out=$(PATH="$VB_DIR/bin:$PATH" HESTIA="$VB_DIR/hestia" HESTIA_CRONTAB_FILE="$VB_DIR/crontab.hestiaweb" MOCK_RESTIC_JSON="$vb_ordered_json" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-verify-backups" --status-file="$VB_DIR/status4.txt" 2>&1)
+vb_ordered_rc=$?
+if [ "$vb_ordered_rc" -eq 0 ] && printf '%s' "$vb_ordered_out" | grep -q 'restic_snapshot=a1b2c3d4' && grep -q '^verification_scope=metadata$' "$VB_DIR/status4.txt" && grep -q '^data_integrity=not_checked$' "$VB_DIR/status4.txt"; then
+    pass "v-verify-backups selects the newest snapshot independently of array order and declares metadata scope"
+else
+    fail "Restic ordering or verification-scope regression"
+fi
+
 # Test v-restic-manager (--init-master-key, --run-daily, staging cleanup, key enrollment & BACKUPS_INCREMENTAL propagation)
 RM_DIR="$SAND_DIR/rm_test"
 mkdir -p "$RM_DIR/hestia/bin" "$RM_DIR/hestia/conf" "$RM_DIR/hestia/data/packages" "$RM_DIR/hestia/data/users/bob" "$RM_DIR/home/bob/backup/pam" "$RM_DIR/bin"
@@ -441,7 +463,7 @@ exit 0
 EOF
 chmod +x "$RM_DIR/bin/restic"
 
-rm_export_out=$(PATH="$RM_DIR/bin:$PATH" HESTIA="$RM_DIR/hestia" HESTIA_HOME_ROOT="$RM_DIR/home" RESTIC_MANAGER_ALLOW_NONROOT=1 RESTIC_MASTER_KEY_FILE="$RM_DIR/master.key" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-restic-manager" --export-tar bob latest 2>&1)
+rm_export_out=$(PATH="$RM_DIR/bin:$PATH" HESTIA="$RM_DIR/hestia" HESTIA_HOME_ROOT="$RM_DIR/home" RESTIC_MANAGER_ALLOW_NONROOT=1 RESTIC_MASTER_KEY_FILE="$RM_DIR/master.key" RESTIC_EXPORT_LOCK_DIR="$RM_DIR/export-locks" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-restic-manager" --export-tar bob latest 2>&1)
 rm_export_rc=$?
 exported_tar="$RM_DIR/backup/bob.2026-11-11_16-30-26.tar"
 if [ "$rm_export_rc" -eq 0 ] && \
@@ -456,6 +478,12 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+if bash "$REPO_ROOT/tests/restic-export.test.sh"; then
+    pass "Restic exports publish complete archives atomically and serialize concurrent downloads"
+else
+    fail "Restic export regression suite failed"
+fi
+
 # 5. v-security-audit Accuracy (S15c .local filter & S38/S59 ACCOUNTS='0')
 # -----------------------------------------------------------------------------
 echo ""

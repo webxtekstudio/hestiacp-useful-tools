@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# info: manage HestiaCP Restic incremental backups, offline Master Recovery Key enrollment, daily execution, and .tar export
+# info: manage HestiaCP Restic backups, secondary recovery passwords, daily execution, and .tar export
 # options: --init-master-key [--print] | --enroll | --run-daily | --status | --export-tar USER [SNAPSHOT] [OUTPUT_TAR] [--no-register] | --dump-tar USER [SNAPSHOT] OUTPUT_TAR [SUBPATH] | --help
 #
 # Hardens HestiaCP's native Restic incremental backups:
-#   1. Generates and protects an offline Master Recovery Key (/etc/hestiacp-restic-master.key, 0400 root:root)
+#   1. Protects a secondary recovery password on the server; keep a separate copy offline
 #   2. Auto-enrolls the Master Recovery Key across every active user's Restic repository (dual-key unlock)
 #   3. Enforces 0600 root:root on /usr/local/hestia/data/users/*/restic.conf and 0660 on conf/restic.conf
 #   4. Deletes /home/<user>/backup immediately after each Restic snapshot so shadow/SSL/SQL staging dumps never linger
@@ -27,6 +27,7 @@ HESTIA_LOG="$HESTIA/log/backup.log"
 HESTIA_HOME_ROOT="${HESTIA_HOME_ROOT:-/home}"
 MASTER_KEY_FILE="${RESTIC_MASTER_KEY_FILE:-/etc/hestiacp-restic-master.key}"
 LOCK_FILE="${RESTIC_LOCK_FILE:-/run/hestia-restic-daily.lock}"
+EXPORT_LOCK_DIR="${RESTIC_EXPORT_LOCK_DIR:-/run/hestia-restic-exports}"
 VERIFY_STATUS_FILE="${RESTIC_VERIFY_STATUS_FILE:-/var/log/hestia/backup-verify.status}"
 
 ACTION=""
@@ -439,6 +440,42 @@ compress_tar_stream() {
     fi
 }
 
+acquire_export_lock() {
+    local user="$1"
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "ERROR: Restic exports require flock (util-linux)." >&2
+        return 1
+    fi
+    (umask 077 && mkdir -p "$EXPORT_LOCK_DIR") || return 1
+    chmod 0700 "$EXPORT_LOCK_DIR" || return 1
+    exec {EXPORT_LOCK_FD}>"$EXPORT_LOCK_DIR/$user.lock" || return 1
+    if ! flock -n "$EXPORT_LOCK_FD"; then
+        echo "BUSY|A Restic export is already running for $user"
+        return 75
+    fi
+}
+
+cleanup_export() {
+    [ -z "${EXPORT_OUTPUT_TEMP:-}" ] || rm -f -- "$EXPORT_OUTPUT_TEMP"
+    [ -z "${EXPORT_STAGE_DIR:-}" ] || rm -rf -- "$EXPORT_STAGE_DIR"
+    return 0
+}
+
+valid_export_timestamp() {
+    [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] &&
+        [[ "$2" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]
+}
+
+check_export_directory() {
+    local resolved
+    resolved=$(readlink -f -- "$1") || return 1
+    if [ -d "$1" ] && [ ! -L "$1" ]; then
+        case "$resolved" in "$EXPORT_STAGE_DIR"/*) return 0 ;; esac
+    fi
+    echo "ERROR: Refusing an export directory outside the restored snapshot: $1" >&2
+    return 1
+}
+
 do_dump_tar() {
     load_hestia_restic_conf
     if [ -z "${REPO:-}" ]; then
@@ -466,15 +503,24 @@ do_dump_tar() {
         exit 1
     fi
 
+    acquire_export_lock "$user" || return $?
+    EXPORT_STAGE_DIR=""
+    EXPORT_OUTPUT_TEMP=""
+    trap cleanup_export EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     mkdir -p "$(dirname "$output_tar")"
+    EXPORT_OUTPUT_TEMP="$(umask 077 && mktemp "${output_tar}.part.XXXXXX")" || exit 1
     echo "$(date '+%F %T') [DUMP] Streaming Restic snapshot '$snapshot' ($subpath) for $user to $output_tar..."
-    if ! restic --repo "${REPO%/}/$user" --password-file "$pw_file" --no-lock dump "$snapshot" "$subpath" > "$output_tar"; then
-        rm -f "$output_tar" 2>/dev/null || true
+    if ! restic --repo "${REPO%/}/$user" --password-file "$pw_file" --no-lock dump "$snapshot" "$subpath" > "$EXPORT_OUTPUT_TEMP" ||
+        ! tar -tf "$EXPORT_OUTPUT_TEMP" >/dev/null; then
         echo "ERROR: Failed to stream Restic dump for $user ($snapshot)." >&2
         exit 1
     fi
-    chmod 0640 "$output_tar" 2>/dev/null || true
-    chown root:hestiaweb "$output_tar" 2>/dev/null || true
+    chmod 0640 "$EXPORT_OUTPUT_TEMP" || exit 1
+    chown root:hestiaweb "$EXPORT_OUTPUT_TEMP" 2>/dev/null || true
+    mv -f -- "$EXPORT_OUTPUT_TEMP" "$output_tar" || exit 1
+    EXPORT_OUTPUT_TEMP=""
     echo "[OK] Raw Restic tar stream written to $output_tar ($(du -sh "$output_tar" | cut -f1))."
 }
 
@@ -504,6 +550,13 @@ do_export_tar() {
         exit 1
     fi
 
+    acquire_export_lock "$user" || return $?
+    EXPORT_OUTPUT_TEMP=""
+    EXPORT_STAGE_DIR=""
+    trap cleanup_export EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
     local backup_root="${BACKUP:-/backup}"
     local temp_root="${BACKUP_TEMP:-$backup_root}"
     mkdir -p "$backup_root" "$temp_root"
@@ -512,8 +565,9 @@ do_export_tar() {
         echo "ERROR: Unable to create staging directory in $temp_root." >&2
         exit 1
     }
-    trap '[ -n "${EXPORT_STAGE_DIR:-}" ] && rm -rf "$EXPORT_STAGE_DIR" 2>/dev/null || true' EXIT INT TERM
-
+    local stage_real
+    stage_real=$(readlink -f -- "$EXPORT_STAGE_DIR") || exit 1
+    EXPORT_STAGE_DIR="$stage_real"
     echo "$(date '+%F %T') [EXPORT] Restoring snapshot '$snapshot' for $user into temporary staging area..."
     if ! restic --repo "${REPO%/}/$user" --password-file "$pw_file" --no-lock restore "$snapshot" --target "$EXPORT_STAGE_DIR" >/dev/null; then
         echo "ERROR: Failed to extract Restic snapshot '$snapshot' for $user." >&2
@@ -522,7 +576,9 @@ do_export_tar() {
 
     local snap_home="$EXPORT_STAGE_DIR${HESTIA_HOME_ROOT}/$user"
     local bkp_stage="$snap_home/backup"
-    if [ ! -f "$bkp_stage/backup.conf" ]; then
+    check_export_directory "$snap_home" || exit 1
+    check_export_directory "$bkp_stage" || exit 1
+    if [ ! -f "$bkp_stage/backup.conf" ] || [ -L "$bkp_stage/backup.conf" ]; then
         echo "ERROR: Snapshot '$snapshot' does not contain $HESTIA_HOME_ROOT/$user/backup/backup.conf." >&2
         exit 1
     fi
@@ -538,8 +594,10 @@ do_export_tar() {
     b_cron="$(extract_kv_from_conf "$bkp_stage/backup.conf" "CRON")"
     b_runtime="$(extract_kv_from_conf "$bkp_stage/backup.conf" "RUNTIME")"
 
-    [ -z "$b_date" ] && b_date="$(date '+%Y-%m-%d')"
-    [ -z "$b_time" ] && b_time="$(date '+%H:%M:%S')"
+    if ! valid_export_timestamp "$b_date" "$b_time"; then
+        echo "ERROR: Snapshot contains an invalid backup date or time." >&2
+        exit 1
+    fi
     [ -z "$b_mode" ] && b_mode="${BACKUP_MODE:-zstd}"
     [ -z "$b_runtime" ] && b_runtime="1"
 
@@ -563,8 +621,10 @@ do_export_tar() {
     local d_dir domain
     for d_dir in "$bkp_stage/web"/*; do
         [ -d "$d_dir" ] || continue
+        check_export_directory "$d_dir" || exit 1
         domain="$(basename "$d_dir")"
         if [ -d "$snap_home/web/$domain" ]; then
+            check_export_directory "$snap_home/web/$domain" || exit 1
             (
                 cd "$snap_home/web/$domain" && \
                 tar --exclude='./logs/*' -cpf- -- . | compress_tar_stream "$b_mode" "$gzip_lvl" "$d_dir/domain_data.tar.$ext"
@@ -578,8 +638,10 @@ do_export_tar() {
     # 2. Pack mail accounts into backup/mail/<domain>/accounts.tar.<ext>
     for d_dir in "$bkp_stage/mail"/*; do
         [ -d "$d_dir" ] || continue
+        check_export_directory "$d_dir" || exit 1
         domain="$(basename "$d_dir")"
         if [ -d "$snap_home/mail/$domain" ]; then
+            check_export_directory "$snap_home/mail/$domain" || exit 1
             local acct_list=()
             local acct_path
             for acct_path in "$snap_home/mail/$domain"/*; do
@@ -600,6 +662,7 @@ do_export_tar() {
 
     # 3. Pack extra user directories into backup/user_dir/<udir>.tar.<ext>
     mkdir -p "$bkp_stage/user_dir"
+    check_export_directory "$bkp_stage/user_dir" || exit 1
     local udir_items=()
     local entry_path udir
     while IFS= read -r entry_path; do
@@ -632,13 +695,22 @@ do_export_tar() {
     printf '%s\n' "$bkp_line" > "$bkp_stage/backup.conf"
 
     mkdir -p "$(dirname "$output_tar")"
-    if ! (cd "$bkp_stage" && tar -cf "$output_tar" .); then
-        rm -f "$output_tar" 2>/dev/null || true
+    EXPORT_OUTPUT_TEMP="$(umask 077 && mktemp "${output_tar}.part.XXXXXX")" || {
+        echo "ERROR: Unable to create temporary export beside $output_tar." >&2
+        exit 1
+    }
+    if ! (cd "$bkp_stage" && tar -cf "$EXPORT_OUTPUT_TEMP" .) ||
+        ! tar -tf "$EXPORT_OUTPUT_TEMP" >/dev/null; then
         echo "ERROR: Failed to build final HestiaCP archive at $output_tar." >&2
         exit 1
     fi
-    chmod 0640 "$output_tar" 2>/dev/null || true
-    chown hestiaweb:hestiaweb "$output_tar" 2>/dev/null || chown root:hestiaweb "$output_tar" 2>/dev/null || true
+    chmod 0640 "$EXPORT_OUTPUT_TEMP" || exit 1
+    chown hestiaweb:hestiaweb "$EXPORT_OUTPUT_TEMP" 2>/dev/null || chown root:hestiaweb "$EXPORT_OUTPUT_TEMP" 2>/dev/null || true
+    if ! mv -f -- "$EXPORT_OUTPUT_TEMP" "$output_tar"; then
+        echo "ERROR: Unable to publish completed archive at $output_tar." >&2
+        exit 1
+    fi
+    EXPORT_OUTPUT_TEMP=""
 
     # 4. Optionally register in data/users/<user>/backup.conf so it appears in HestiaCP /list/backup/
     local u_dir="$HESTIA/data/users/$user"
@@ -686,11 +758,15 @@ do_web_download() {
     local b_date b_time
     b_date="$(printf '%s\n' "$bconf_raw" | sed -nE "s/.*(^|[[:space:]])DATE='([^']*)'.*/\2/p" | tail -n 1)"
     b_time="$(printf '%s\n' "$bconf_raw" | sed -nE "s/.*(^|[[:space:]])TIME='([^']*)'.*/\2/p" | tail -n 1)"
+    if ! valid_export_timestamp "$b_date" "$b_time"; then
+        echo "ERROR|Snapshot contains an invalid backup date or time"
+        exit 1
+    fi
     local ts_slug="${b_date}_${b_time//:/-}"
     local archive_name="${user}.${ts_slug}.tar"
     local target_tar="${backup_root%/}/$archive_name"
 
-    if [ -s "$target_tar" ]; then
+    if [ -s "$target_tar" ] && tar -tf "$target_tar" >/dev/null 2>&1; then
         chmod 0640 "$target_tar" 2>/dev/null || true
         chown hestiaweb:hestiaweb "$target_tar" 2>/dev/null || true
         echo "READY|$archive_name"
@@ -705,8 +781,14 @@ do_web_download() {
 
     # Accounts <= 500 MB export synchronously in a few seconds for instant 1-click browser download
     if [ "$u_disk" -le 500 ]; then
-        if do_export_tar >/dev/null 2>&1 && [ -s "$target_tar" ]; then
+        local export_rc=0
+        (do_export_tar) >/dev/null 2>&1 || export_rc=$?
+        if [ "$export_rc" -eq 0 ] && [ -s "$target_tar" ]; then
             echo "READY|$archive_name"
+            exit 0
+        fi
+        if [ "$export_rc" -eq 75 ]; then
+            echo "QUEUED|$archive_name"
             exit 0
         fi
         echo "ERROR|Failed to export snapshot $snapshot"
