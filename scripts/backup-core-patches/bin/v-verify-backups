@@ -346,6 +346,40 @@ for user_dir in "$HESTIA/data/users"/*; do
 
                 if [ "$user_tar_state" = "OK" ]; then
                     user_tar_msg="archive=$archive bytes=$actual_bytes expected_mib=$b_size_mib age_days=$age_days"
+                    # Reconcile older backup.conf entries expired by remote bucket Lifecycle rules
+                    if { [ "$BACKEND" = "b2" ] || [ "$BACKEND" = "rclone" ]; } && [ -w "$bkp_conf" ]; then
+                        line_cnt=$(wc -l < "$bkp_conf" 2>/dev/null || echo 0)
+                        if [ "${line_cnt:-0}" -gt 1 ]; then
+                            tmp_bconf=$(mktemp "${bkp_conf}.XXXXXX" 2>/dev/null || true)
+                            if [ -n "$tmp_bconf" ]; then
+                                awk -F'|' '
+                                    NR == FNR {
+                                        p = $2
+                                        sub(/^.*\//, "", p)
+                                        if (p != "") rem[p] = 1
+                                        next
+                                    }
+                                    {
+                                        line = $0
+                                        if (match(line, /BACKUP='\''[^'\'']+'\''/)) {
+                                            b = substr(line, RSTART + 8, RLENGTH - 9)
+                                            if (b == latest || (b in rem)) print line
+                                        } else {
+                                            print line
+                                        }
+                                    }
+                                ' latest="$archive" "$tmp_remote" "$bkp_conf" > "$tmp_bconf"
+                                new_cnt=$(grep -c "BACKUP=" "$tmp_bconf" 2>/dev/null || echo 0)
+                                if [ "${new_cnt:-0}" -ge 1 ] && [ "$new_cnt" -lt "$line_cnt" ]; then
+                                    chmod 0660 "$tmp_bconf" 2>/dev/null || true
+                                    mv -f "$tmp_bconf" "$bkp_conf"
+                                    sed -i "s/^U_BACKUPS=.*/U_BACKUPS='$new_cnt'/" "$u_conf" 2>/dev/null || true
+                                else
+                                    rm -f "$tmp_bconf"
+                                fi
+                            fi
+                        fi
+                    fi
                 fi
             fi
         fi
