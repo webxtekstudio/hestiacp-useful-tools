@@ -630,10 +630,10 @@ fi
 
 if [ "$CLEAN_ORPHAN_BACKUP_TMP" = "TRUE" ] || [ "$CLEAN_ORPHAN_BACKUP_TMP" = "true" ]; then
     [[ "$ORPHAN_BACKUP_TMP_DAYS" =~ ^[0-9]+$ ]] || ORPHAN_BACKUP_TMP_DAYS=2
-    echo -n "[$(date)] : Orphaned /backup/tmp.* dirs (>${ORPHAN_BACKUP_TMP_DAYS}d)... "
+    echo -n "[$(date)] : Orphaned /backup/tmp.* dirs & stale logs (>${ORPHAN_BACKUP_TMP_DAYS}d)... "
     if pgrep -f '(^|/)(v-backup-user|v-backup-users|v-restore-user)([[:space:]]|$)' >/dev/null 2>&1; then
         echo "SKIP (backup/restore currently running)"
-        TASKS_SKIPPED+=("Orphaned backup temp dirs")
+        TASKS_SKIPPED+=("Orphaned backup temp dirs & stale logs")
     else
         bkp_tmp_count=0
         bkp_tmp_kb=0
@@ -650,15 +650,25 @@ if [ "$CLEAN_ORPHAN_BACKUP_TMP" = "TRUE" ] || [ "$CLEAN_ORPHAN_BACKUP_TMP" = "tr
                     bkp_tmp_kb=$((bkp_tmp_kb + td_kb))
                 fi
             done
+            for b_log in /backup/*.log; do
+                [ -f "$b_log" ] && [ ! -L "$b_log" ] || continue
+                [ "$(stat -c '%u' "$b_log" 2>/dev/null)" = "0" ] || continue
+                [ -n "$(find "$b_log" -maxdepth 0 -mtime +${ORPHAN_BACKUP_TMP_DAYS} -ctime +${ORPHAN_BACKUP_TMP_DAYS} 2>/dev/null)" ] || continue
+                log_kb=$(measure_cleanup "$b_log")
+                if rm -f "$b_log" 2>/dev/null; then
+                    bkp_tmp_count=$((bkp_tmp_count + 1))
+                    bkp_tmp_kb=$((bkp_tmp_kb + log_kb))
+                fi
+            done
         fi
         if [ "$bkp_tmp_kb" -gt 0 ]; then
             add_cleaned_space "$bkp_tmp_kb"
             cleaned_formatted=$(convert_space $bkp_tmp_kb)
-            echo "OK ($bkp_tmp_count dirs, freed: $cleaned_formatted)"
+            echo "OK ($bkp_tmp_count items, freed: $cleaned_formatted)"
         else
-            echo "OK ($bkp_tmp_count dirs)"
+            echo "OK ($bkp_tmp_count items)"
         fi
-        TASKS_SUCCESS+=("Orphaned backup temp dirs")
+        TASKS_SUCCESS+=("Orphaned backup temp dirs & stale logs")
     fi
 fi
 
