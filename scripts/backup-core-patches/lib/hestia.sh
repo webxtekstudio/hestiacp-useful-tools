@@ -678,7 +678,7 @@ PHP_EOF
 			<div class="units-table-cell">
 				<?php if (!$read_only) { ?>
 					<ul class="units-table-row-actions">
-						<li class="units-table-row-action shortcut-b" data-key-action="href">
+						<li class="units-table-row-action u-mr10 shortcut-b" data-key-action="href">
 							<a
 								class="units-table-row-action-link"
 								href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "browse" => 'yes', "token" => $_SESSION["token"]])) ?>"
@@ -688,7 +688,7 @@ PHP_EOF
 								<span class="u-hide-desktop"><?= tohtml( _("Browse")) ?></span>
 							</a>
 						</li>
-						<li class="units-table-row-action shortcut-d" data-key-action="href">
+						<li class="units-table-row-action u-mr10 shortcut-d" data-key-action="href">
 							<a
 								class="units-table-row-action-link"
 								href="/download/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>"
