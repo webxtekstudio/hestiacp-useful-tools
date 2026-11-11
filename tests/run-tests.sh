@@ -53,7 +53,19 @@ echo ""
 echo "[2/6] Testing Fail2Ban <-> iptables drift detection (check_f2b_desync_count)..."
 
 SAND_BASE="${TMPDIR:-/tmp}"
-[ -d /run ] && [ -w /run ] && SAND_BASE="/run"
+for cand_dir in /run /dev/shm "${TMPDIR:-/tmp}" /tmp; do
+    [ -d "$cand_dir" ] && [ -w "$cand_dir" ] || continue
+    probe_f=$(mktemp "${cand_dir}/.hestia-exec-probe.XXXXXX" 2>/dev/null || true)
+    [ -n "$probe_f" ] || continue
+    printf '#!/bin/sh\nexit 0\n' > "$probe_f"
+    chmod +x "$probe_f" 2>/dev/null || true
+    if "$probe_f" >/dev/null 2>&1; then
+        rm -f "$probe_f"
+        SAND_BASE="$cand_dir"
+        break
+    fi
+    rm -f "$probe_f"
+done
 SAND_DIR=$(mktemp -d "${SAND_BASE}/hestia-test.XXXXXX")
 trap 'rm -rf "$SAND_DIR"' EXIT
 
