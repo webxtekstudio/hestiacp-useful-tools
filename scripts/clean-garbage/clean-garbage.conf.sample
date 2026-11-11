@@ -6,6 +6,8 @@
 #==========================================
 # Leave empty to auto-detect from admin user
 ADMIN_EMAIL_OVERRIDE=""
+# Set to "FALSE" to send email reports ONLY when a cleanup task fails (or with --force-notification)
+NOTIFY_ON_SUCCESS="TRUE"
 
 #==========================================
 # RETENTION PERIODS (days)

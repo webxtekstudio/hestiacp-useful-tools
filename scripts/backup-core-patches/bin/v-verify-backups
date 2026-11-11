@@ -1,30 +1,40 @@
 #!/bin/bash
 # HestiaCP Backup Archive & Remote Storage Verifier
 # Cross-checks active HestiaCP user backup metadata against remote object storage
-# (Backblaze B2 / rclone) and/or local tar archives to catch missing, stale, empty,
-# or truncated backups without downloading multi-gigabyte archives.
+# (Backblaze B2 / rclone), local tar archives, and optional Restic incremental
+# repositories to catch missing, stale, empty, or truncated backups without
+# downloading multi-gigabyte archives.
 
 set -uo pipefail
 
 HESTIA="${HESTIA:-/usr/local/hestia}"
+VERIFY_CONF="${VERIFY_CONF:-/etc/hestiacp-backup-verify.conf}"
+if [ -f "$VERIFY_CONF" ]; then
+    # shellcheck disable=SC1090
+    source "$VERIFY_CONF" 2>/dev/null || true
+fi
+
 STATUS_FILE="${STATUS_FILE:-/var/log/hestia/backup-verify.status}"
-MAX_AGE_DAYS="${MAX_AGE_DAYS:-8}"
+MAX_AGE_DAYS_EXPLICIT="${MAX_AGE_DAYS:-}"
+MAX_RESTIC_AGE_HOURS="${MAX_RESTIC_AGE_HOURS:-36}"
 MIN_ARCHIVE_BYTES="${MIN_ARCHIVE_BYTES:-10240}"
 QUIET="FALSE"
 
 usage() {
     cat <<EOF
-Usage: v-verify-backups [--max-age-days=N] [--status-file=PATH] [--quiet] [--help]
+Usage: v-verify-backups [--max-age-days=N] [--max-restic-age-hours=N] [--status-file=PATH] [--quiet] [--help]
 
 Verifies that every active (non-suspended) HestiaCP user has a recent, non-empty,
-size-consistent backup archive on the configured backup backend (B2, rclone, or local).
+size-consistent backup archive on the configured backup backend (B2, rclone, or local),
+and—when BACKUP_INCREMENTAL='yes'—a fresh Restic snapshot in each user's Restic repo.
 Writes a machine-readable status summary to /var/log/hestia/backup-verify.status.
 EOF
 }
 
 for arg in "$@"; do
     case "$arg" in
-        --max-age-days=*) MAX_AGE_DAYS="${arg#*=}" ;;
+        --max-age-days=*) MAX_AGE_DAYS_EXPLICIT="${arg#*=}" ;;
+        --max-restic-age-hours=*) MAX_RESTIC_AGE_HOURS="${arg#*=}" ;;
         --status-file=*) STATUS_FILE="${arg#*=}" ;;
         --quiet|-q) QUIET="TRUE" ;;
         --help|-h) usage; exit 0 ;;
@@ -36,14 +46,79 @@ for arg in "$@"; do
     esac
 done
 
+detect_tar_schedule() {
+    local cfile line dom month dow
+    local cron_candidates=("${HESTIA_CRONTAB_FILE:-/var/spool/cron/crontabs/hestiaweb}" /etc/cron.d/*)
+    for cfile in "${cron_candidates[@]}"; do
+        [ -f "$cfile" ] && [ -r "$cfile" ] || continue
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            case "$line" in ''|\#*) continue ;; esac
+            if printf '%s\n' "$line" | grep -qE '(^|[[:space:]/])v-backup-users([[:space:]]|$)'; then
+                if [[ "$line" =~ ^@monthly([[:space:]]|$) ]]; then
+                    echo "monthly|35"
+                    return 0
+                elif [[ "$line" =~ ^@weekly([[:space:]]|$) ]]; then
+                    echo "weekly|8"
+                    return 0
+                elif [[ "$line" =~ ^@(daily|midnight)([[:space:]]|$) ]]; then
+                    echo "daily|8"
+                    return 0
+                fi
+                read -r _ _ dom month dow _ <<< "$line"
+                if [[ "${dom:-}" =~ ^[0-9]+$ ]] && [ "${month:-}" = "*" ] && [ "${dow:-}" = "*" ]; then
+                    echo "monthly|35"
+                    return 0
+                elif [[ "${dom:-}" =~ ^[0-9]+(,[0-9]+)+$ ]] && [ "${month:-}" = "*" ] && [ "${dow:-}" = "*" ]; then
+                    echo "biweekly|18"
+                    return 0
+                elif [ "${dom:-}" = "*" ] && [ "${month:-}" = "*" ] && [ "${dow:-}" != "*" ]; then
+                    echo "weekly|8"
+                    return 0
+                elif [ "${dom:-}" = "*" ] && [ "${month:-}" = "*" ] && [ "${dow:-}" = "*" ]; then
+                    echo "daily|8"
+                    return 0
+                fi
+            fi
+        done < "$cfile"
+    done
+    echo "weekly|8"
+}
+
+sched_info=$(detect_tar_schedule)
+TAR_SCHEDULE="${sched_info%%|*}"
+AUTO_MAX_AGE_DAYS="${sched_info#*|}"
+
+if [ -n "$MAX_AGE_DAYS_EXPLICIT" ]; then
+    MAX_AGE_DAYS="$MAX_AGE_DAYS_EXPLICIT"
+else
+    MAX_AGE_DAYS="$AUTO_MAX_AGE_DAYS"
+fi
+
 [[ "$MAX_AGE_DAYS" =~ ^[0-9]+$ ]] || MAX_AGE_DAYS=8
+[[ "$MAX_RESTIC_AGE_HOURS" =~ ^[0-9]+$ ]] || MAX_RESTIC_AGE_HOURS=36
 [[ "$MIN_ARCHIVE_BYTES" =~ ^[0-9]+$ ]] || MIN_ARCHIVE_BYTES=10240
 
 BACKUP="/backup"
 BACKUP_SYSTEM="local"
+BACKUP_INCREMENTAL="no"
 if [ -f "$HESTIA/conf/hestia.conf" ]; then
     # shellcheck disable=SC1091
     source "$HESTIA/conf/hestia.conf" 2>/dev/null || true
+fi
+
+RESTIC_ENABLED="no"
+RESTIC_BACKEND_ERROR=""
+REPO=""
+if [ "${BACKUP_INCREMENTAL:-no}" = "yes" ] && [ -f "$HESTIA/conf/restic.conf" ]; then
+    RESTIC_ENABLED="yes"
+    # shellcheck disable=SC1091
+    source "$HESTIA/conf/restic.conf" 2>/dev/null || true
+    if [ -z "${REPO:-}" ]; then
+        RESTIC_BACKEND_ERROR="RESTIC_CONFIG_INCOMPLETE"
+    elif ! command -v restic >/dev/null 2>&1; then
+        RESTIC_BACKEND_ERROR="RESTIC_CLI_MISSING"
+    fi
 fi
 
 tmp_remote=$(umask 077 && (mktemp /run/v-verify-backups.remote.XXXXXX 2>/dev/null || mktemp /tmp/v-verify-backups.remote.XXXXXX)) || exit 1
@@ -54,6 +129,32 @@ trap 'rm -f "$tmp_remote" "$tmp_out" "$tmp_b2info" "${tmp_b2info}-wal" "${tmp_b2
 extract_conf_val() {
     local line="$1" key="$2"
     printf '%s\n' "$line" | sed -nE "s/.*(^|[[:space:]])${key}='([^']*)'.*/\2/p" | tail -n 1
+}
+
+parse_restic_latest_json() {
+    local json_input="$1" compact sid raw_t epoch iso_utc
+    compact=$(printf '%s' "$json_input" | tr -d '\r\n\t ')
+    if [ "$compact" = "[]" ]; then
+        echo "EMPTY"
+        return 0
+    fi
+    [[ "$compact" == \[*\] ]] || { echo "PARSE_ERROR"; return 0; }
+    sid=$(printf '%s\n' "$compact" | sed -nE 's/.*"short_id":"([a-fA-F0-9]+)".*/\1/p' | tail -n 1)
+    if [ -z "$sid" ]; then
+        sid=$(printf '%s\n' "$compact" | sed -nE 's/.*"id":"([a-fA-F0-9]{8})[a-fA-F0-9]*".*/\1/p' | tail -n 1)
+    fi
+    raw_t=$(printf '%s\n' "$compact" | sed -nE 's/.*"time":"([^"]+)".*/\1/p' | tail -n 1)
+    if [ -z "$sid" ] || [ -z "$raw_t" ]; then
+        echo "PARSE_ERROR"
+        return 0
+    fi
+    epoch=$(date -d "$raw_t" +%s 2>/dev/null || echo "")
+    iso_utc=$(date -u -d "$raw_t" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+    if [[ ! "$epoch" =~ ^[0-9]+$ ]] || [ -z "$iso_utc" ]; then
+        echo "PARSE_ERROR"
+        return 0
+    fi
+    echo "OK|${sid}|${epoch}|${iso_utc}"
 }
 
 NOW_EPOCH=$(date +%s)
@@ -111,6 +212,11 @@ VERIFIED_USERS=0
 PENDING_USERS=0
 FAILED_USERS=0
 TOTAL_BYTES=0
+RESTIC_VERIFIED_USERS=0
+RESTIC_PENDING_USERS=0
+RESTIC_FAILED_USERS=0
+RESTIC_LATEST_EPOCH=0
+RESTIC_LATEST_AT="NONE"
 DETAIL_LINES=()
 
 for user_dir in "$HESTIA/data/users"/*; do
@@ -124,121 +230,208 @@ for user_dir in "$HESTIA/data/users"/*; do
 
     ACTIVE_USERS=$((ACTIVE_USERS + 1))
 
+    u_date=$(extract_conf_val "$(grep -E "^(DATE|TIME)=" "$user_conf" 2>/dev/null | tr '\n' ' ')" "DATE")
+    u_time=$(extract_conf_val "$(grep -E "^(DATE|TIME)=" "$user_conf" 2>/dev/null | tr '\n' ' ')" "TIME")
+    u_epoch=0
+    if [ -n "$u_date" ]; then
+        u_epoch=$(date -d "${u_date} ${u_time:-00:00:00}" +%s 2>/dev/null || date -d "${u_date}" +%s 2>/dev/null || echo 0)
+    fi
+    [ "$u_epoch" -le 0 ] && u_epoch=$(stat -c '%Y' "$user_dir" 2>/dev/null || echo 0)
+    u_age_days=999
+    u_age_hours=9999
+    if [ "$u_epoch" -gt 0 ]; then
+        u_age_days=$(( (NOW_EPOCH - u_epoch) / 86400 ))
+        u_age_hours=$(( (NOW_EPOCH - u_epoch) / 3600 ))
+        [ "$u_age_days" -lt 0 ] && u_age_days=0
+        [ "$u_age_hours" -lt 0 ] && u_age_hours=0
+    fi
+
+    # 1. Classic .tar archive verification
+    user_tar_state="OK"
+    user_tar_msg=""
+    actual_bytes=0
+
     if [ -n "$BACKEND_ERROR" ]; then
-        FAILED_USERS=$((FAILED_USERS + 1))
-        DETAIL_LINES+=("FAIL $user $BACKEND_ERROR")
-        continue
-    fi
+        user_tar_state="FAIL"
+        user_tar_msg="$BACKEND_ERROR"
+    else
+        bkp_conf="$user_dir/backup.conf"
+        latest_line=""
+        [ -f "$bkp_conf" ] && latest_line=$(tail -n 1 "$bkp_conf" 2>/dev/null || true)
+        if [ -z "$latest_line" ]; then
+            if [ "$u_age_days" -le "$MAX_AGE_DAYS" ]; then
+                user_tar_state="PENDING"
+                user_tar_msg="PENDING_FIRST_BACKUP account_age_days=$u_age_days"
+            else
+                user_tar_state="FAIL"
+                user_tar_msg="NO_BACKUP_RECORD account_age_days=$u_age_days"
+            fi
+        else
+            archive=$(extract_conf_val "$latest_line" "BACKUP")
+            b_size_mib=$(extract_conf_val "$latest_line" "SIZE")
+            b_date=$(extract_conf_val "$latest_line" "DATE")
+            b_time=$(extract_conf_val "$latest_line" "TIME")
 
-    bkp_conf="$user_dir/backup.conf"
-    latest_line=""
-    [ -f "$bkp_conf" ] && latest_line=$(tail -n 1 "$bkp_conf" 2>/dev/null || true)
-    if [ -z "$latest_line" ]; then
-        u_date=$(extract_conf_val "$(grep -E "^(DATE|TIME)=" "$user_conf" 2>/dev/null | tr '\n' ' ')" "DATE")
-        u_time=$(extract_conf_val "$(grep -E "^(DATE|TIME)=" "$user_conf" 2>/dev/null | tr '\n' ' ')" "TIME")
-        u_epoch=0
-        if [ -n "$u_date" ]; then
-            u_epoch=$(date -d "${u_date} ${u_time:-00:00:00}" +%s 2>/dev/null || date -d "${u_date}" +%s 2>/dev/null || echo 0)
+            [[ "$b_size_mib" =~ ^[0-9]+$ ]] || b_size_mib=0
+            if [ -z "$archive" ] || [ -z "$b_date" ]; then
+                user_tar_state="FAIL"
+                user_tar_msg="MALFORMED_BACKUP_RECORD"
+            else
+                b_epoch=$(date -d "${b_date} ${b_time:-00:00:00}" +%s 2>/dev/null || date -d "${b_date}" +%s 2>/dev/null || echo 0)
+                age_days=999
+                if [ "$b_epoch" -gt 0 ]; then
+                    age_days=$(( (NOW_EPOCH - b_epoch) / 86400 ))
+                    [ "$age_days" -lt 0 ] && age_days=0
+                fi
+
+                actual_bytes=""
+                local_tar=""
+
+                if [ "$BACKEND" = "b2" ] || [ "$BACKEND" = "rclone" ]; then
+                    actual_bytes=$(awk -F'|' -v target="$archive" '
+                        {
+                            p = $2
+                            sub(/^.*\//, "", p)
+                            if (p == target) {
+                                sz = $1
+                            }
+                        }
+                        END { if (sz != "") print sz }
+                    ' "$tmp_remote")
+
+                    if [ -z "$actual_bytes" ]; then
+                        user_tar_state="FAIL"
+                        user_tar_msg="MISSING_REMOTE_ARCHIVE archive=$archive backend=$BACKEND"
+                    fi
+                else
+                    if [ -f "${BACKUP%/}/$archive" ]; then
+                        local_tar=$(readlink -f "${BACKUP%/}/$archive" 2>/dev/null || echo "${BACKUP%/}/$archive")
+                    else
+                        local_tar=$(find "${BACKUP%/}" -maxdepth 4 -type f -name "$archive" -print -quit 2>/dev/null || true)
+                    fi
+                    if [ -z "$local_tar" ] || [ ! -f "$local_tar" ]; then
+                        user_tar_state="FAIL"
+                        user_tar_msg="MISSING_LOCAL_ARCHIVE archive=$archive"
+                    else
+                        actual_bytes=$(stat -c '%s' "$local_tar" 2>/dev/null || echo 0)
+                        if ! tar -tf "$local_tar" >/dev/null 2>&1; then
+                            user_tar_state="FAIL"
+                            user_tar_msg="CORRUPT_LOCAL_TAR archive=$archive bytes=$actual_bytes"
+                        fi
+                    fi
+                fi
+
+                if [ "$user_tar_state" = "OK" ]; then
+                    [[ "$actual_bytes" =~ ^[0-9]+$ ]] || actual_bytes=0
+                    if [ "$actual_bytes" -lt "$MIN_ARCHIVE_BYTES" ]; then
+                        user_tar_state="FAIL"
+                        user_tar_msg="TRUNCATED_OR_EMPTY archive=$archive bytes=$actual_bytes min_bytes=$MIN_ARCHIVE_BYTES"
+                    elif [ "$b_size_mib" -ge 2 ]; then
+                        min_expected_bytes=$(( (b_size_mib - 1) * 1048576 * 75 / 100 ))
+                        if [ "$actual_bytes" -lt "$min_expected_bytes" ]; then
+                            user_tar_state="FAIL"
+                            user_tar_msg="SIZE_MISMATCH archive=$archive bytes=$actual_bytes expected_mib=$b_size_mib"
+                        fi
+                    fi
+                fi
+
+                if [ "$user_tar_state" = "OK" ] && [ "$age_days" -gt "$MAX_AGE_DAYS" ]; then
+                    user_tar_state="FAIL"
+                    user_tar_msg="STALE_BACKUP archive=$archive age_days=$age_days max_age_days=$MAX_AGE_DAYS"
+                fi
+
+                if [ "$user_tar_state" = "OK" ]; then
+                    user_tar_msg="archive=$archive bytes=$actual_bytes expected_mib=$b_size_mib age_days=$age_days"
+                fi
+            fi
         fi
-        [ "$u_epoch" -le 0 ] && u_epoch=$(stat -c '%Y' "$user_dir" 2>/dev/null || echo 0)
-        u_age_days=999
-        if [ "$u_epoch" -gt 0 ]; then
-            u_age_days=$(( (NOW_EPOCH - u_epoch) / 86400 ))
-            [ "$u_age_days" -lt 0 ] && u_age_days=0
+    fi
+
+    # 2. Restic incremental snapshot verification (when BACKUP_INCREMENTAL='yes')
+    user_restic_state="DISABLED"
+    user_restic_msg=""
+    if [ "$RESTIC_ENABLED" = "yes" ]; then
+        if [ -n "$RESTIC_BACKEND_ERROR" ]; then
+            user_restic_state="FAIL"
+            user_restic_msg="$RESTIC_BACKEND_ERROR"
+        elif [ ! -s "$user_dir/restic.conf" ]; then
+            if [ "$u_age_hours" -le "$MAX_RESTIC_AGE_HOURS" ]; then
+                user_restic_state="PENDING"
+                user_restic_msg="PENDING_FIRST_RESTIC_SNAPSHOT account_age_hours=$u_age_hours"
+            else
+                user_restic_state="FAIL"
+                user_restic_msg="MISSING_RESTIC_REPO account_age_hours=$u_age_hours"
+            fi
+        else
+            snap_json=""
+            if ! snap_json=$(HOME="${HOME:-/root}" restic --repo "${REPO%/}/$user" --password-file "$user_dir/restic.conf" --no-lock snapshots --latest 1 --json 2>/dev/null); then
+                user_restic_state="FAIL"
+                user_restic_msg="RESTIC_REPO_ACCESS_FAILED"
+            else
+                snap_parsed=$(parse_restic_latest_json "$snap_json")
+                case "$snap_parsed" in
+                    EMPTY)
+                        if [ "$u_age_hours" -le "$MAX_RESTIC_AGE_HOURS" ]; then
+                            user_restic_state="PENDING"
+                            user_restic_msg="PENDING_FIRST_RESTIC_SNAPSHOT account_age_hours=$u_age_hours"
+                        else
+                            user_restic_state="FAIL"
+                            user_restic_msg="NO_RESTIC_SNAPSHOTS account_age_hours=$u_age_hours"
+                        fi
+                        ;;
+                    OK\|*)
+                        IFS='|' read -r _ snap_id snap_epoch snap_iso <<< "$snap_parsed"
+                        [[ "$snap_epoch" =~ ^[0-9]+$ ]] || snap_epoch=0
+                        restic_age_hours=$(( (NOW_EPOCH - snap_epoch) / 3600 ))
+                        [ "$restic_age_hours" -lt 0 ] && restic_age_hours=0
+                        if [ "$restic_age_hours" -gt "$MAX_RESTIC_AGE_HOURS" ]; then
+                            user_restic_state="FAIL"
+                            user_restic_msg="STALE_RESTIC_SNAPSHOT snapshot=$snap_id age_hours=$restic_age_hours max_age_hours=$MAX_RESTIC_AGE_HOURS"
+                        else
+                            user_restic_state="OK"
+                            user_restic_msg="restic_snapshot=$snap_id restic_age_hours=$restic_age_hours"
+                            if [ "$snap_epoch" -gt "$RESTIC_LATEST_EPOCH" ]; then
+                                RESTIC_LATEST_EPOCH="$snap_epoch"
+                                RESTIC_LATEST_AT="$snap_iso"
+                            fi
+                        fi
+                        ;;
+                    *)
+                        user_restic_state="FAIL"
+                        user_restic_msg="RESTIC_JSON_PARSE_FAILED"
+                        ;;
+                esac
+            fi
         fi
-        if [ "$u_age_days" -le "$MAX_AGE_DAYS" ]; then
-            PENDING_USERS=$((PENDING_USERS + 1))
-            DETAIL_LINES+=("PENDING $user PENDING_FIRST_BACKUP account_age_days=$u_age_days")
-            continue
-        fi
+
+        case "$user_restic_state" in
+            OK) RESTIC_VERIFIED_USERS=$((RESTIC_VERIFIED_USERS + 1)) ;;
+            PENDING) RESTIC_PENDING_USERS=$((RESTIC_PENDING_USERS + 1)) ;;
+            FAIL) RESTIC_FAILED_USERS=$((RESTIC_FAILED_USERS + 1)) ;;
+        esac
+    fi
+
+    # 3. Combine per-user status
+    if [ "$user_tar_state" = "FAIL" ] || [ "$user_restic_state" = "FAIL" ]; then
         FAILED_USERS=$((FAILED_USERS + 1))
-        DETAIL_LINES+=("FAIL $user NO_BACKUP_RECORD account_age_days=$u_age_days")
-        continue
-    fi
-
-    archive=$(extract_conf_val "$latest_line" "BACKUP")
-    b_size_mib=$(extract_conf_val "$latest_line" "SIZE")
-    b_date=$(extract_conf_val "$latest_line" "DATE")
-    b_time=$(extract_conf_val "$latest_line" "TIME")
-
-    [[ "$b_size_mib" =~ ^[0-9]+$ ]] || b_size_mib=0
-    if [ -z "$archive" ] || [ -z "$b_date" ]; then
-        FAILED_USERS=$((FAILED_USERS + 1))
-        DETAIL_LINES+=("FAIL $user MALFORMED_BACKUP_RECORD")
-        continue
-    fi
-
-    b_epoch=$(date -d "${b_date} ${b_time:-00:00:00}" +%s 2>/dev/null || date -d "${b_date}" +%s 2>/dev/null || echo 0)
-    age_days=999
-    if [ "$b_epoch" -gt 0 ]; then
-        age_days=$(( (NOW_EPOCH - b_epoch) / 86400 ))
-        [ "$age_days" -lt 0 ] && age_days=0
-    fi
-
-    actual_bytes=""
-    local_tar=""
-
-    if [ "$BACKEND" = "b2" ] || [ "$BACKEND" = "rclone" ]; then
-        actual_bytes=$(awk -F'|' -v target="$archive" '
-            {
-                p = $2
-                sub(/^.*\//, "", p)
-                if (p == target) {
-                    sz = $1
-                }
-            }
-            END { if (sz != "") print sz }
-        ' "$tmp_remote")
-
-        if [ -z "$actual_bytes" ]; then
-            FAILED_USERS=$((FAILED_USERS + 1))
-            DETAIL_LINES+=("FAIL $user MISSING_REMOTE_ARCHIVE archive=$archive backend=$BACKEND")
-            continue
+        [ "$user_tar_state" = "FAIL" ] && DETAIL_LINES+=("FAIL $user $user_tar_msg")
+        [ "$user_restic_state" = "FAIL" ] && DETAIL_LINES+=("FAIL $user $user_restic_msg")
+    elif [ "$user_tar_state" = "PENDING" ]; then
+        PENDING_USERS=$((PENDING_USERS + 1))
+        if [ -n "$user_restic_msg" ]; then
+            DETAIL_LINES+=("PENDING $user $user_tar_msg $user_restic_msg")
+        else
+            DETAIL_LINES+=("PENDING $user $user_tar_msg")
         fi
     else
-        if [ -f "${BACKUP%/}/$archive" ]; then
-            local_tar=$(readlink -f "${BACKUP%/}/$archive" 2>/dev/null || echo "${BACKUP%/}/$archive")
+        VERIFIED_USERS=$((VERIFIED_USERS + 1))
+        TOTAL_BYTES=$((TOTAL_BYTES + actual_bytes))
+        if [ -n "$user_restic_msg" ]; then
+            DETAIL_LINES+=("OK $user $user_tar_msg $user_restic_msg")
         else
-            local_tar=$(find "${BACKUP%/}" -maxdepth 4 -type f -name "$archive" -print -quit 2>/dev/null || true)
-        fi
-        if [ -z "$local_tar" ] || [ ! -f "$local_tar" ]; then
-            FAILED_USERS=$((FAILED_USERS + 1))
-            DETAIL_LINES+=("FAIL $user MISSING_LOCAL_ARCHIVE archive=$archive")
-            continue
-        fi
-        actual_bytes=$(stat -c '%s' "$local_tar" 2>/dev/null || echo 0)
-        if ! tar -tf "$local_tar" >/dev/null 2>&1; then
-            FAILED_USERS=$((FAILED_USERS + 1))
-            DETAIL_LINES+=("FAIL $user CORRUPT_LOCAL_TAR archive=$archive bytes=$actual_bytes")
-            continue
+            DETAIL_LINES+=("OK $user $user_tar_msg")
         fi
     fi
-
-    [[ "$actual_bytes" =~ ^[0-9]+$ ]] || actual_bytes=0
-    if [ "$actual_bytes" -lt "$MIN_ARCHIVE_BYTES" ]; then
-        FAILED_USERS=$((FAILED_USERS + 1))
-        DETAIL_LINES+=("FAIL $user TRUNCATED_OR_EMPTY archive=$archive bytes=$actual_bytes min_bytes=$MIN_ARCHIVE_BYTES")
-        continue
-    fi
-
-    if [ "$b_size_mib" -ge 2 ]; then
-        min_expected_bytes=$(( (b_size_mib - 1) * 1048576 * 75 / 100 ))
-        if [ "$actual_bytes" -lt "$min_expected_bytes" ]; then
-            FAILED_USERS=$((FAILED_USERS + 1))
-            DETAIL_LINES+=("FAIL $user SIZE_MISMATCH archive=$archive bytes=$actual_bytes expected_mib=$b_size_mib")
-            continue
-        fi
-    fi
-
-    if [ "$age_days" -gt "$MAX_AGE_DAYS" ]; then
-        FAILED_USERS=$((FAILED_USERS + 1))
-        DETAIL_LINES+=("FAIL $user STALE_BACKUP archive=$archive age_days=$age_days max_age_days=$MAX_AGE_DAYS")
-        continue
-    fi
-
-    VERIFIED_USERS=$((VERIFIED_USERS + 1))
-    TOTAL_BYTES=$((TOTAL_BYTES + actual_bytes))
-    DETAIL_LINES+=("OK $user archive=$archive bytes=$actual_bytes expected_mib=$b_size_mib age_days=$age_days")
 done
 
 OVERALL_STATUS="BACKUP_VERIFIED_OK"
@@ -255,6 +448,16 @@ fi
 {
     echo "checked_at=${CHECKED_AT}"
     echo "backend=${BACKEND}"
+    echo "tar_schedule=${TAR_SCHEDULE}"
+    echo "tar_max_age_days=${MAX_AGE_DAYS}"
+    echo "restic_enabled=${RESTIC_ENABLED}"
+    if [ "$RESTIC_ENABLED" = "yes" ]; then
+        echo "restic_verified_users=${RESTIC_VERIFIED_USERS}"
+        echo "restic_pending_users=${RESTIC_PENDING_USERS}"
+        echo "restic_failed_users=${RESTIC_FAILED_USERS}"
+        echo "restic_max_age_hours=${MAX_RESTIC_AGE_HOURS}"
+        echo "restic_latest_snapshot_at=${RESTIC_LATEST_AT}"
+    fi
     echo "active_users=${ACTIVE_USERS}"
     echo "verified_users=${VERIFIED_USERS}"
     echo "pending_users=${PENDING_USERS}"

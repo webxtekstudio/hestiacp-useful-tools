@@ -446,6 +446,55 @@ resolve_remote_ref() {
     return 1
 }
 
+# Ensure the 1st-level subdirectory inside /home/<user> (e.g. 'git' in 'git/my-repo')
+# exists as a real 0700 <uid>:<gid> directory without following symlinks, since HestiaCP
+# owns /home/<user> as 0751 root:root for SFTP chroot isolation.
+_ensure_user_top_dir() {
+    local user_home="$1"
+    local dest_rel="$2"
+    local user="$3"
+    local target_uid target_gid
+    target_uid=$(id -u "$user" 2>/dev/null) || return 1
+    target_gid=$(id -g "$user" 2>/dev/null) || return 1
+
+    python3 - "$user_home" "$dest_rel" "$target_uid" "$target_gid" << 'PYEOF' 9>&- 2>/dev/null
+import os
+import stat
+import sys
+
+user_home, dest_rel, uid_s, gid_s = sys.argv[1:5]
+uid, gid = int(uid_s), int(gid_s)
+
+parts = [p for p in dest_rel.split("/") if p]
+if not parts or any(p in (".", "..") for p in parts):
+    sys.exit(1)
+
+# Only needed when dest_rel has a parent directory segment (e.g. git/<repo>)
+if len(parts) < 2:
+    sys.exit(0)
+
+top = parts[0]
+if top == "conf":
+    sys.exit(1)
+home_fd = os.open(user_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    try:
+        st = os.lstat(top, dir_fd=home_fd)
+        if not stat.S_ISDIR(st.st_mode):
+            sys.exit(1)
+    except FileNotFoundError:
+        os.mkdir(top, 0o700, dir_fd=home_fd)
+        top_fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=home_fd)
+        try:
+            os.fchown(top_fd, uid, gid)
+            os.fchmod(top_fd, 0o700)
+        finally:
+            os.close(top_fd)
+finally:
+    os.close(home_fd)
+PYEOF
+}
+
 # Descriptor-pinned O_NOFOLLOW sanitizer for tenant mirror repositories:
 # - Replaces .git/config atomically with a minimal offline config (zero remote URLs,
 #   zero fsmonitor/sshCommand/filter/hooks directives) BEFORE and AFTER local git runs.
@@ -827,8 +876,19 @@ while IFS='|' read -r user repo branch dest_path retention_mode retention_count 
     [ -z "$USER_HOME" ] && USER_HOME="/home/$user"
     user_group=$(id -gn "$user" 2>/dev/null || echo "$user")
     BASE_DEST_PATH="${USER_HOME%/}/$dest_path"
-    
-    # Ensure destination parent directory exists as target user
+
+    # HestiaCP sets /home/<user> to 0751 root:root for OpenSSH SFTP chroot safety,
+    # so the unprivileged user cannot create a new top-level directory (e.g. 'git/')
+    # directly inside /home/<user>. Pre-create the 1st-level directory safely with
+    # descriptor-pinned O_NOFOLLOW as 0700 <user>:<group> when missing.
+    if ! _ensure_user_top_dir "$USER_HOME" "$dest_path" "$user"; then
+        msg="Failed or unsafe top-level directory for '$dest_path' in $USER_HOME"
+        log "ERROR: $msg"
+        REPOS_FAILED+=("$user/$safe_repo: $msg")
+        continue
+    fi
+
+    # Ensure deeper destination parent directories exist as target user
     if [ ! -d "$(dirname "$BASE_DEST_PATH")" ]; then
         log "Creating parent directory for $user: $(dirname "$BASE_DEST_PATH")"
         mkdir_err=$(runuser -u "$user" -- env -i PATH="/usr/bin:/bin" mkdir -p "$(dirname "$BASE_DEST_PATH")" 9>&- 2>&1)

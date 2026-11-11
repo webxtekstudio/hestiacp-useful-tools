@@ -1,12 +1,17 @@
 # Configuration for v-github-mirror
 # Format: USER|REPO_URL|BRANCH|DESTINATION_PATH_RELATIVE_TO_HOME|RETENTION_MODE|RETENTION_COUNT
+#
+# Recommended destination layout: git/<repo-name>
+#   -> Stored at /home/<user>/git/<repo-name> (0700 <user>:<user>, outside all web roots,
+#      and automatically included in HestiaCP backups as 'User Directory: git').
+#   -> Domain-scoped web/<domain>/private/<folder> paths are also supported.
 
-# Example 1: Mirror a public repo for user 'admin' (Standard Overwrite)
-admin|https://github.com/your-org/repo.git|main|web/my-domain.com/private/TOOL-GITHUB-MIRROR|overwrite
+# Example 1: Mirror a repo into the user's dedicated git/ folder (Recommended Overwrite)
+admin|https://github.com/your-org/repo.git|main|git/repo|overwrite
 
-# Example 2: Mirror a private repo for user 'client1' (Versioned, keep 5 copies)
-client1|git@github.com:my-org/website-source.git|production|web/example.com/private/WEBSITE-GITHUB-MIRROR|versioned|5
+# Example 2: Mirror a private repo with Versioned snapshots (keep last 5 copies)
+client1|git@github.com:my-org/website-source.git|production|git/website-source|versioned|5
 
-# Example 3: Mirror with Smart Retention (Daily/Weekly/Monthly backups)
-# Requires enabling ENABLE_DAILY_BACKUPS etc. in the script header
-anotheruser|git@github.com:client-x/astro-project.git|master|web/client-x.com/private/ASTRO-GITHUB-MIRROR|backup
+# Example 3: Mirror with Smart Retention (Daily/Weekly/Monthly snapshots in git/ or web/<domain>/private/)
+# Requires enabling ENABLE_DAILY_BACKUPS etc. in /etc/hestiacp-github-mirror.settings
+anotheruser|git@github.com:client-x/astro-project.git|master|git/astro-project|backup

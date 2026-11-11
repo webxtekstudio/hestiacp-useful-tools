@@ -1,6 +1,6 @@
 # 🛠️ GitHub Mirror (`github-mirror`)
 
-*Automatically clones and syncs private or public GitHub/GitLab repositories into a HestiaCP user's isolated `private/` directory using a **Zero-Trust Pull-Only Architecture** — so nightly HestiaCP backups (`v-backup-users`) include up-to-date source code snapshots without ever exposing Git credentials to tenant accounts or `public_html`.*
+*Automatically clones and syncs private or public GitHub/GitLab repositories into a HestiaCP user's dedicated `git/` directory (or `web/<domain>/private/`) using a **Zero-Trust Pull-Only Architecture** — so HestiaCP backups (`v-backup-users` / Restic) include up-to-date source code snapshots without ever exposing Git credentials to tenant accounts or `public_html`.*
 
 ---
 
@@ -20,14 +20,14 @@ bash install.sh
 * **Execution Log:** `/var/log/hestia/github-mirror.log` (`0640`)
 
 ## ⚙️ 3. How to Configure
-You need to tell the script WHICH repositories to clone and into WHICH user's `private/` folder.
+You need to tell the script WHICH repositories to clone and into WHICH user's folder (recommended: `git/<repo-name>`, which creates `/home/<user>/git/<repo-name>` with `0700` permissions and is backed up automatically by HestiaCP as `User Directory: git` without coupling repositories to any single web domain).
 
 1. Open `/etc/hestiacp-github-mirror.conf` in your editor (`nano /etc/hestiacp-github-mirror.conf`).
 2. Add your repositories using the pipe-delimited (`|`) format:
    ```text
    # Format: USER|REPO_URL|BRANCH|DESTINATION_PATH_RELATIVE_TO_HOME|RETENTION_MODE|RETENTION_COUNT
-   admin|https://github.com/your-org/repo.git|main|web/example.com/private/TOOL-GITHUB-MIRROR|overwrite
-   client1|git@github.com:your-org/website-source.git|production|web/example.com/private/WEBSITE-GITHUB-MIRROR|versioned|5
+   admin|https://github.com/your-org/repo.git|main|git/repo|overwrite
+   client1|git@github.com:your-org/website-source.git|production|git/website-source|versioned|5
    ```
 3. **Authentication for Private Repositories (Choose Option A or Option B):**
    * **Option A — Fine-Grained Read-Only Token over HTTPS (Recommended):**
@@ -41,7 +41,7 @@ You need to tell the script WHICH repositories to clone and into WHICH user's `p
      Add `/root/.ssh/id_ed25519.pub` (or `/root/.ssh/id_rsa.pub`) as a Read-Only Deploy Key on your GitHub repository and use `git@github.com:org/repo.git`.
 
 ## ⛔ 4. Crucial Rules (What NOT to do)
-* **DO NOT** mirror repositories directly into `public_html` unless intentional — always use `web/<domain>/private/<FOLDER>` so `.git` metadata and source files stay out of public web reach while still being included in HestiaCP user backups.
+* **DO NOT** mirror repositories directly into `public_html` unless intentional — always use `git/<repo>` (recommended) or `web/<domain>/private/<folder>` so `.git` metadata and source files stay out of public web reach while still being included in HestiaCP user backups.
 * **DO NOT** edit the executable `/usr/local/hestia/bin/v-github-mirror` directly. Always edit `/etc/hestiacp-github-mirror.conf` and `/etc/hestiacp-github-mirror.settings`.
 * **DO NOT** run this script as a normal user. It must be executed as `root`.
 

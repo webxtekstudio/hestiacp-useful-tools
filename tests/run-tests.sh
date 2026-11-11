@@ -258,6 +258,68 @@ else
     fail "v-clean-garbage or clean-garbage.conf.sample is missing CLEAN_WEB_LOGS"
 fi
 
+if grep -q 'NOTIFY_ON_SUCCESS="TRUE"' "$REPO_ROOT/scripts/clean-garbage/v-clean-garbage" && \
+   grep -q 'NOTIFY_ON_SUCCESS="TRUE"' "$REPO_ROOT/scripts/clean-garbage/clean-garbage.conf.sample" && \
+   grep -q -- '--force-notification' "$REPO_ROOT/scripts/clean-garbage/v-clean-garbage"; then
+    pass "v-clean-garbage and clean-garbage.conf.sample support NOTIFY_ON_SUCCESS and --force-notification"
+else
+    fail "v-clean-garbage or clean-garbage.conf.sample is missing NOTIFY_ON_SUCCESS / --force-notification"
+fi
+
+if grep -q '^_ensure_user_top_dir()' "$REPO_ROOT/scripts/github-mirror/v-github-mirror" && \
+   grep -q 'git/repo|overwrite' "$REPO_ROOT/scripts/github-mirror/github-mirror.conf.sample"; then
+    pass "v-github-mirror defines O_NOFOLLOW _ensure_user_top_dir() and recommends git/<repo> layout"
+else
+    fail "v-github-mirror or github-mirror.conf.sample missing _ensure_user_top_dir() / git/<repo> defaults"
+fi
+
+# Test v-verify-backups monthly .tar schedule auto-detection + Restic snapshot verification
+VB_DIR="$SAND_DIR/vb_test"
+mkdir -p "$VB_DIR/hestia/conf" "$VB_DIR/hestia/data/users/alice" "$VB_DIR/backup" "$VB_DIR/bin"
+cat > "$VB_DIR/hestia/conf/hestia.conf" << EOF
+BACKUP='$VB_DIR/backup'
+BACKUP_SYSTEM='local'
+BACKUP_INCREMENTAL='yes'
+EOF
+cat > "$VB_DIR/hestia/conf/restic.conf" << 'EOF'
+REPO='rclone:mockremote:mockbucket'
+EOF
+echo "SUSPENDED='no'" > "$VB_DIR/hestia/data/users/alice/user.conf"
+echo "DATE='2026-01-01'" >> "$VB_DIR/hestia/data/users/alice/user.conf"
+echo "mockpass" > "$VB_DIR/hestia/data/users/alice/restic.conf"
+chmod 600 "$VB_DIR/hestia/data/users/alice/restic.conf"
+
+# Create a valid >10KB local .tar archive dated 20 days ago (valid for monthly=35d, stale for weekly=8d)
+dd if=/dev/zero of="$VB_DIR/payload.bin" bs=1024 count=16 >/dev/null 2>&1
+tar -cf "$VB_DIR/backup/alice.2026-01-01.tar" -C "$VB_DIR" payload.bin
+twenty_days_ago=$(date -d "20 days ago" +"%Y-%m-%d")
+echo "BACKUP='alice.2026-01-01.tar' SIZE='0' TIME='03:30:00' DATE='$twenty_days_ago'" > "$VB_DIR/hestia/data/users/alice/backup.conf"
+echo "30 03 1 * * sudo /usr/local/hestia/bin/v-backup-users" > "$VB_DIR/crontab.hestiaweb"
+
+fresh_iso=$(date -u +"%Y-%m-%dT%H:%M:%S.123456789Z")
+stale_iso=$(date -u -d "72 hours ago" +"%Y-%m-%dT%H:%M:%SZ")
+cat > "$VB_DIR/bin/restic" << EOF
+#!/bin/bash
+echo '[{"short_id":"a1b2c3d4","time":"'"\${MOCK_RESTIC_TIME}"'"}]'
+EOF
+chmod +x "$VB_DIR/bin/restic"
+
+vb_ok_out=$(PATH="$VB_DIR/bin:$PATH" HESTIA="$VB_DIR/hestia" HESTIA_CRONTAB_FILE="$VB_DIR/crontab.hestiaweb" MOCK_RESTIC_TIME="$fresh_iso" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-verify-backups" --status-file="$VB_DIR/status.txt" 2>&1)
+vb_ok_rc=$?
+if [ "$vb_ok_rc" -eq 0 ] && printf '%s\n' "$vb_ok_out" | grep -q '^tar_schedule=monthly$' && printf '%s\n' "$vb_ok_out" | grep -q '^restic_verified_users=1$' && printf '%s\n' "$vb_ok_out" | grep -q 'restic_snapshot=a1b2c3d4'; then
+    pass "v-verify-backups auto-detects monthly .tar schedule (35d) and verifies fresh Restic snapshots"
+else
+    fail "v-verify-backups failed monthly+Restic OK check (rc=$vb_ok_rc): $vb_ok_out"
+fi
+
+vb_stale_out=$(PATH="$VB_DIR/bin:$PATH" HESTIA="$VB_DIR/hestia" HESTIA_CRONTAB_FILE="$VB_DIR/crontab.hestiaweb" MOCK_RESTIC_TIME="$stale_iso" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-verify-backups" --status-file="$VB_DIR/status2.txt" 2>&1)
+vb_stale_rc=$?
+if [ "$vb_stale_rc" -ne 0 ] && printf '%s\n' "$vb_stale_out" | grep -q 'STALE_RESTIC_SNAPSHOT'; then
+    pass "v-verify-backups fails with STALE_RESTIC_SNAPSHOT when Restic snapshot exceeds 36h"
+else
+    fail "v-verify-backups did not flag stale 72h Restic snapshot (rc=$vb_stale_rc): $vb_stale_out"
+fi
+
 # -----------------------------------------------------------------------------
 # 5. v-security-audit Accuracy (S15c .local filter & S38/S59 ACCOUNTS='0')
 # -----------------------------------------------------------------------------

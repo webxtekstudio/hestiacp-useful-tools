@@ -111,8 +111,9 @@ Log lines alone cannot catch a truncated upload or an accidentally deleted cloud
 
 - The expected `.tar` archive actually exists on the remote backend
 - The archive is non-empty (`>= 10 KB`) and matches HestiaCP's recorded `SIZE` within tolerance
-- The archive age does not exceed `--max-age-days=8`
-- Newly created HestiaCP accounts (`<= 8` days old in `user.conf`) without their first weekly archive yet are marked `PENDING_FIRST_BACKUP` rather than failing verification
+- The archive age does not exceed `--max-age-days` (auto-detected as `8` days for weekly/daily `v-backup-users` schedules, or `35` days when `v-backup-users` is scheduled monthly)
+- When HestiaCP's Restic incremental backups are enabled (`BACKUP_INCREMENTAL='yes'` in `hestia.conf` + `restic.conf`), every active user's Restic repository is also verified (`restic snapshots --latest 1 --json --no-lock` within `--max-restic-age-hours=36`)
+- Newly created HestiaCP accounts without their first scheduled archive/snapshot yet are marked `PENDING_FIRST_BACKUP` / `PENDING_FIRST_RESTIC_SNAPSHOT` rather than failing verification
 
 It runs automatically after `v-backup-users` and single-user B2 retries, writing a machine-readable report to `/var/log/hestia/backup-verify.status` (`status=B2_VERIFIED_OK` or `status=BACKUP_VERIFY_FAILED`), and can also be executed manually at any time:
 

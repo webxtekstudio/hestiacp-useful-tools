@@ -153,7 +153,7 @@ v-harden-server --unban <IP>      # Unban an IP across CrowdSec, HestiaCP firewa
 
 ## v-github-mirror (Zero-Trust Pull-Only Architecture)
 
-Clones or updates configured Git repositories into user `private/` directories so HestiaCP user backups (`v-backup-users`) include up-to-date repository snapshots without granting any HestiaCP user access to GitHub credentials or network Git remotes.
+Clones or updates configured Git repositories into user `/home/<user>/git/<repo>` directories (or `web/<domain>/private/`) so HestiaCP user backups (`v-backup-users` / Restic) include up-to-date repository snapshots without granting any HestiaCP user access to GitHub credentials or network Git remotes.
 
 | Component | Path | Description |
 | :--- | :--- | :--- |

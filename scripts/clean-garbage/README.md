@@ -20,7 +20,7 @@ If you want to look at the files, here is exactly where the installer places the
 By default, the script will safely clean logs older than 7 days. If you want to change this behavior:
 
 1. Open `/etc/hestiacp-clean-garbage.conf` in your editor (e.g. `nano /etc/hestiacp-clean-garbage.conf`).
-2. Change the variables you want. For example, to keep logs for 30 days instead of 7, change `JOURNALCTL_RETENTION_DAYS=7` to `JOURNALCTL_RETENTION_DAYS=30`.
+2. Change the variables you want. For example, to keep logs for 30 days instead of 7, change `JOURNALCTL_RETENTION_DAYS=7` to `JOURNALCTL_RETENTION_DAYS=30`. To receive emails **only when a cleanup task fails**, set `NOTIFY_ON_SUCCESS="FALSE"` (you can still trigger a summary email manually anytime with `v-clean-garbage --force-notification`).
 3. Save the file. The cleanup script will automatically read this file the next time it runs!
 
 ## ⛔ 4. Crucial Rules (What NOT to do)

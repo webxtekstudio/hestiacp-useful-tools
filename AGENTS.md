@@ -26,7 +26,7 @@
 | [`scripts/system-report/`](./scripts/system-report/) | `v-system-report` — automated HTML system health and resource report |
 | [`scripts/fix-web-permissions/`](./scripts/fix-web-permissions/) | `v-fix-web-permissions` — CMS-aware ownership and permission repair for HestiaCP web directories |
 | [`scripts/clean-garbage/`](./scripts/clean-garbage/) | `v-clean-garbage` — safe cleanup of system logs, rotated logs, PHP sessions, temp dirs, and mail/trash retention |
-| [`scripts/github-mirror/`](./scripts/github-mirror/) | `v-github-mirror` — zero-trust pull-only Git repository mirror into tenant `private/` directories |
+| [`scripts/github-mirror/`](./scripts/github-mirror/) | `v-github-mirror` — zero-trust pull-only Git repository mirror into tenant `git/` (or `private/`) directories |
 | [`scripts/exim-limit/`](./scripts/exim-limit/) | `v-add-exim-limit` & `monitor_large_emails.py` — attachment size limit, `+local_domains` `From:` header anti-spoofing, and alert monitor |
 | [`scripts/logrotate-optimize/`](./scripts/logrotate-optimize/) | `v-optimize-logrotate` — upgrades Apache & Nginx log rotation from weekly to daily (`rotate 14`) |
 | [`scripts/fail2ban-optimize/`](./scripts/fail2ban-optimize/) | `v-optimize-fail2ban` — balances Dovecot & Exim Fail2Ban thresholds via `.local` precedence |

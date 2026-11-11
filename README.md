@@ -53,7 +53,7 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 | :--- | :--- | :--- | :--- |
 | **[System Cleanup Guide](scripts/clean-garbage/README.md)** | `v-clean-garbage` | `30 4 * * 0` (Sun 04:30) | Cleans journald, rotated logs, PHP sessions, temp files, mail queue & spam |
 | **[Backup Core Patches Guide](scripts/backup-core-patches/README.md)** | `v-backup-users` / `v-prune-backups` / `v-verify-backups` | `10 5 * * *` (Hestia native) | `YYYY/MM_MONTH/user` layout, DB auto-repair, Dark-Mode HTML emails, B2 retry, retention & verification |
-| **[GitHub Mirror Guide](scripts/github-mirror/README.md)** | `v-github-mirror` | `0 */12 * * *` (every 12h + Sun 06:00) | Zero-trust pull-only mirror of private/public Git repos into `/home/<user>/web/<domain>/private/` |
+| **[GitHub Mirror Guide](scripts/github-mirror/README.md)** | `v-github-mirror` | `0 */12 * * *` (every 12h + Sun 06:00) | Zero-trust pull-only mirror of private/public Git repos into `/home/<user>/git/<repo>` (or `private/`) |
 | **[Exim Limit & Anti-Spoof Guide](scripts/exim-limit/README.md)** | `v-add-exim-limit` / `monitor_large_emails.py` | `0 * * * *` (hourly monitor) | Enforces 25MB attachment limit + blocks external `From:` spoofing on `+local_domains` & IP-literal HELOs |
 | **[System Health Report Guide](scripts/system-report/README.md)** | `v-system-report` | `0 8 * * 0` (Sun 08:00) | HTML health digest (CPU, RAM, Disk, Services, SSL expiry, RBL blacklists) |
 | **[Web Permissions Fixer Guide](scripts/fix-web-permissions/README.md)** | `v-fix-web-permissions` | On-demand rescue | Fixes `public_html` ownerships, hardens CMS configs (`640`), flags exposed `.git` |
@@ -78,8 +78,8 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 - **Remote & Local Backup Verification (`v-verify-backups`):** Cross-checks every non-suspended HestiaCP user's latest `backup.conf` entry against the live remote bucket (`b2 ls --long` / `rclone lsl`) or local `.tar` archive (`tar -tf`), verifying existence, byte-size tolerance, and freshness (`<= 8` days, with a `PENDING_FIRST_BACKUP` grace window for newly created accounts) into `/var/log/hestia/backup-verify.status`.
 
 #### [GitHub Mirror (`v-github-mirror`)](scripts/github-mirror/)
-- A cron-based auto-pull script that securely mirrors private GitHub/GitLab repositories straight into a specified user's `private` directory (safely away from public web access).
-- Automatically fixes the ownership permissions intrinsically so Hestia isn't locked out of `public_html`. Perfect for keeping static source code synced for local backups.
+- A cron-based zero-trust auto-pull script that mirrors private/public GitHub or GitLab repositories into a user's isolated `/home/<user>/git/<repo>` directory (or `web/<domain>/private/`), safely outside public web access and automatically included in HestiaCP user backups (`User Directory: git`).
+- Automatically pre-creates top-level `git/` directories (`0700 <user>:<user>`) on SFTP-chrooted HestiaCP homes and strips remote URLs/credentials from tenant `.git/config`.
 
 #### [Exim Limit & Anti-Spoof Monitor (`v-add-exim-limit`)](scripts/exim-limit/)
 - Blocks outgoing emails larger than 25MB to protect IP reputation, with user-friendly rejection messages and admin alerts.

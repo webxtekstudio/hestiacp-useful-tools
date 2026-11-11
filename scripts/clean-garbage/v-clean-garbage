@@ -13,6 +13,8 @@ set -o pipefail
 
 # Email notification (leave empty to auto-detect from admin user)
 ADMIN_EMAIL_OVERRIDE=""
+# Set to "FALSE" to send email reports ONLY when a cleanup task fails (or with --force-notification)
+NOTIFY_ON_SUCCESS="TRUE"
 
 #------------------------------------------
 # RETENTION PERIODS (days)
@@ -91,6 +93,13 @@ RUN_SSD_TRIM="TRUE"
 if [ -f "/etc/hestiacp-clean-garbage.conf" ]; then
     source /etc/hestiacp-clean-garbage.conf
 fi
+
+FORCE_NOTIFICATION="FALSE"
+for arg in "$@"; do
+    case "$arg" in
+        --force-notification) FORCE_NOTIFICATION="TRUE" ;;
+    esac
+done
 #==========================================
 
 # Single-instance guard using flock (atomic, race-condition free)
@@ -1302,12 +1311,17 @@ send_html_email() {
 }
 
 if [ -n "$ADMIN_EMAIL" ]; then
-    echo ""
-    echo -n "[$(date)] : Sending email to $ADMIN_EMAIL... "
-    if send_html_email "$FINAL_STATUS" "$ADMIN_EMAIL"; then
-        echo "OK"
+    if [ "$FINAL_STATUS" != "SUCCESS" ] || [[ "${NOTIFY_ON_SUCCESS^^}" == "TRUE" ]] || [ "$FORCE_NOTIFICATION" = "TRUE" ]; then
+        echo ""
+        echo -n "[$(date)] : Sending email to $ADMIN_EMAIL... "
+        if send_html_email "$FINAL_STATUS" "$ADMIN_EMAIL"; then
+            echo "OK"
+        else
+            echo "FAIL"
+        fi
     else
-        echo "FAIL"
+        echo ""
+        echo "[$(date)] : Skipping email report (Success and NOTIFY_ON_SUCCESS=${NOTIFY_ON_SUCCESS})."
     fi
 fi
 
