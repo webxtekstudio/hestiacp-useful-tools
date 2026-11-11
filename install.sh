@@ -317,10 +317,10 @@ if ! echo "$backup_system" | grep -qE "b2|sftp|ftp|rclone" && [ -t 0 ]; then
     if [ -f "/var/spool/cron/crontabs/hestiaweb" ] && grep -q "v-backup-users" "/var/spool/cron/crontabs/hestiaweb" 2>/dev/null; then
         echo ""
         echo "Classic .tar Backup Schedule (v-backup-users):"
-        echo "  1) Keep current HestiaCP schedule (default)"
-        echo "  2) Monthly on the 1st at 03:30 UTC (recommended when paired with Daily Restic at 02:30)"
+        echo "  1) Monthly on the 1st at 03:30 UTC (recommended default with Daily Restic at 02:30)"
+        echo "  2) Keep current HestiaCP schedule"
         read -rp "Choose [1-2] (default: 1): " tar_sched_choice
-        if [ "${tar_sched_choice:-1}" = "2" ]; then
+        if [ "${tar_sched_choice:-1}" = "1" ]; then
             sed -i 's|^[0-9*]\+ [0-9*]\+ [0-9*]\+ [0-9*]\+ [0-9*]\+\(.*v-backup-users\)|30 03 1 * *\1|' /var/spool/cron/crontabs/hestiaweb
             echo "  -> Updated v-backup-users to run monthly on the 1st at 03:30 UTC (30 03 1 * *)."
         fi
@@ -405,6 +405,11 @@ CRONHEADER
             add_cron_entry "restic-daily" \
                 "30 2 * * *" \
                 "root /usr/local/hestia/bin/v-restic-manager --run-daily >> /var/log/hestia/restic-daily.log 2>&1"
+        fi
+        # When Restic daily backups are enabled, switch HestiaCP's default daily v-backup-users (10 05 * * *) to Monthly on the 1st at 03:30
+        if [ -f "/var/spool/cron/crontabs/hestiaweb" ] && grep -qE "^10 05 \* \* \*.*v-backup-users" "/var/spool/cron/crontabs/hestiaweb" 2>/dev/null; then
+            sed -i 's|^10 05 \* \* \*\(.*v-backup-users\)|30 03 1 * *\1|' /var/spool/cron/crontabs/hestiaweb
+            echo "  -> [OK] Updated v-backup-users to Monthly Hybrid schedule (30 03 1 * *)"
         fi
     fi
 

@@ -234,8 +234,10 @@ Out of the box, HestiaCP's **Backups → Incremental Backups** (`/list/backup/in
 
 Because `v-backup-user-config` already stages `hestia/`, `pam/`, `db/`, `dns/`, `cron/`, `web/*/conf|hestia|template`, `mail/*/conf|hestia`, and `backup.conf` inside `/home/<user>/backup` before every Restic snapshot, `backup-core-patches` adds:
 
-1. **Web Panel Download Button (`fa-file-arrow-down`) & Toolbar Navigation:**
+1. **Web Panel Download Button (`fa-file-arrow-down`), Top Menu `Snapshots: X` Counter, Sorting & In-Page Search:**
    - Injects a **Download (`.tar`)** action icon on every snapshot row in `/list/backup/incremental/` (plus **Back** and **Backup Exclusions** toolbar buttons).
+   - Adds a second stats line (**`snapshots: X`**) under **`BACKUP`** in the top navigation bar (`panel.php`), backed by `U_BACKUPS_INCREMENTAL` in `user.conf` (`< 1 ms`, zero remote Restic queries on page loads).
+   - Adds client-side **Sort by (`Date` / `Size` / `Name` / `Type`)** and in-page **Search (`?q=...`)** across `/list/backup/`, `/list/backup/incremental/`, and the snapshot file browser (`/list/backup/incremental/?snapshot=...&browse=yes`).
    - For accounts `<= 500 MB` (or already-exported snapshots), clicking **Download** reconstructs `/backup/<user>.<date>.tar` in a few seconds and immediately streams it to the browser via Nginx `X-Accel-Redirect`.
    - For multi-gigabyte accounts (`> 500 MB`), clicking **Download** queues the export in the background so the browser never hits an HTTP/Cloudflare timeout, registers the resulting `.tar` in `/list/backup/`, and sends a HestiaCP bell notification when ready (with automatic 24-hour `/backup/` cleanup via `at now + 1 day`).
 2. **CLI Export & Streaming (`--export-tar` / `--dump-tar`):**
