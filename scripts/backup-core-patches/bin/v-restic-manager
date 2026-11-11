@@ -7,14 +7,22 @@
 #   2. Auto-enrolls the Master Recovery Key across every active user's Restic repository (dual-key unlock)
 #   3. Enforces 0600 root:root on /usr/local/hestia/data/users/*/restic.conf and 0660 on conf/restic.conf
 #   4. Deletes /home/<user>/backup immediately after each Restic snapshot so shadow/SSL/SQL staging dumps never linger
-#   5. Refreshes v-verify-backups and dispatches alerts (email + optional Argos real-time event) ONLY on failure
+#   5. Refreshes v-verify-backups and dispatches alerts (email + optional RESTIC_FAILURE_HOOK) ONLY on failure
 
 export HOME="${HOME:-/root}"
-export PATH="/usr/local/hestia/bin:/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:$PATH"
 set -uo pipefail
 
+if [ -z "${HESTIA:-}" ] && [ -f /etc/hestiacp/hestia.conf ]; then
+    # shellcheck disable=SC1091
+    source /etc/hestiacp/hestia.conf
+fi
 HESTIA="${HESTIA:-/usr/local/hestia}"
 BIN="$HESTIA/bin"
+if [ "$HESTIA" = "/usr/local/hestia" ] && [ "${RESTIC_MANAGER_ALLOW_NONROOT:-0}" != "1" ]; then
+    export PATH="$BIN:/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:$PATH"
+else
+    export PATH="$PATH:$BIN:/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin"
+fi
 HESTIA_LOG="$HESTIA/log/backup.log"
 HESTIA_HOME_ROOT="${HESTIA_HOME_ROOT:-/home}"
 MASTER_KEY_FILE="${RESTIC_MASTER_KEY_FILE:-/etc/hestiacp-restic-master.key}"
@@ -72,8 +80,6 @@ if [ "${EUID:-$(id -u)}" -ne 0 ] && [ "${RESTIC_MANAGER_ALLOW_NONROOT:-0}" != "1
 fi
 
 load_hestia_restic_conf() {
-    # shellcheck disable=SC1091
-    [ -f /etc/hestiacp/hestia.conf ] && source /etc/hestiacp/hestia.conf
     # shellcheck disable=SC1091
     [ -f "$HESTIA/conf/hestia.conf" ] && source "$HESTIA/conf/hestia.conf"
 
@@ -256,14 +262,9 @@ emit_failure_alerts() {
     local host_fqdn
     host_fqdn="$(hostname -f 2>/dev/null || hostname)"
 
-    # 1. Emit real-time Zero-Trust Argos event if installed (instant AGENT-X P1 alarm)
-    if [ -x /opt/webxtek-scripts/argos-hestia-emit-event.sh ]; then
-        /opt/webxtek-scripts/argos-hestia-emit-event.sh \
-            "restic_daily_backup" \
-            "RESTIC_BACKUP_FAILED" \
-            "CRITICAL" \
-            "Restic daily backup or verification failed on $host_fqdn (failed_users=${failed_list:-none}, verify_rc=$verify_rc)" \
-            "Inspect /var/log/hestia/restic-daily.log and /var/log/hestia/backup-verify.status" >/dev/null 2>&1 || true
+    # 1. Invoke optional custom failure hook if configured
+    if [ -n "${RESTIC_FAILURE_HOOK:-}" ] && [ -x "$RESTIC_FAILURE_HOOK" ]; then
+        "$RESTIC_FAILURE_HOOK" "${failed_list:-none}" "$verify_rc" >/dev/null 2>&1 || true
     fi
 
     # 2. Send alert email to HestiaCP admin contact
@@ -317,7 +318,7 @@ do_run_daily() {
     echo "$(date '+%F %T') Starting Daily Restic Incremental Backup"
     echo "================================================================="
 
-    if command -v mysqlrepair >/dev/null 2>&1; then
+    if [ "$HESTIA" = "/usr/local/hestia" ] && command -v mysqlrepair >/dev/null 2>&1; then
         mysqlrepair --all-databases --check --auto-repair >/dev/null 2>&1 || true
     fi
 
@@ -377,14 +378,10 @@ do_run_daily() {
 
     local verify_rc=0
     if [ -x "$BIN/v-verify-backups" ]; then
-        if [ -f /root/.b2_account_info ]; then
+        if [ "$HESTIA" = "/usr/local/hestia" ] && [ -f /root/.b2_account_info ]; then
             B2_ACCOUNT_INFO=/root/.b2_account_info "$BIN/v-verify-backups" --status-file="$VERIFY_STATUS_FILE" --quiet 9>&- || verify_rc=$?
         else
             "$BIN/v-verify-backups" --status-file="$VERIFY_STATUS_FILE" --quiet 9>&- || verify_rc=$?
-        fi
-        if [ -d /run/argos-ro ] && [ -f "$VERIFY_STATUS_FILE" ]; then
-            cp -f "$VERIFY_STATUS_FILE" /run/argos-ro/backup-verify.txt 2>/dev/null || true
-            chmod 0644 /run/argos-ro/backup-verify.txt 2>/dev/null || true
         fi
     fi
 
