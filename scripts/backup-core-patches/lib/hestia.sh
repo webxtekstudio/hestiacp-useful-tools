@@ -1003,7 +1003,7 @@ INC_CTRL_EOF
         temp_pnl=$(mktemp /run/patch-panel.XXXXXX) || return 1
         awk '
             /href="\/list\/backup\/"/ {
-                sub(/\$panel\[\$user\]\["BACKUPS"\] \?>"/, "$panel[$user][\"BACKUPS\"] ?><?php if ($panel[$user][\"BACKUPS_INCREMENTAL\"] == \"yes\") { ?>&#13;<?= _(\"Snapshots\") ?>: <?= $panel[$user][\"U_BACKUPS_INCREMENTAL\"] ?? 0 ?><?php } ?>\"")
+                sub(/\$panel\[\$user\]\["BACKUPS"\] \?>"/, "$panel[$user][\"BACKUPS\"] ?><?php if ($panel[$user][\"BACKUPS_INCREMENTAL\"] == \"yes\") { ?>\\&#13;<?= _(\"Snapshots\") ?>: <?= $panel[$user][\"U_BACKUPS_INCREMENTAL\"] ?? 0 ?><?php } ?>\"")
                 print
                 in_backup_tab = 1
                 next
