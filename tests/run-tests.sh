@@ -408,6 +408,53 @@ else
     fail "v-restic-manager --run-daily failed (rc=$rm_daily_rc): $rm_daily_out"
 fi
 
+# Test v-restic-manager --export-tar (reconstructs HestiaCP v-restore-user compatible .tar archive from Restic snapshot)
+mkdir -p "$RM_DIR/backup"
+cat >> "$RM_DIR/hestia/conf/hestia.conf" << EOF
+BACKUP='$RM_DIR/backup'
+BACKUP_MODE='gzip'
+BACKUP_GZIP='6'
+EOF
+echo "U_BACKUPS='0'" >> "$RM_DIR/hestia/data/users/bob/user.conf"
+cat > "$RM_DIR/bin/restic" << EOF
+#!/bin/bash
+if echo "\$*" | grep -q "restore"; then
+    target=""
+    while [ \$# -gt 0 ]; do
+        if [ "\$1" = "--target" ]; then
+            target="\$2"
+            shift 2
+            continue
+        fi
+        shift
+    done
+    mkdir -p "\$target$RM_DIR/home/bob/backup/hestia" "\$target$RM_DIR/home/bob/backup/pam" "\$target$RM_DIR/home/bob/backup/web/example.com/hestia" "\$target$RM_DIR/home/bob/web/example.com/public_html"
+    echo "SUSPENDED='no'" > "\$target$RM_DIR/home/bob/backup/hestia/user.conf"
+    echo "bob:x:1001:1001::/home/bob:/bin/bash" > "\$target$RM_DIR/home/bob/backup/pam/passwd"
+    echo "DOMAIN='example.com'" > "\$target$RM_DIR/home/bob/backup/web/example.com/hestia/web.conf"
+    echo "hello world" > "\$target$RM_DIR/home/bob/web/example.com/public_html/index.html"
+    echo "alias ll='ls -l'" > "\$target$RM_DIR/home/bob/.bashrc"
+    echo "BACKUP='snapshot' TYPE='restic' WEB='example.com' DNS='' MAIL='' DB='' CRON='0' UDIR='' RUNTIME='1' TIME='16:30:26' DATE='2026-11-11' BACKUP_MODE='gzip'" > "\$target$RM_DIR/home/bob/backup/backup.conf"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "$RM_DIR/bin/restic"
+
+rm_export_out=$(PATH="$RM_DIR/bin:$PATH" HESTIA="$RM_DIR/hestia" HESTIA_HOME_ROOT="$RM_DIR/home" RESTIC_MANAGER_ALLOW_NONROOT=1 RESTIC_MASTER_KEY_FILE="$RM_DIR/master.key" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-restic-manager" --export-tar bob latest 2>&1)
+rm_export_rc=$?
+exported_tar="$RM_DIR/backup/bob.2026-11-11_16-30-26.tar"
+if [ "$rm_export_rc" -eq 0 ] && \
+   [ -f "$exported_tar" ] && \
+   tar -tf "$exported_tar" | grep -q "^\./web/example.com/domain_data.tar.gz$" && \
+   tar -tf "$exported_tar" | grep -q "^\./user_dir/\.bashrc.tar.gz$" && \
+   grep -q "BACKUP='bob.2026-11-11_16-30-26.tar' TYPE='local'" "$RM_DIR/hestia/data/users/bob/backup.conf" && \
+   grep -q "^U_BACKUPS='1'" "$RM_DIR/hestia/data/users/bob/user.conf"; then
+    pass "v-restic-manager --export-tar reconstructs a HestiaCP-compatible .tar archive and registers it in backup.conf"
+else
+    fail "v-restic-manager --export-tar failed (rc=$rm_export_rc): $rm_export_out"
+fi
+
 # -----------------------------------------------------------------------------
 # 5. v-security-audit Accuracy (S15c .local filter & S38/S59 ACCOUNTS='0')
 # -----------------------------------------------------------------------------

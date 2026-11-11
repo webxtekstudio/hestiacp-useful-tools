@@ -169,11 +169,31 @@ HestiaCP's built-in Restic support (`v-add-backup-host-restic` / `v-backup-user-
    30 2 * * * root /usr/local/hestia/bin/v-restic-manager --run-daily >> /var/log/hestia/restic-daily.log 2>&1
    ```
 
-#### Bare-Metal Emergency Restore (Total Server Loss — Using Only the Master Recovery Key)
+#### Exporting a Restic Snapshot to a Native HestiaCP `.tar` Archive (`--export-tar` / `--dump-tar`)
 
-Even if the original HestiaCP server and all `/usr/local/hestia/data/users/*/restic.conf` files are completely destroyed, any user's Restic repository can be unlocked on a fresh Linux machine using only your offline Master Recovery Key:
+Because `v-backup-user-config` already stages `hestia/`, `pam/`, `db/`, `dns/`, `cron/`, `web/*/conf|hestia|template`, `mail/*/conf|hestia`, and `backup.conf` inside `/home/<user>/backup` before every Restic snapshot, `v-restic-manager --export-tar` can reconstruct a **100% native `v-restore-user`-compatible `/backup/<user>.<date>.tar` archive** from any Restic snapshot on Backblaze B2 — and automatically register it in `data/users/<user>/backup.conf` (`TYPE='local'`) so it appears in the HestiaCP **BACKUP** tab for instant browser **Download** or **Restore**:
 
 ```bash
+# Reconstruct a full HestiaCP .tar archive in /backup/ and register it in the Web Panel:
+v-restic-manager --export-tar <username> [snapshot_id|latest]
+
+# Reconstruct a full HestiaCP .tar archive at a custom path without registering:
+v-restic-manager --export-tar <username> latest /tmp/<username>.tar --no-register
+
+# Or stream a raw tar directly from Restic (zero local staging disk usage):
+v-restic-manager --dump-tar <username> latest /tmp/<username>-raw.tar [/home/<username>/subpath]
+```
+
+#### Bare-Metal Emergency Restore (Total Server Loss — Using Only the Master Recovery Key)
+
+Even if the original HestiaCP server and all `/usr/local/hestia/data/users/*/restic.conf` files are completely destroyed, any user's Restic repository can be unlocked on a fresh HestiaCP server using only your offline Master Recovery Key (`/etc/hestiacp-restic-master.key`) and converted directly into a native HestiaCP `.tar` archive for `v-restore-user`:
+
+```bash
+# Option A — Reconstruct a native HestiaCP .tar archive using the Master Recovery Key and restore:
+v-restic-manager --export-tar <username> latest /backup/<username>.latest.tar --no-register
+v-restore-user <username> <username>.latest.tar
+
+# Option B — Direct Restic CLI access:
 export RESTIC_REPOSITORY="rclone:b2restic:YOUR_RESTIC_BUCKET/<username>"
 restic --password-file /path/to/master.key snapshots
 restic --password-file /path/to/master.key restore latest --target /restore/<username>

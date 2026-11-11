@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# info: manage HestiaCP Restic incremental backups, offline Master Recovery Key enrollment, and daily execution
-# options: --init-master-key [--print] | --enroll | --run-daily | --status | --help
+# info: manage HestiaCP Restic incremental backups, offline Master Recovery Key enrollment, daily execution, and .tar export
+# options: --init-master-key [--print] | --enroll | --run-daily | --status | --export-tar USER [SNAPSHOT] [OUTPUT_TAR] [--no-register] | --dump-tar USER [SNAPSHOT] OUTPUT_TAR [SUBPATH] | --help
 #
 # Hardens HestiaCP's native Restic incremental backups:
 #   1. Generates and protects an offline Master Recovery Key (/etc/hestiacp-restic-master.key, 0400 root:root)
@@ -31,23 +31,29 @@ VERIFY_STATUS_FILE="${RESTIC_VERIFY_STATUS_FILE:-/var/log/hestia/backup-verify.s
 
 ACTION=""
 PRINT_KEY=false
+REGISTER_EXPORT=true
+POSITIONAL_ARGS=()
 
 print_usage() {
     cat << 'EOF'
 Usage: v-restic-manager <ACTION> [OPTIONS]
 
 Actions:
-  --init-master-key [--print]  Generate /etc/hestiacp-restic-master.key (0400 root:root) if missing
-  --enroll                     Enable BACKUPS_INCREMENTAL='yes', lock restic.conf (0600), and enroll Master Key on all active repos
-  --run-daily                  Run daily Restic snapshots for all active users, enroll Master Key, clean staging dirs, and alert on error
-  --status                     Show Restic configuration, Master Key protection, and per-user repository status
-  --help, -h                   Show this help message
+  --init-master-key [--print]                  Generate /etc/hestiacp-restic-master.key (0400 root:root) if missing
+  --enroll                                     Enable BACKUPS_INCREMENTAL='yes', lock restic.conf (0600), and enroll Master Key on all active repos
+  --run-daily                                  Run daily Restic snapshots for all active users, enroll Master Key, clean staging dirs, and alert on error
+  --status                                     Show Restic configuration, Master Key protection, and per-user repository status
+  --export-tar USER [SNAPSHOT] [OUTPUT_TAR]    Reconstruct a HestiaCP v-restore-user compatible .tar archive from a Restic snapshot
+                                               (defaults to SNAPSHOT='latest' and OUTPUT_TAR='/backup/<user>.<date>.tar', registering it in HestiaCP;
+                                                pass --no-register to skip adding the exported archive to data/users/<user>/backup.conf)
+  --dump-tar USER [SNAPSHOT] OUTPUT_TAR [PATH] Stream a raw tar archive directly from Restic (defaults to SNAPSHOT='latest' and PATH='/home/<user>')
+  --help, -h                                   Show this help message
 EOF
 }
 
 for arg in "$@"; do
     case "$arg" in
-        --init-master-key|--enroll|--run-daily|--status)
+        --init-master-key|--enroll|--run-daily|--status|--export-tar|--dump-tar)
             if [ -n "$ACTION" ] && [ "$ACTION" != "$arg" ]; then
                 echo "ERROR: Specify only one action flag." >&2
                 exit 2
@@ -57,14 +63,20 @@ for arg in "$@"; do
         --print)
             PRINT_KEY=true
             ;;
+        --no-register)
+            REGISTER_EXPORT=false
+            ;;
         --help|-h)
             print_usage
             exit 0
             ;;
-        *)
+        --*)
             echo "ERROR: Unknown option: $arg" >&2
             print_usage >&2
             exit 2
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$arg")
             ;;
     esac
 done
@@ -395,9 +407,262 @@ do_run_daily() {
     exit 0
 }
 
+resolve_restic_password_file() {
+    local user="$1"
+    local u_rconf="$HESTIA/data/users/$user/restic.conf"
+    if [ -s "$u_rconf" ]; then
+        echo "$u_rconf"
+        return 0
+    fi
+    if [ -s "$MASTER_KEY_FILE" ]; then
+        echo "$MASTER_KEY_FILE"
+        return 0
+    fi
+    return 1
+}
+
+extract_kv_from_conf() {
+    local file="$1" key="$2"
+    sed -nE "s/.*(^|[[:space:]])${key}='([^']*)'.*/\2/p" "$file" 2>/dev/null | tail -n 1
+}
+
+compress_tar_stream() {
+    local mode="$1" lvl="$2" out_file="$3"
+    if [ "$mode" = "zstd" ]; then
+        if command -v pzstd >/dev/null 2>&1; then
+            pzstd -"$lvl" - > "$out_file"
+        else
+            zstd -"$lvl" -q - > "$out_file"
+        fi
+    else
+        gzip -"$lvl" - > "$out_file"
+    fi
+}
+
+do_dump_tar() {
+    load_hestia_restic_conf
+    if [ -z "${REPO:-}" ]; then
+        echo "ERROR: REPO is not configured in $HESTIA/conf/restic.conf." >&2
+        exit 1
+    fi
+    local user="${POSITIONAL_ARGS[0]:-}"
+    local snapshot="${POSITIONAL_ARGS[1]:-latest}"
+    local output_tar="${POSITIONAL_ARGS[2]:-}"
+    local subpath="${POSITIONAL_ARGS[3]:-}"
+
+    if [ -z "$user" ] || [ -z "$output_tar" ]; then
+        echo "Usage: v-restic-manager --dump-tar <USER> [SNAPSHOT|latest] <OUTPUT_TAR> [SUBPATH]" >&2
+        exit 2
+    fi
+    if [[ ! "$user" =~ ^[A-Za-z0-9._-]+$ ]] || [[ ! "$snapshot" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "ERROR: Invalid user or snapshot identifier." >&2
+        exit 2
+    fi
+    [ -z "$subpath" ] && subpath="$HESTIA_HOME_ROOT/$user"
+
+    local pw_file=""
+    if ! pw_file="$(resolve_restic_password_file "$user")"; then
+        echo "ERROR: Neither $HESTIA/data/users/$user/restic.conf nor $MASTER_KEY_FILE is available." >&2
+        exit 1
+    fi
+
+    mkdir -p "$(dirname "$output_tar")"
+    echo "$(date '+%F %T') [DUMP] Streaming Restic snapshot '$snapshot' ($subpath) for $user to $output_tar..."
+    if ! restic --repo "${REPO%/}/$user" --password-file "$pw_file" --no-lock dump "$snapshot" "$subpath" > "$output_tar"; then
+        rm -f "$output_tar" 2>/dev/null || true
+        echo "ERROR: Failed to stream Restic dump for $user ($snapshot)." >&2
+        exit 1
+    fi
+    chmod 0640 "$output_tar" 2>/dev/null || true
+    chown root:hestiaweb "$output_tar" 2>/dev/null || true
+    echo "[OK] Raw Restic tar stream written to $output_tar ($(du -sh "$output_tar" | cut -f1))."
+}
+
+do_export_tar() {
+    load_hestia_restic_conf
+    if [ -z "${REPO:-}" ]; then
+        echo "ERROR: REPO is not configured in $HESTIA/conf/restic.conf." >&2
+        exit 1
+    fi
+
+    local user="${POSITIONAL_ARGS[0]:-}"
+    local snapshot="${POSITIONAL_ARGS[1]:-latest}"
+    local output_tar="${POSITIONAL_ARGS[2]:-}"
+
+    if [ -z "$user" ]; then
+        echo "Usage: v-restic-manager --export-tar <USER> [SNAPSHOT|latest] [OUTPUT_TAR] [--no-register]" >&2
+        exit 2
+    fi
+    if [[ ! "$user" =~ ^[A-Za-z0-9._-]+$ ]] || [[ ! "$snapshot" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "ERROR: Invalid user or snapshot identifier." >&2
+        exit 2
+    fi
+
+    local pw_file=""
+    if ! pw_file="$(resolve_restic_password_file "$user")"; then
+        echo "ERROR: Neither $HESTIA/data/users/$user/restic.conf nor $MASTER_KEY_FILE is available." >&2
+        exit 1
+    fi
+
+    local backup_root="${BACKUP:-/backup}"
+    local temp_root="${BACKUP_TEMP:-$backup_root}"
+    mkdir -p "$backup_root" "$temp_root"
+
+    EXPORT_STAGE_DIR="$(umask 077 && mktemp -d -p "$temp_root" "restic-export-${user}.XXXXXX")" || {
+        echo "ERROR: Unable to create staging directory in $temp_root." >&2
+        exit 1
+    }
+    trap '[ -n "${EXPORT_STAGE_DIR:-}" ] && rm -rf "$EXPORT_STAGE_DIR" 2>/dev/null || true' EXIT INT TERM
+
+    echo "$(date '+%F %T') [EXPORT] Restoring snapshot '$snapshot' for $user into temporary staging area..."
+    if ! restic --repo "${REPO%/}/$user" --password-file "$pw_file" --no-lock restore "$snapshot" --target "$EXPORT_STAGE_DIR" >/dev/null; then
+        echo "ERROR: Failed to extract Restic snapshot '$snapshot' for $user." >&2
+        exit 1
+    fi
+
+    local snap_home="$EXPORT_STAGE_DIR${HESTIA_HOME_ROOT}/$user"
+    local bkp_stage="$snap_home/backup"
+    if [ ! -f "$bkp_stage/backup.conf" ]; then
+        echo "ERROR: Snapshot '$snapshot' does not contain $HESTIA_HOME_ROOT/$user/backup/backup.conf." >&2
+        exit 1
+    fi
+
+    local b_date b_time b_mode b_web b_dns b_mail b_db b_cron b_runtime
+    b_date="$(extract_kv_from_conf "$bkp_stage/backup.conf" "DATE")"
+    b_time="$(extract_kv_from_conf "$bkp_stage/backup.conf" "TIME")"
+    b_mode="$(extract_kv_from_conf "$bkp_stage/backup.conf" "BACKUP_MODE")"
+    b_web="$(extract_kv_from_conf "$bkp_stage/backup.conf" "WEB")"
+    b_dns="$(extract_kv_from_conf "$bkp_stage/backup.conf" "DNS")"
+    b_mail="$(extract_kv_from_conf "$bkp_stage/backup.conf" "MAIL")"
+    b_db="$(extract_kv_from_conf "$bkp_stage/backup.conf" "DB")"
+    b_cron="$(extract_kv_from_conf "$bkp_stage/backup.conf" "CRON")"
+    b_runtime="$(extract_kv_from_conf "$bkp_stage/backup.conf" "RUNTIME")"
+
+    [ -z "$b_date" ] && b_date="$(date '+%Y-%m-%d')"
+    [ -z "$b_time" ] && b_time="$(date '+%H:%M:%S')"
+    [ -z "$b_mode" ] && b_mode="${BACKUP_MODE:-zstd}"
+    [ -z "$b_runtime" ] && b_runtime="1"
+
+    local gzip_lvl="${BACKUP_GZIP:-9}"
+    [[ "$gzip_lvl" =~ ^[1-9]$ ]] || gzip_lvl=6
+    local ext="gz"
+    if [ "$b_mode" = "zstd" ]; then
+        ext="zst"
+        touch "$bkp_stage/.zstd"
+    fi
+
+    local ts_slug="${b_date}_${b_time//:/-}"
+    local archive_name="${user}.${ts_slug}.tar"
+    if [ -z "$output_tar" ]; then
+        output_tar="${backup_root%/}/$archive_name"
+    else
+        archive_name="$(basename "$output_tar")"
+    fi
+
+    # 1. Pack web domains into backup/web/<domain>/domain_data.tar.<ext>
+    local d_dir domain
+    for d_dir in "$bkp_stage/web"/*; do
+        [ -d "$d_dir" ] || continue
+        domain="$(basename "$d_dir")"
+        if [ -d "$snap_home/web/$domain" ]; then
+            (
+                cd "$snap_home/web/$domain" && \
+                tar --exclude='./logs/*' -cpf- -- . | compress_tar_stream "$b_mode" "$gzip_lvl" "$d_dir/domain_data.tar.$ext"
+            ) || {
+                echo "ERROR: Failed to pack web domain $domain." >&2
+                exit 1
+            }
+        fi
+    done
+
+    # 2. Pack mail accounts into backup/mail/<domain>/accounts.tar.<ext>
+    for d_dir in "$bkp_stage/mail"/*; do
+        [ -d "$d_dir" ] || continue
+        domain="$(basename "$d_dir")"
+        if [ -d "$snap_home/mail/$domain" ]; then
+            local acct_list=()
+            local acct_path
+            for acct_path in "$snap_home/mail/$domain"/*; do
+                [ -e "$acct_path" ] || continue
+                acct_list+=("$(basename "$acct_path")")
+            done
+            if [ "${#acct_list[@]}" -gt 0 ]; then
+                (
+                    cd "$snap_home/mail/$domain" && \
+                    tar -cpf- -- "${acct_list[@]}" | compress_tar_stream "$b_mode" "$gzip_lvl" "$d_dir/accounts.tar.$ext"
+                ) || {
+                    echo "ERROR: Failed to pack mail accounts for $domain." >&2
+                    exit 1
+                }
+            fi
+        fi
+    done
+
+    # 3. Pack extra user directories into backup/user_dir/<udir>.tar.<ext>
+    mkdir -p "$bkp_stage/user_dir"
+    local udir_items=()
+    local entry_path udir
+    while IFS= read -r entry_path; do
+        [ -n "$entry_path" ] || continue
+        udir="$(basename "$entry_path")"
+        case "$udir" in
+            .|..|conf|web|dns|tmp|mail|backup) continue ;;
+        esac
+        (
+            cd "$snap_home" && \
+            tar --anchored -cpf- -- "$udir" | compress_tar_stream "$b_mode" "$gzip_lvl" "$bkp_stage/user_dir/$udir.tar.$ext"
+        ) || {
+            echo "ERROR: Failed to pack user directory $udir." >&2
+            exit 1
+        }
+        udir_items+=("$udir")
+    done < <(find "$snap_home" -mindepth 1 -maxdepth 1 | sort)
+
+    local udir_csv=""
+    if [ "${#udir_items[@]}" -gt 0 ]; then
+        local IFS=','
+        udir_csv="${udir_items[*]}"
+    fi
+
+    local size_mib
+    size_mib="$(du -shm "$bkp_stage" | cut -f 1)"
+    [[ "$size_mib" =~ ^[0-9]+$ ]] || size_mib=1
+
+    local bkp_line="BACKUP='$archive_name' TYPE='local' SIZE='$size_mib' WEB='$b_web' DNS='$b_dns' MAIL='$b_mail' DB='$b_db' CRON='$b_cron' UDIR='$udir_csv' RUNTIME='$b_runtime' TIME='$b_time' DATE='$b_date'"
+    printf '%s\n' "$bkp_line" > "$bkp_stage/backup.conf"
+
+    mkdir -p "$(dirname "$output_tar")"
+    if ! (cd "$bkp_stage" && tar -cf "$output_tar" .); then
+        rm -f "$output_tar" 2>/dev/null || true
+        echo "ERROR: Failed to build final HestiaCP archive at $output_tar." >&2
+        exit 1
+    fi
+    chmod 0640 "$output_tar" 2>/dev/null || true
+    chown root:hestiaweb "$output_tar" 2>/dev/null || true
+
+    # 4. Optionally register in data/users/<user>/backup.conf so it appears in HestiaCP /list/backup/
+    local u_dir="$HESTIA/data/users/$user"
+    if [ "$REGISTER_EXPORT" = true ] && [ -d "$u_dir" ] && [ "$(cd "$(dirname "$output_tar")" && pwd)" = "${backup_root%/}" ]; then
+        touch "$u_dir/backup.conf"
+        sed -i "\|BACKUP='$archive_name'|d" "$u_dir/backup.conf" 2>/dev/null || true
+        printf '%s\n' "$bkp_line" >> "$u_dir/backup.conf"
+        chmod 0660 "$u_dir/backup.conf" 2>/dev/null || true
+        if [ -f "$u_dir/user.conf" ]; then
+            local new_cnt
+            new_cnt="$(grep -c "BACKUP=" "$u_dir/backup.conf" 2>/dev/null || echo 1)"
+            sed -i "s/^U_BACKUPS=.*/U_BACKUPS='$new_cnt'/" "$u_dir/user.conf" 2>/dev/null || true
+        fi
+        echo "[OK] Registered $archive_name in $u_dir/backup.conf (visible in HestiaCP BACKUP tab for instant Download/Restore)."
+    fi
+
+    echo "[OK] Exported HestiaCP-compatible archive: $output_tar ($(du -sh "$output_tar" | cut -f1))"
+}
+
 case "$ACTION" in
     --init-master-key) do_init_master_key ;;
     --enroll)          do_enroll_all ;;
     --status)          do_status ;;
     --run-daily)       do_run_daily ;;
+    --dump-tar)        do_dump_tar ;;
+    --export-tar)      do_export_tar ;;
 esac
