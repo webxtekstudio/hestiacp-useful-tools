@@ -625,6 +625,435 @@ PHP_EOF
             rm -f "$temp_tb"
         fi
     fi
+
+    # Sorting & in-page search on list_backup_incremental.php
+    if [ -f "$tpl" ] && ! grep -q "toolbar-sorting" "$tpl" 2>/dev/null; then
+        local temp_sort
+        temp_sort=$(mktemp /run/patch-restic-sort.XXXXXX) || return 1
+        awk '
+            /<div class="toolbar-right">/ {
+                print
+                print "\t\t\t<div class=\"toolbar-sorting\">"
+                print "\t\t\t\t<button class=\"toolbar-sorting-toggle js-toggle-sorting-menu\" type=\"button\" title=\"<?= tohtml( _(\"Sort items\")) ?>\">"
+                print "\t\t\t\t\t<?= tohtml( _(\"Sort by\")) ?>:"
+                print "\t\t\t\t\t<span class=\"u-text-bold\">"
+                print "\t\t\t\t\t\t<?php if ($_SESSION[\x27userSortOrder\x27] === \x27name\x27) { $label = _(\x27Name\x27); } else { $label = _(\x27Date\x27); } ?>"
+                print "\t\t\t\t\t\t<?= tohtml($label) ?> <i class=\"fas fa-arrow-down-a-z\"></i>"
+                print "\t\t\t\t\t</span>"
+                print "\t\t\t\t</button>"
+                print "\t\t\t\t<ul class=\"toolbar-sorting-menu js-sorting-menu u-hidden\">"
+                print "\t\t\t\t\t<li data-entity=\"sort-date\" data-sort-as-int=\"1\">"
+                print "\t\t\t\t\t\t<span class=\"name <?php if ($_SESSION[\x27userSortOrder\x27] === \x27date\x27) { echo \x27active\x27; } ?>\"><?= tohtml( _(\"Date\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t\t<li data-entity=\"sort-name\">"
+                print "\t\t\t\t\t\t<span class=\"name <?php if ($_SESSION[\x27userSortOrder\x27] === \x27name\x27) { echo \x27active\x27; } ?>\"><?= tohtml( _(\"Name\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t</ul>"
+                print "\t\t\t</div>"
+                next
+            }
+            /<form action="\/search\/" method="get">/ {
+                sub(/\/search\//, "/list/backup/incremental/")
+                print
+                next
+            }
+            /<div class="units-table-row js-unit">/ {
+                print "\t\t<div class=\"units-table-row js-unit\""
+                print "\t\t\tdata-sort-date=\"<?= tohtml(strtotime($value[\x27time\x27])) ?>\""
+                print "\t\t\tdata-sort-name=\"<?= tohtml($value[\x27short_id\x27]) ?>\">"
+                next
+            }
+            /count\(\$data\)\), count\(\$data\)/ {
+                gsub(/count\(\$data\)/, "$i")
+                print
+                next
+            }
+            { print }
+        ' "$tpl" > "$temp_sort"
+        if grep -q "toolbar-sorting" "$temp_sort" 2>/dev/null; then
+            chmod 0644 "$temp_sort"
+            mv -f "$temp_sort" "$tpl"
+            _log "[$(date)] : Patched list_backup_incremental.php (added sorting and in-page search)"
+        else
+            rm -f "$temp_sort"
+        fi
+    fi
+
+    # Sorting & in-page search on list_backup.php
+    local tpl_bk="$HESTIA/web/templates/pages/list_backup.php"
+    if [ -f "$tpl_bk" ] && ! grep -q "toolbar-sorting" "$tpl_bk" 2>/dev/null; then
+        [ ! -f "${tpl_bk}.original" ] && cp -f "$tpl_bk" "${tpl_bk}.original" 2>/dev/null || true
+        local temp_bk
+        temp_bk=$(mktemp /run/patch-bk-sort.XXXXXX) || return 1
+        awk '
+            /<div class="toolbar-right">/ {
+                print
+                print "\t\t\t<div class=\"toolbar-sorting\">"
+                print "\t\t\t\t<button class=\"toolbar-sorting-toggle js-toggle-sorting-menu\" type=\"button\" title=\"<?= tohtml( _(\"Sort items\")) ?>\">"
+                print "\t\t\t\t\t<?= tohtml( _(\"Sort by\")) ?>:"
+                print "\t\t\t\t\t<span class=\"u-text-bold\">"
+                print "\t\t\t\t\t\t<?php if ($_SESSION[\x27userSortOrder\x27] === \x27name\x27) { $label = _(\x27Name\x27); } else { $label = _(\x27Date\x27); } ?>"
+                print "\t\t\t\t\t\t<?= tohtml($label) ?> <i class=\"fas fa-arrow-down-a-z\"></i>"
+                print "\t\t\t\t\t</span>"
+                print "\t\t\t\t</button>"
+                print "\t\t\t\t<ul class=\"toolbar-sorting-menu js-sorting-menu u-hidden\">"
+                print "\t\t\t\t\t<li data-entity=\"sort-date\" data-sort-as-int=\"1\">"
+                print "\t\t\t\t\t\t<span class=\"name <?php if ($_SESSION[\x27userSortOrder\x27] === \x27date\x27) { echo \x27active\x27; } ?>\"><?= tohtml( _(\"Date\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t\t<li data-entity=\"sort-disk\" data-sort-as-int=\"1\">"
+                print "\t\t\t\t\t\t<span class=\"name\"><?= tohtml( _(\"Size\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t\t<li data-entity=\"sort-name\">"
+                print "\t\t\t\t\t\t<span class=\"name <?php if ($_SESSION[\x27userSortOrder\x27] === \x27name\x27) { echo \x27active\x27; } ?>\"><?= tohtml( _(\"Name\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t</ul>"
+                print "\t\t\t</div>"
+                next
+            }
+            /<form action="\/search\/" method="get">/ {
+                sub(/\/search\//, "/list/backup/")
+                print
+                next
+            }
+            /name="q" value="<\?= tohtml\(\$_POST\[\x27q\x27\] \?\? \x27\x27\) \?>"/ {
+                sub(/\$_POST\[\x27q\x27\]/, "$_GET[\x27q\x27] ?? $_POST[\x27q\x27]")
+                print
+                next
+            }
+            /<div class="units-table-row js-unit">/ {
+                print "\t\t\t<div class=\"units-table-row js-unit\""
+                print "\t\t\t\tdata-sort-date=\"<?= tohtml(strtotime($data[$key][\x27DATE\x27] . \x27 \x27 . $data[$key][\x27TIME\x27])) ?>\""
+                print "\t\t\t\tdata-sort-name=\"<?= tohtml($key) ?>\""
+                print "\t\t\t\tdata-sort-disk=\"<?= tohtml($data[$key][\x27SIZE\x27]) ?>\">"
+                next
+            }
+            { print }
+        ' "$tpl_bk" > "$temp_bk"
+        if grep -q "toolbar-sorting" "$temp_bk" 2>/dev/null; then
+            chmod 0644 "$temp_bk"
+            mv -f "$temp_bk" "$tpl_bk"
+            _log "[$(date)] : Patched list_backup.php (added sorting and in-page search)"
+        else
+            rm -f "$temp_bk"
+        fi
+    fi
+
+    # Sorting & in-page search on list_files_incremental.php
+    local tpl_files="$HESTIA/web/templates/pages/list_files_incremental.php"
+    if [ -f "$tpl_files" ] && ! grep -q "toolbar-sorting" "$tpl_files" 2>/dev/null; then
+        [ ! -f "${tpl_files}.original" ] && cp -f "$tpl_files" "${tpl_files}.original" 2>/dev/null || true
+        local temp_fl
+        temp_fl=$(mktemp /run/patch-fl-sort.XXXXXX) || return 1
+        awk '
+            /<div class="toolbar-right">/ {
+                print
+                print "\t\t\t<div class=\"toolbar-sorting\">"
+                print "\t\t\t\t<button class=\"toolbar-sorting-toggle js-toggle-sorting-menu\" type=\"button\" title=\"<?= tohtml( _(\"Sort items\")) ?>\">"
+                print "\t\t\t\t\t<?= tohtml( _(\"Sort by\")) ?>:"
+                print "\t\t\t\t\t<span class=\"u-text-bold\">"
+                print "\t\t\t\t\t\t<?= tohtml(_(\"Name\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i>"
+                print "\t\t\t\t\t</span>"
+                print "\t\t\t\t</button>"
+                print "\t\t\t\t<ul class=\"toolbar-sorting-menu js-sorting-menu u-hidden\">"
+                print "\t\t\t\t\t<li data-entity=\"sort-date\" data-sort-as-int=\"1\">"
+                print "\t\t\t\t\t\t<span class=\"name\"><?= tohtml( _(\"Date\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t\t<li data-entity=\"sort-name\">"
+                print "\t\t\t\t\t\t<span class=\"name active\"><?= tohtml( _(\"Name\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t\t<li data-entity=\"sort-type\">"
+                print "\t\t\t\t\t\t<span class=\"name\"><?= tohtml( _(\"Type\")) ?> <i class=\"fas fa-arrow-down-a-z\"></i></span><span class=\"up\"><i class=\"fas fa-arrow-up-a-z\"></i></span>"
+                print "\t\t\t\t\t</li>"
+                print "\t\t\t\t</ul>"
+                print "\t\t\t</div>"
+                next
+            }
+            /<form action="\/search\/" method="get">/ {
+                print "\t\t\t\t\t<form action=\"/list/backup/incremental/\" method=\"get\">"
+                print "\t\t\t\t\t\t<input type=\"hidden\" name=\"snapshot\" value=\"<?= tohtml($_GET[\"snapshot\"]) ?>\">"
+                print "\t\t\t\t\t\t<input type=\"hidden\" name=\"browse\" value=\"yes\">"
+                print "\t\t\t\t\t\t<input type=\"hidden\" name=\"folder\" value=\"<?= tohtml($_GET[\"folder\"]) ?>\">"
+                next
+            }
+            /name="q" value="<\?= tohtml\(\$_POST\[\x27q\x27\] \?\? \x27\x27\) \?>"/ {
+                sub(/\$_POST\[\x27q\x27\]/, "$_GET[\x27q\x27] ?? $_POST[\x27q\x27]")
+                print
+                next
+            }
+            /<div class="units-table-row js-unit">/ {
+                unit_cnt++
+                if (unit_cnt == 1) {
+                    print "\t\t\t\t\t<div class=\"units-table-row\">"
+                } else {
+                    print "\t\t\t\t\t<div class=\"units-table-row js-unit\""
+                    print "\t\t\t\t\t\tdata-sort-date=\"<?= tohtml(strtotime($file[\x27ctime\x27])) ?>\""
+                    print "\t\t\t\t\t\tdata-sort-name=\"<?= tohtml($file[\x27name\x27]) ?>\""
+                    print "\t\t\t\t\t\tdata-sort-type=\"<?= tohtml($file[\x27type\x27]) ?>\">"
+                }
+                next
+            }
+            { print }
+        ' "$tpl_files" > "$temp_fl"
+        if grep -q "toolbar-sorting" "$temp_fl" 2>/dev/null; then
+            chmod 0644 "$temp_fl"
+            mv -f "$temp_fl" "$tpl_files"
+            _log "[$(date)] : Patched list_files_incremental.php (added sorting and in-page search)"
+        else
+            rm -f "$temp_fl"
+        fi
+    fi
+
+    # Search filtering in web/list/backup/index.php
+    local bk_ctrl="$HESTIA/web/list/backup/index.php"
+    if [ -f "$bk_ctrl" ] && ! grep -q 'ARRAY_FILTER_USE_BOTH' "$bk_ctrl" 2>/dev/null; then
+        [ ! -f "${bk_ctrl}.original" ] && cp -f "$bk_ctrl" "${bk_ctrl}.original" 2>/dev/null || true
+        sed -i '/unset(\$output);/i \
+\tif (!empty($_GET["q"])) {\
+\t\t$q = $_GET["q"];\
+\t\t$data = array_filter(\
+\t\t\t$data,\
+\t\t\tfunction ($value, $key) use ($q) {\
+\t\t\t\t$haystack = implode(" ", [\
+\t\t\t\t\t$key,\
+\t\t\t\t\t$value["DATE"] ?? "",\
+\t\t\t\t\t$value["TIME"] ?? "",\
+\t\t\t\t\t$value["TYPE"] ?? "",\
+\t\t\t\t\t$value["WEB"] ?? "",\
+\t\t\t\t\t$value["DNS"] ?? "",\
+\t\t\t\t\t$value["MAIL"] ?? "",\
+\t\t\t\t\t$value["DB"] ?? "",\
+\t\t\t\t]);\
+\t\t\t\treturn stripos($haystack, $q) !== false;\
+\t\t\t},\
+\t\t\tARRAY_FILTER_USE_BOTH,\
+\t\t);\
+\t}' "$bk_ctrl"
+    fi
+
+    # Search filtering & fixes in web/list/backup/incremental/index.php
+    local inc_ctrl="$HESTIA/web/list/backup/incremental/index.php"
+    if [ -f "$inc_ctrl" ] && ! grep -q 'U_BACKUPS_INCREMENTAL' "$inc_ctrl" 2>/dev/null; then
+        [ ! -f "${inc_ctrl}.original" ] && cp -f "$inc_ctrl" "${inc_ctrl}.original" 2>/dev/null || true
+        cat > "$inc_ctrl" << 'INC_CTRL_EOF'
+<?php
+use function Hestiacp\quoteshellarg\quoteshellarg;
+$TAB = "BACKUP";
+
+// Main include
+include $_SERVER["DOCUMENT_ROOT"] . "/inc/main.php";
+
+function getTransByType($type) {
+	switch ($type) {
+		case "dir":
+			return _("Directory");
+		case "file":
+			return _("File");
+		case "symlink":
+			return _("Symlink");
+		default:
+			return _("Unknown");
+	}
+}
+
+// Data & Render page
+if (empty($_GET["snapshot"])) {
+	exec(HESTIA_CMD . "v-list-user-backups-restic $user json", $output, $return_var);
+	$data = json_decode(implode("", $output), true);
+	if (is_array($data)) {
+		$panel[$user]["U_BACKUPS_INCREMENTAL"] = count($data);
+		if ($_SESSION["userSortOrder"] == "name") {
+			usort($data, function ($a, $b) {
+				return strcmp($a["short_id"] ?? "", $b["short_id"] ?? "");
+			});
+		} else {
+			$data = array_reverse($data);
+		}
+		if (!empty($_GET["q"])) {
+			$q = $_GET["q"];
+			$data = array_values(
+				array_filter($data, function ($value) use ($q) {
+					$haystack = implode(" ", [
+						$value["short_id"] ?? "",
+						$value["time"] ?? "",
+						convert_datetime($value["time"] ?? ""),
+						$value["hostname"] ?? "",
+						"Restic",
+					]);
+					return stripos($haystack, $q) !== false;
+				}),
+			);
+		}
+	} else {
+		$data = [];
+	}
+
+	render_page($user, $TAB, "list_backup_incremental");
+} else {
+	if (empty($_GET["browse"])) {
+		$snapshot = quoteshellarg($_GET["snapshot"]);
+		exec(HESTIA_CMD . "v-list-user-backup-restic $user $snapshot json", $output, $return_var);
+		$data = json_decode(implode("", $output), true);
+		render_page($user, $TAB, "list_backup_detail_incremental");
+	} else {
+		if (empty($_GET["folder"])) {
+			$_GET["folder"] = "/home/" . $user_plain;
+		}
+		$folder = quoteshellarg($_GET["folder"]);
+		$snapshot = quoteshellarg($_GET["snapshot"]);
+		exec(HESTIA_CMD . "v-list-user-files-restic $user $snapshot $folder", $output, $return_var);
+		$info = json_decode($output[0], true);
+		unset($output[0]);
+		$files = [];
+		$q = $_GET["q"] ?? "";
+		foreach ($output as $key => $value) {
+			$item = json_decode($value, true);
+			if ($q !== "" && $key !== 1 && ($item["path"] ?? "") !== $_GET["folder"]) {
+				$haystack = implode(" ", [
+					$item["name"] ?? "",
+					$item["type"] ?? "",
+					$item["ctime"] ?? "",
+				]);
+				if (stripos($haystack, $q) === false) {
+					continue;
+				}
+			}
+			$files[] = $item;
+		}
+		render_page($user, $TAB, "list_files_incremental");
+	}
+}
+INC_CTRL_EOF
+        chmod 0644 "$inc_ctrl" 2>/dev/null || true
+        _log "[$(date)] : Patched web/list/backup/incremental/index.php (search filtering + empty array guard)"
+    fi
+
+    # Top menu 2nd line ('Snapshots: X') in panel.php + U_BACKUPS_INCREMENTAL in v-list-user & syshealth.sh
+    local panel_tpl="$HESTIA/web/templates/includes/panel.php"
+    if [ -f "$panel_tpl" ] && ! grep -q "U_BACKUPS_INCREMENTAL" "$panel_tpl" 2>/dev/null; then
+        [ ! -f "${panel_tpl}.original" ] && cp -f "$panel_tpl" "${panel_tpl}.original" 2>/dev/null || true
+        local temp_pnl
+        temp_pnl=$(mktemp /run/patch-panel.XXXXXX) || return 1
+        awk '
+            /href="\/list\/backup\/"/ {
+                sub(/\$panel\[\$user\]\["BACKUPS"\] \?>"/, "$panel[$user][\"BACKUPS\"] ?><?php if ($panel[$user][\"BACKUPS_INCREMENTAL\"] == \"yes\") { ?>&#13;<?= _(\"Snapshots\") ?>: <?= $panel[$user][\"U_BACKUPS_INCREMENTAL\"] ?? 0 ?><?php } ?>\"")
+                print
+                in_backup_tab = 1
+                next
+            }
+            in_backup_tab && /<\/ul>/ {
+                print "\t\t\t\t\t\t\t\t\t<?php if ($panel[$user][\"BACKUPS_INCREMENTAL\"] == \"yes\") { ?>"
+                print "\t\t\t\t\t\t\t\t\t\t<li>"
+                print "\t\t\t\t\t\t\t\t\t\t\t<?= _(\"Snapshots\") ?>: <?= $panel[$user][\"U_BACKUPS_INCREMENTAL\"] ?? 0 ?>"
+                print "\t\t\t\t\t\t\t\t\t\t</li>"
+                print "\t\t\t\t\t\t\t\t\t<?php } ?>"
+                print
+                in_backup_tab = 0
+                next
+            }
+            { print }
+        ' "$panel_tpl" > "$temp_pnl"
+        if grep -q "U_BACKUPS_INCREMENTAL" "$temp_pnl" 2>/dev/null; then
+            chmod 0644 "$temp_pnl"
+            mv -f "$temp_pnl" "$panel_tpl"
+            _log "[$(date)] : Patched panel.php (added Snapshots counter under BACKUP)"
+        else
+            rm -f "$temp_pnl"
+        fi
+    fi
+
+    if [ -f "$HESTIA/bin/v-list-user" ] && ! grep -q "U_BACKUPS_INCREMENTAL" "$HESTIA/bin/v-list-user" 2>/dev/null; then
+        sed -i '/"U_BACKUPS":/a \        "U_BACKUPS_INCREMENTAL": "\x27${U_BACKUPS_INCREMENTAL:-0}\x27",' "$HESTIA/bin/v-list-user"
+    fi
+    if [ -f "$HESTIA/func/syshealth.sh" ] && ! grep -q "U_BACKUPS_INCREMENTAL" "$HESTIA/func/syshealth.sh" 2>/dev/null; then
+        sed -i 's/U_BACKUPS LANGUAGE/U_BACKUPS U_BACKUPS_INCREMENTAL BACKUPS_INCREMENTAL LANGUAGE/' "$HESTIA/func/syshealth.sh"
+    fi
+    if [ -f "$HESTIA/bin/v-add-user" ] && ! grep -q "U_BACKUPS_INCREMENTAL=" "$HESTIA/bin/v-add-user" 2>/dev/null; then
+        sed -i "/^U_BACKUPS='0'/a U_BACKUPS_INCREMENTAL='0'" "$HESTIA/bin/v-add-user"
+    fi
+    if [ -f "$HESTIA/bin/v-change-user-package" ] && ! grep -q "U_BACKUPS_INCREMENTAL=" "$HESTIA/bin/v-change-user-package" 2>/dev/null; then
+        sed -i '/^U_BACKUPS=/a U_BACKUPS_INCREMENTAL=\x27${U_BACKUPS_INCREMENTAL:-0}\x27' "$HESTIA/bin/v-change-user-package"
+    fi
+    if [ -f "$HESTIA/bin/v-list-user-backups-restic" ] && ! grep -q "U_BACKUPS_INCREMENTAL" "$HESTIA/bin/v-list-user-backups-restic" 2>/dev/null; then
+        cat > "$HESTIA/bin/v-list-user-backups-restic" << 'VLUBR_EOF'
+#!/bin/bash
+# info: backup system user with all its objects
+# options: USER NOTIFY
+#
+# example: v-backup-user admin yes
+#
+# This function is used for backing up user with all its domains and databases.
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+format=${2-plain}
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# shellcheck source=/usr/local/hestia/func/domain.sh
+source $HESTIA/func/domain.sh
+# shellcheck source=/usr/local/hestia/func/db.sh
+source $HESTIA/func/db.sh
+# shellcheck source=/usr/local/hestia/func/backup.sh
+source $HESTIA/func/backup.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '1' "$#" 'USER'
+is_format_valid 'user'
+is_system_enabled "$BACKUP_SYSTEM" 'BACKUP_SYSTEM'
+is_object_valid 'user' 'USER' "$user"
+is_object_unsuspended 'user' 'USER' "$user"
+
+# Perform verification if read-only mode is enabled
+check_hestia_demo_mode
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+source_conf $HESTIA/conf/restic.conf
+
+function json_list() {
+	snapshots_json=$(restic --repo "${REPO%/}/$user" --password-file $USER_DATA/restic.conf --json snapshots)
+	if [ -n "$snapshots_json" ]; then
+		u_snapshots=$(printf '%s' "$snapshots_json" | grep -o '"short_id"' | wc -l)
+		if grep -q "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf"; then
+			update_user_value "$user" '$U_BACKUPS_INCREMENTAL' "$u_snapshots"
+		else
+			sed -i "s/^U_BACKUPS=/U_BACKUPS_INCREMENTAL='$u_snapshots'\nU_BACKUPS=/" "$USER_DATA/user.conf"
+		fi
+	fi
+	printf '%s\n' "$snapshots_json"
+}
+
+function plain_list() {
+	restic --repo "${REPO%/}/$user" --password-file $USER_DATA/restic.conf snapshots
+}
+
+# Listing data
+case $format in
+	json) json_list ;;
+	plain) plain_list ;;
+esac
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+exit
+VLUBR_EOF
+        chmod 0755 "$HESTIA/bin/v-list-user-backups-restic"
+    fi
     return 0
 }
 

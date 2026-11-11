@@ -402,10 +402,17 @@ for user_dir in "$HESTIA/data/users"/*; do
             fi
         else
             snap_json=""
-            if ! snap_json=$(HOME="${HOME:-/root}" restic --repo "${REPO%/}/$user" --password-file "$user_dir/restic.conf" --no-lock snapshots --latest 1 --json 2>/dev/null); then
+            if ! snap_json=$(HOME="${HOME:-/root}" restic --repo "${REPO%/}/$user" --password-file "$user_dir/restic.conf" --no-lock snapshots --json 2>/dev/null); then
                 user_restic_state="FAIL"
                 user_restic_msg="RESTIC_REPO_ACCESS_FAILED"
             else
+                u_snap_cnt=$(printf '%s' "$snap_json" | grep -o '"short_id"' | wc -l | tr -d '[:space:]')
+                [[ "$u_snap_cnt" =~ ^[0-9]+$ ]] || u_snap_cnt=0
+                if grep -q "^U_BACKUPS_INCREMENTAL=" "$user_conf" 2>/dev/null; then
+                    sed -i -E "s|^U_BACKUPS_INCREMENTAL='[^']*'|U_BACKUPS_INCREMENTAL='${u_snap_cnt}'|" "$user_conf" 2>/dev/null || true
+                elif grep -q "^U_BACKUPS=" "$user_conf" 2>/dev/null; then
+                    sed -i "s|^U_BACKUPS=|U_BACKUPS_INCREMENTAL='${u_snap_cnt}'\nU_BACKUPS=|" "$user_conf" 2>/dev/null || true
+                fi
                 snap_parsed=$(parse_restic_latest_json "$snap_json")
                 case "$snap_parsed" in
                     EMPTY)
