@@ -305,12 +305,25 @@ if ! echo "$backup_system" | grep -qE "b2|sftp|ftp|rclone" && [ -t 0 ]; then
     echo "---"
     echo ""
     echo "Do you want to set up automatic cron schedules?"
-    echo "(cleanup, reports, security audit, GitHub mirror, etc.)"
+    echo "(cleanup, reports, security audit, GitHub mirror, daily Restic if enabled)"
     echo ""
     read -rp "Set up crons? [Y/n]: " setup_crons_answer
     setup_crons_answer=${setup_crons_answer:-Y}
     if [[ "$setup_crons_answer" =~ ^[Yy] ]]; then
         SETUP_CRONS=true
+    fi
+
+    # --- Hybrid Monthly .tar + Daily Restic schedule option ---
+    if [ -f "/var/spool/cron/crontabs/hestiaweb" ] && grep -q "v-backup-users" "/var/spool/cron/crontabs/hestiaweb" 2>/dev/null; then
+        echo ""
+        echo "Classic .tar Backup Schedule (v-backup-users):"
+        echo "  1) Keep current HestiaCP schedule (default)"
+        echo "  2) Monthly on the 1st at 03:30 UTC (recommended when paired with Daily Restic at 02:30)"
+        read -rp "Choose [1-2] (default: 1): " tar_sched_choice
+        if [ "${tar_sched_choice:-1}" = "2" ]; then
+            sed -i 's|^[0-9*]\+ [0-9*]\+ [0-9*]\+ [0-9*]\+ [0-9*]\+\(.*v-backup-users\)|30 03 1 * *\1|' /var/spool/cron/crontabs/hestiaweb
+            echo "  -> Updated v-backup-users to run monthly on the 1st at 03:30 UTC (30 03 1 * *)."
+        fi
     fi
 
     # --- CrowdSec question ---

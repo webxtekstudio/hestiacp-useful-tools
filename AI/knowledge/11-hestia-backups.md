@@ -98,6 +98,11 @@ Interpretation rules:
   sudo -n /usr/local/hestia/bin/v-restore-user-restic <user> <snapshot_id>
   sudo -n /usr/local/hestia/bin/v-restore-file-restic <user> <snapshot_id> home/<user>/web/<domain>/public_html/index.html
   ```
+- Export a Restic snapshot to a native `v-restore-user`-compatible HestiaCP `.tar` archive (or stream raw tar):
+  ```bash
+  sudo -n /usr/local/hestia/bin/v-restic-manager --export-tar <user> [snapshot_id|latest]
+  sudo -n /usr/local/hestia/bin/v-restic-manager --dump-tar <user> latest /tmp/<user>-raw.tar
+  ```
 
 ## 5. Manual Operations
 
