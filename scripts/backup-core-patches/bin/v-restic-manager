@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+# info: manage HestiaCP Restic incremental backups, offline Master Recovery Key enrollment, and daily execution
+# options: --init-master-key [--print] | --enroll | --run-daily | --status | --help
+#
+# Hardens HestiaCP's native Restic incremental backups:
+#   1. Generates and protects an offline Master Recovery Key (/etc/hestiacp-restic-master.key, 0400 root:root)
+#   2. Auto-enrolls the Master Recovery Key across every active user's Restic repository (dual-key unlock)
+#   3. Enforces 0600 root:root on /usr/local/hestia/data/users/*/restic.conf and 0660 on conf/restic.conf
+#   4. Deletes /home/<user>/backup immediately after each Restic snapshot so shadow/SSL/SQL staging dumps never linger
+#   5. Refreshes v-verify-backups and dispatches alerts (email + optional Argos real-time event) ONLY on failure
+
+export HOME="${HOME:-/root}"
+export PATH="/usr/local/hestia/bin:/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:$PATH"
+set -uo pipefail
+
+HESTIA="${HESTIA:-/usr/local/hestia}"
+BIN="$HESTIA/bin"
+HESTIA_LOG="$HESTIA/log/backup.log"
+HESTIA_HOME_ROOT="${HESTIA_HOME_ROOT:-/home}"
+MASTER_KEY_FILE="${RESTIC_MASTER_KEY_FILE:-/etc/hestiacp-restic-master.key}"
+LOCK_FILE="${RESTIC_LOCK_FILE:-/run/hestia-restic-daily.lock}"
+VERIFY_STATUS_FILE="${RESTIC_VERIFY_STATUS_FILE:-/var/log/hestia/backup-verify.status}"
+
+ACTION=""
+PRINT_KEY=false
+
+print_usage() {
+    cat << 'EOF'
+Usage: v-restic-manager <ACTION> [OPTIONS]
+
+Actions:
+  --init-master-key [--print]  Generate /etc/hestiacp-restic-master.key (0400 root:root) if missing
+  --enroll                     Enable BACKUPS_INCREMENTAL='yes', lock restic.conf (0600), and enroll Master Key on all active repos
+  --run-daily                  Run daily Restic snapshots for all active users, enroll Master Key, clean staging dirs, and alert on error
+  --status                     Show Restic configuration, Master Key protection, and per-user repository status
+  --help, -h                   Show this help message
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --init-master-key|--enroll|--run-daily|--status)
+            if [ -n "$ACTION" ] && [ "$ACTION" != "$arg" ]; then
+                echo "ERROR: Specify only one action flag." >&2
+                exit 2
+            fi
+            ACTION="$arg"
+            ;;
+        --print)
+            PRINT_KEY=true
+            ;;
+        --help|-h)
+            print_usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown option: $arg" >&2
+            print_usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ -z "$ACTION" ]; then
+    print_usage >&2
+    exit 2
+fi
+
+if [ "${EUID:-$(id -u)}" -ne 0 ] && [ "${RESTIC_MANAGER_ALLOW_NONROOT:-0}" != "1" ]; then
+    echo "ERROR: v-restic-manager must be run as root." >&2
+    exit 1
+fi
+
+load_hestia_restic_conf() {
+    # shellcheck disable=SC1091
+    [ -f /etc/hestiacp/hestia.conf ] && source /etc/hestiacp/hestia.conf
+    # shellcheck disable=SC1091
+    [ -f "$HESTIA/conf/hestia.conf" ] && source "$HESTIA/conf/hestia.conf"
+
+    REPO=""
+    SNAPSHOTS=""
+    KEEP_DAILY=""
+    KEEP_WEEKLY=""
+    KEEP_MONTHLY=""
+    KEEP_YEARLY=""
+    if [ -f "$HESTIA/conf/restic.conf" ]; then
+        chown root:root "$HESTIA/conf/restic.conf" 2>/dev/null || true
+        chmod 0660 "$HESTIA/conf/restic.conf" 2>/dev/null || true
+        # shellcheck disable=SC1091
+        source "$HESTIA/conf/restic.conf"
+    fi
+}
+
+enable_incremental_on_conf() {
+    local conf_file="$1"
+    [ -f "$conf_file" ] || return 0
+    if grep -q "^BACKUPS_INCREMENTAL=" "$conf_file" 2>/dev/null; then
+        if ! grep -q "^BACKUPS_INCREMENTAL='yes'" "$conf_file" 2>/dev/null; then
+            sed -i "s/^BACKUPS_INCREMENTAL=.*/BACKUPS_INCREMENTAL='yes'/" "$conf_file" 2>/dev/null || true
+        fi
+    else
+        echo "BACKUPS_INCREMENTAL='yes'" >> "$conf_file"
+    fi
+}
+
+enable_incremental_packages() {
+    local pkg
+    for pkg in "$HESTIA/data/packages"/*.pkg; do
+        [ -f "$pkg" ] || continue
+        enable_incremental_on_conf "$pkg"
+    done
+}
+
+list_active_users() {
+    if [ -x "$BIN/v-list-sys-users" ]; then
+        "$BIN/v-list-sys-users" plain 2>/dev/null
+        return 0
+    fi
+    local d
+    for d in "$HESTIA/data/users"/*; do
+        [ -d "$d" ] && basename "$d"
+    done
+}
+
+enroll_master_key_for_user() {
+    local user="$1"
+    local u_dir="$HESTIA/data/users/$user"
+    local u_rconf="$u_dir/restic.conf"
+
+    [ -f "$u_rconf" ] || return 0
+    chown root:root "$u_rconf" 2>/dev/null || true
+    chmod 0600 "$u_rconf" 2>/dev/null || true
+
+    [ -s "$MASTER_KEY_FILE" ] || return 0
+    [ -s "$u_rconf" ] || return 0
+
+    local repo_url="${REPO%/}/$user"
+    # Fast check: if Master Key already unlocks this repository, nothing to add
+    if restic --repo "$repo_url" --password-file "$MASTER_KEY_FILE" --no-lock key list --json >/dev/null 2>&1; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$HESTIA_LOG")" 2>/dev/null || true
+    if restic --repo "$repo_url" --password-file "$u_rconf" key add --new-password-file "$MASTER_KEY_FILE" >> "$HESTIA_LOG" 2>&1; then
+        echo "$(date '+%F %T') [KEY] Enrolled Master Recovery Key for $user"
+        return 0
+    fi
+
+    echo "$(date '+%F %T') [WARN] Failed to enroll Master Recovery Key for $user" >&2
+    return 1
+}
+
+do_init_master_key() {
+    mkdir -p "$(dirname "$MASTER_KEY_FILE")"
+    if [ -s "$MASTER_KEY_FILE" ]; then
+        chown root:root "$MASTER_KEY_FILE" 2>/dev/null || true
+        chmod 0400 "$MASTER_KEY_FILE" 2>/dev/null || true
+        echo "[SKIP] Master Recovery Key already exists at $MASTER_KEY_FILE (permissions locked to 0400)."
+    else
+        local new_key=""
+        if command -v openssl >/dev/null 2>&1; then
+            new_key="$(openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c 48)"
+        else
+            new_key="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)"
+        fi
+        if [ "${#new_key}" -lt 32 ]; then
+            echo "ERROR: Failed to generate a 48-character Master Recovery Key." >&2
+            exit 1
+        fi
+        (
+            umask 077
+            printf '%s\n' "$new_key" > "$MASTER_KEY_FILE"
+        )
+        chown root:root "$MASTER_KEY_FILE" 2>/dev/null || true
+        chmod 0400 "$MASTER_KEY_FILE" 2>/dev/null || true
+        echo "[OK] Generated new 48-character Master Recovery Key at $MASTER_KEY_FILE (0400 root:root)."
+        echo "IMPORTANT: Store a copy of this key in your offline password manager (Bitwarden / 1Password)."
+    fi
+
+    if [ "$PRINT_KEY" = true ]; then
+        echo "--- MASTER RECOVERY KEY (STORE OFFLINE & DO NOT COMMIT) ---"
+        cat "$MASTER_KEY_FILE"
+        echo "-----------------------------------------------------------"
+    fi
+}
+
+do_enroll_all() {
+    load_hestia_restic_conf
+    if [ "${BACKUP_INCREMENTAL:-no}" != "yes" ] || [ -z "${REPO:-}" ]; then
+        echo "ERROR: HestiaCP Restic is not configured (BACKUP_INCREMENTAL!='yes' or REPO empty in $HESTIA/conf/restic.conf)." >&2
+        exit 1
+    fi
+    if [ ! -s "$MASTER_KEY_FILE" ]; then
+        echo "ERROR: Master Recovery Key missing at $MASTER_KEY_FILE. Run 'v-restic-manager --init-master-key' first." >&2
+        exit 1
+    fi
+
+    enable_incremental_packages
+    local errs=0
+    local checked=0
+    local user
+    for user in $(list_active_users); do
+        local u_conf="$HESTIA/data/users/$user/user.conf"
+        [ -f "$u_conf" ] || continue
+        grep -q "^SUSPENDED='no'" "$u_conf" 2>/dev/null || continue
+        enable_incremental_on_conf "$u_conf"
+        checked=$((checked + 1))
+        if [ -f "$HESTIA/data/users/$user/restic.conf" ]; then
+            enroll_master_key_for_user "$user" || errs=$((errs + 1))
+        else
+            echo "[INFO] $user: restic.conf not created yet (will be initialized and enrolled on next --run-daily)."
+        fi
+    done
+
+    [ "$errs" -eq 0 ] || exit 1
+    echo "[OK] Verified BACKUPS_INCREMENTAL='yes', 0600 permissions, and Master Recovery Key across $checked active user(s)."
+}
+
+do_status() {
+    load_hestia_restic_conf
+    echo "=== HestiaCP Restic Manager Status ==="
+    echo "BACKUP_INCREMENTAL : ${BACKUP_INCREMENTAL:-no}"
+    echo "REPO               : ${REPO:-<unconfigured>}"
+    echo "RETENTION          : snapshots=${SNAPSHOTS:--1} daily=${KEEP_DAILY:--1} weekly=${KEEP_WEEKLY:--1} monthly=${KEEP_MONTHLY:--1} yearly=${KEEP_YEARLY:--1}"
+    if [ -s "$MASTER_KEY_FILE" ]; then
+        local mk_mode
+        mk_mode="$(stat -c '%a' "$MASTER_KEY_FILE" 2>/dev/null || echo 'unknown')"
+        echo "MASTER_KEY_FILE    : $MASTER_KEY_FILE (present, mode=$mk_mode)"
+    else
+        echo "MASTER_KEY_FILE    : $MASTER_KEY_FILE (MISSING)"
+    fi
+    echo "--- Active Users ---"
+    local user
+    for user in $(list_active_users); do
+        local u_dir="$HESTIA/data/users/$user"
+        local u_conf="$u_dir/user.conf"
+        [ -f "$u_conf" ] || continue
+        grep -q "^SUSPENDED='no'" "$u_conf" 2>/dev/null || continue
+        local inc_flag="no"
+        grep -q "^BACKUPS_INCREMENTAL='yes'" "$u_conf" 2>/dev/null && inc_flag="yes"
+        if [ -s "$u_dir/restic.conf" ]; then
+            local rc_mode
+            rc_mode="$(stat -c '%a' "$u_dir/restic.conf" 2>/dev/null || echo '?')"
+            local staging_state="clean"
+            [ -e "$HESTIA_HOME_ROOT/$user/backup" ] && staging_state="PRESENT"
+            printf "  %-22s incremental=%-3s restic.conf=%s staging=%s\n" "$user" "$inc_flag" "$rc_mode" "$staging_state"
+        else
+            printf "  %-22s incremental=%-3s restic.conf=MISSING\n" "$user" "$inc_flag"
+        fi
+    done
+}
+
+emit_failure_alerts() {
+    local failed_list="$1"
+    local verify_rc="$2"
+    local host_fqdn
+    host_fqdn="$(hostname -f 2>/dev/null || hostname)"
+
+    # 1. Emit real-time Zero-Trust Argos event if installed (instant AGENT-X P1 alarm)
+    if [ -x /opt/webxtek-scripts/argos-hestia-emit-event.sh ]; then
+        /opt/webxtek-scripts/argos-hestia-emit-event.sh \
+            "restic_daily_backup" \
+            "RESTIC_BACKUP_FAILED" \
+            "CRITICAL" \
+            "Restic daily backup or verification failed on $host_fqdn (failed_users=${failed_list:-none}, verify_rc=$verify_rc)" \
+            "Inspect /var/log/hestia/restic-daily.log and /var/log/hestia/backup-verify.status" >/dev/null 2>&1 || true
+    fi
+
+    # 2. Send alert email to HestiaCP admin contact
+    local root_acct="${ROOT_USER:-admin}"
+    local admin_email=""
+    if [ -f "$HESTIA/data/users/$root_acct/user.conf" ]; then
+        admin_email="$(grep "^CONTACT=" "$HESTIA/data/users/$root_acct/user.conf" | cut -d"'" -f2 || true)"
+    fi
+    local sendmail_bin="$HESTIA/web/inc/mail-wrapper.php"
+    if [ -n "$admin_email" ] && [ -x "$sendmail_bin" ]; then
+        {
+            echo "Restic daily backup or remote verification reported an error on $host_fqdn at $(date -u '+%F %T UTC')."
+            echo ""
+            echo "Failed Restic user runs: ${failed_list:-none}"
+            echo "v-verify-backups exit code: $verify_rc"
+            echo ""
+            echo "--- $VERIFY_STATUS_FILE ---"
+            cat "$VERIFY_STATUS_FILE" 2>/dev/null || true
+        } | "$sendmail_bin" -s "[ALERT] Restic Backup Failure on $host_fqdn" "$admin_email" "yes" || true
+    fi
+}
+
+run_low_prio() {
+    if command -v nice >/dev/null 2>&1 && command -v ionice >/dev/null 2>&1; then
+        nice -n 19 ionice -c2 -n7 "$@"
+    elif command -v nice >/dev/null 2>&1; then
+        nice -n 19 "$@"
+    else
+        "$@"
+    fi
+}
+
+do_run_daily() {
+    mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
+    exec 9>"$LOCK_FILE"
+    if command -v flock >/dev/null 2>&1; then
+        if ! flock -n 9; then
+            echo "$(date '+%F %T') [SKIP] Another Restic daily backup is already running."
+            exit 0
+        fi
+    fi
+
+    load_hestia_restic_conf
+    if [ "${BACKUP_INCREMENTAL:-no}" != "yes" ] || [ -z "${REPO:-}" ]; then
+        echo "$(date '+%F %T') [ERROR] BACKUP_INCREMENTAL is not enabled or REPO is empty in $HESTIA/conf/restic.conf." >&2
+        emit_failure_alerts "config_disabled" "1"
+        exit 1
+    fi
+
+    echo "================================================================="
+    echo "$(date '+%F %T') Starting Daily Restic Incremental Backup"
+    echo "================================================================="
+
+    if command -v mysqlrepair >/dev/null 2>&1; then
+        mysqlrepair --all-databases --check --auto-repair >/dev/null 2>&1 || true
+    fi
+
+    enable_incremental_packages
+    mkdir -p "$(dirname "$HESTIA_LOG")" 2>/dev/null || true
+
+    local ok_users=0
+    local fail_users=()
+    local user
+
+    for user in $(list_active_users); do
+        local u_dir="$HESTIA/data/users/$user"
+        local u_conf="$u_dir/user.conf"
+        [ -f "$u_conf" ] || continue
+        grep -q "^SUSPENDED='no'" "$u_conf" 2>/dev/null || continue
+
+        enable_incremental_on_conf "$u_conf"
+
+        echo "$(date '+%F %T') [USER] Backing up $user via Restic..."
+        {
+            echo "================================"
+            echo "$user (restic)"
+            echo "--------------------------------"
+        } >> "$HESTIA_LOG"
+
+        local user_rc=0
+        if ! run_low_prio "$BIN/v-backup-user-restic" "$user" >> "$HESTIA_LOG" 2>&1 9>&-; then
+            echo "$(date '+%F %T') [WARN] First Restic attempt failed for $user; retrying in 15s..."
+            sleep 15
+            if ! run_low_prio "$BIN/v-backup-user-restic" "$user" >> "$HESTIA_LOG" 2>&1 9>&-; then
+                user_rc=1
+            fi
+        fi
+
+        # Immediately remove staging dumps (/home/<user>/backup) and harden restic.conf (0600)
+        if [ -n "$user" ] && [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            rm -rf -- "$HESTIA_HOME_ROOT/$user/backup" 2>/dev/null || true
+        fi
+        if [ -f "$u_dir/restic.conf" ]; then
+            chown root:root "$u_dir/restic.conf" 2>/dev/null || true
+            chmod 0600 "$u_dir/restic.conf" 2>/dev/null || true
+        fi
+
+        if [ "$user_rc" -ne 0 ]; then
+            echo "$(date '+%F %T') [FAIL] Restic backup failed for $user"
+            fail_users+=("$user")
+            continue
+        fi
+
+        if [ -s "$MASTER_KEY_FILE" ]; then
+            enroll_master_key_for_user "$user" 9>&- || fail_users+=("${user}(key_enroll)")
+        fi
+
+        ok_users=$((ok_users + 1))
+        echo "$(date '+%F %T') [OK] Completed Restic snapshot for $user"
+    done
+
+    local verify_rc=0
+    if [ -x "$BIN/v-verify-backups" ]; then
+        if [ -f /root/.b2_account_info ]; then
+            B2_ACCOUNT_INFO=/root/.b2_account_info "$BIN/v-verify-backups" --status-file="$VERIFY_STATUS_FILE" --quiet 9>&- || verify_rc=$?
+        else
+            "$BIN/v-verify-backups" --status-file="$VERIFY_STATUS_FILE" --quiet 9>&- || verify_rc=$?
+        fi
+        if [ -d /run/argos-ro ] && [ -f "$VERIFY_STATUS_FILE" ]; then
+            cp -f "$VERIFY_STATUS_FILE" /run/argos-ro/backup-verify.txt 2>/dev/null || true
+            chmod 0644 /run/argos-ro/backup-verify.txt 2>/dev/null || true
+        fi
+    fi
+
+    if [ "${#fail_users[@]}" -gt 0 ] || [ "$verify_rc" -ne 0 ]; then
+        echo "$(date '+%F %T') [ALERT] Restic daily run finished with errors (failed_users=${#fail_users[@]}, verify_rc=$verify_rc)"
+        emit_failure_alerts "${fail_users[*]:-none}" "$verify_rc"
+        exit 1
+    fi
+
+    echo "$(date '+%F %T') [SUCCESS] Restic daily backup & verification passed for all $ok_users active user(s)."
+    exit 0
+}
+
+case "$ACTION" in
+    --init-master-key) do_init_master_key ;;
+    --enroll)          do_enroll_all ;;
+    --status)          do_status ;;
+    --run-daily)       do_run_daily ;;
+esac

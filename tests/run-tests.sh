@@ -332,6 +332,82 @@ else
     fail "v-verify-backups did not flag stale 72h Restic snapshot (rc=$vb_stale_rc): $vb_stale_out"
 fi
 
+# Test v-restic-manager (--init-master-key, --run-daily, staging cleanup, key enrollment & BACKUPS_INCREMENTAL propagation)
+RM_DIR="$SAND_DIR/rm_test"
+mkdir -p "$RM_DIR/hestia/bin" "$RM_DIR/hestia/conf" "$RM_DIR/hestia/data/packages" "$RM_DIR/hestia/data/users/bob" "$RM_DIR/home/bob/backup/pam" "$RM_DIR/bin"
+cat > "$RM_DIR/hestia/conf/hestia.conf" << 'EOF'
+BACKUP_SYSTEM='local'
+BACKUP_INCREMENTAL='yes'
+EOF
+cat > "$RM_DIR/hestia/conf/restic.conf" << 'EOF'
+REPO='rclone:mockremote:mockbucket'
+SNAPSHOTS='-1'
+KEEP_DAILY='7'
+KEEP_WEEKLY='4'
+KEEP_MONTHLY='3'
+KEEP_YEARLY='-1'
+EOF
+echo "BACKUPS_INCREMENTAL='no'" > "$RM_DIR/hestia/data/packages/default.pkg"
+cat > "$RM_DIR/hestia/data/users/bob/user.conf" << 'EOF'
+SUSPENDED='no'
+BACKUPS_INCREMENTAL='no'
+EOF
+echo "shadowhash" > "$RM_DIR/home/bob/backup/pam/shadow"
+
+cat > "$RM_DIR/hestia/bin/v-list-sys-users" << 'EOF'
+#!/bin/bash
+echo "bob"
+EOF
+cat > "$RM_DIR/hestia/bin/v-backup-user-restic" << EOF
+#!/bin/bash
+u="\$1"
+mkdir -p "$RM_DIR/home/\$u/backup/pam"
+echo "shadowhash" > "$RM_DIR/home/\$u/backup/pam/shadow"
+echo "userpass32chars" > "$RM_DIR/hestia/data/users/\$u/restic.conf"
+chmod 644 "$RM_DIR/hestia/data/users/\$u/restic.conf"
+exit 0
+EOF
+cat > "$RM_DIR/bin/restic" << EOF
+#!/bin/bash
+echo "\$*" >> "$RM_DIR/restic_calls.log"
+if echo "\$*" | grep -q "key list"; then
+    if [ -f "$RM_DIR/enrolled.flag" ]; then
+        echo '[{"id":"1"},{"id":"2"}]'
+        exit 0
+    fi
+    exit 1
+fi
+if echo "\$*" | grep -q "key add"; then
+    touch "$RM_DIR/enrolled.flag"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "$RM_DIR/hestia/bin/v-list-sys-users" "$RM_DIR/hestia/bin/v-backup-user-restic" "$RM_DIR/bin/restic"
+
+RESTIC_MANAGER_ALLOW_NONROOT=1 RESTIC_MASTER_KEY_FILE="$RM_DIR/master.key" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-restic-manager" --init-master-key >/dev/null 2>&1
+mk_first="$(cat "$RM_DIR/master.key" 2>/dev/null || true)"
+RESTIC_MANAGER_ALLOW_NONROOT=1 RESTIC_MASTER_KEY_FILE="$RM_DIR/master.key" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-restic-manager" --init-master-key >/dev/null 2>&1
+mk_second="$(cat "$RM_DIR/master.key" 2>/dev/null || true)"
+
+if [ "${#mk_first}" -eq 48 ] && [ "$mk_first" = "$mk_second" ]; then
+    pass "v-restic-manager --init-master-key generates an idempotent 48-character Master Recovery Key"
+else
+    fail "v-restic-manager --init-master-key failed length/idempotency check (len=${#mk_first})"
+fi
+
+rm_daily_out=$(PATH="$RM_DIR/bin:$PATH" HESTIA="$RM_DIR/hestia" HESTIA_HOME_ROOT="$RM_DIR/home" RESTIC_MANAGER_ALLOW_NONROOT=1 RESTIC_MASTER_KEY_FILE="$RM_DIR/master.key" RESTIC_LOCK_FILE="$RM_DIR/restic.lock" RESTIC_VERIFY_STATUS_FILE="$RM_DIR/verify.status" bash "$REPO_ROOT/scripts/backup-core-patches/bin/v-restic-manager" --run-daily 2>&1)
+rm_daily_rc=$?
+if [ "$rm_daily_rc" -eq 0 ] && \
+   [ ! -e "$RM_DIR/home/bob/backup" ] && \
+   [ -f "$RM_DIR/enrolled.flag" ] && \
+   grep -q "^BACKUPS_INCREMENTAL='yes'" "$RM_DIR/hestia/data/packages/default.pkg" && \
+   grep -q "^BACKUPS_INCREMENTAL='yes'" "$RM_DIR/hestia/data/users/bob/user.conf"; then
+    pass "v-restic-manager --run-daily enables BACKUPS_INCREMENTAL, enrolls Master Key, and removes /home/<user>/backup staging dir"
+else
+    fail "v-restic-manager --run-daily failed (rc=$rm_daily_rc): $rm_daily_out"
+fi
+
 # -----------------------------------------------------------------------------
 # 5. v-security-audit Accuracy (S15c .local filter & S38/S59 ACCOUNTS='0')
 # -----------------------------------------------------------------------------

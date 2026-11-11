@@ -4,14 +4,15 @@
 
 This server does **not** use the old `v-backup-users-custom` wrapper as the default assumption.
 
-The current architecture is:
-- native Hestia `v-backup-users`
-- optionally patched by `backup-core-patches`
-- optional remote backup hosts via native Hestia backup-host support (`b2`, `rclone`, `ftp`, `sftp`)
+The current architecture supports both classic `.tar` backups and hybrid Restic + `.tar` deployments:
+- native Hestia `v-backup-users` (weekly or monthly `.tar` archives)
+- optionally patched by `backup-core-patches` (`YYYY/MM_MONTH/<user>/` organization, MariaDB pre-repair, HTML batch reports)
+- optional daily incremental Restic snapshots via native `v-backup-user-restic` orchestrated by `v-restic-manager` (`--init-master-key`, `--enroll`, `--run-daily`, `--status`)
+- optional remote backup hosts via native Hestia backup-host support (`b2`, `rclone`, `ftp`, `sftp`) and `v-add-backup-host-restic`
 - optional classic retention via `v-prune-backups`
-- post-backup remote/local archive verification via `v-verify-backups`
+- post-backup remote/local `.tar` AND Restic snapshot verification via `v-verify-backups`
 
-This means you must verify the live machine before concluding how backups are stored or whether the weekly schedule was missed.
+This means you must verify the live machine before concluding how backups are stored or whether the weekly/monthly `.tar` or daily Restic schedule was missed.
 
 ## 2. Verified Paths
 
@@ -28,6 +29,11 @@ This means you must verify the live machine before concluding how backups are st
 | **Global Notify Hook** | `/usr/local/hestia/bin/v-backup-users-notify-hook` |
 | **Retention Command** | `/usr/local/hestia/bin/v-prune-backups` |
 | **Retention Config** | `/etc/hestiacp-backup-retention.conf` |
+| **Restic & Master Key Manager** | `/usr/local/hestia/bin/v-restic-manager` |
+| **Restic Host Config** | `/usr/local/hestia/conf/restic.conf` (`0660 root:root`) |
+| **Restic Master Recovery Key** | `/etc/hestiacp-restic-master.key` (`0400 root:root` — NEVER read or expose in logs/prompts) |
+| **Restic Per-User Keys** | `/usr/local/hestia/data/users/<user>/restic.conf` (`0600 root:root` — NEVER expose) |
+| **Restic Daily Cron Log** | `/var/log/hestia/restic-daily.log` |
 | **Backup Verifier** | `/usr/local/hestia/bin/v-verify-backups` |
 | **Backup Verify Status** | `/var/log/hestia/backup-verify.status` |
 | **B2 Config** | `/usr/local/hestia/conf/b2.backup.conf` |
@@ -70,9 +76,28 @@ sudo -n tail -n 60 /var/log/hestia/backup.log 2>/dev/null
 
 Interpretation rules:
 - use exact absolute dates in the answer
-- if the last successful evidence is from the previous Sunday and the next Sunday has not arrived yet, the weekly schedule is not missed
-- only call the weekly backup missed when the latest successful evidence is older than 8 days
-- remote upload events count as successful backup evidence
+- inspect `tar_schedule=` and `restic_enabled=` in `/var/log/hestia/backup-verify.status` before judging backup age:
+  - when `tar_schedule=monthly` (`30 03 1 * *`), `.tar` archives are healthy up to `35` days old (`tar_max_age_days=35`) — do NOT falsely flag a 10–30 day old monthly `.tar` archive as a missed weekly backup!
+  - when `tar_schedule=weekly`, `.tar` archives are healthy up to `8` days old
+  - when `restic_enabled=yes`, daily Restic snapshots must be `<= 36` hours old (`restic_verified_users == active_users` and `restic_failed_users=0`)
+- remote upload events and verified Restic snapshot timestamps count as successful backup evidence
+
+### Restic & Master Recovery Key Operations (`v-restic-manager`)
+
+- Check Restic configuration, Master Key presence, and per-user repository status (safe — never prints keys):
+  ```bash
+  sudo -n /usr/local/hestia/bin/v-restic-manager --status
+  ```
+- Run daily Restic incremental snapshots, auto-enroll the Master Recovery Key on any new user, clean `/home/<user>/backup` staging dumps, and refresh `backup-verify.status`:
+  ```bash
+  sudo -n /usr/local/hestia/bin/v-restic-manager --run-daily
+  ```
+- Granular or full Restic restore (confirm with the user first — restores overwrite live data):
+  ```bash
+  sudo -n /usr/local/hestia/bin/v-list-user-backups-restic <user>
+  sudo -n /usr/local/hestia/bin/v-restore-user-restic <user> <snapshot_id>
+  sudo -n /usr/local/hestia/bin/v-restore-file-restic <user> <snapshot_id> home/<user>/web/<domain>/public_html/index.html
+  ```
 
 ## 5. Manual Operations
 

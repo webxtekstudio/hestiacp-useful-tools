@@ -121,6 +121,64 @@ It runs automatically after `v-backup-users` and single-user B2 retries, writing
 v-verify-backups
 ```
 
+### 7. Restic Incremental Backups, Offline Master Recovery Key & Hybrid Architecture (`v-restic-manager`)
+
+HestiaCP's built-in Restic support (`v-add-backup-host-restic` / `v-backup-user-restic`) provides fast, block-deduplicated snapshots and granular single-file/database/mail restores inside the HestiaCP Web Panel (**Backups → Incremental Backups**), but out of the box it has four operational gaps:
+
+1. **Single-Point-of-Failure Per-User Keys:** HestiaCP generates a random password per user in `/usr/local/hestia/data/users/<user>/restic.conf`. If the server disk dies and those files are lost, your cloud Restic repositories are permanently locked.
+2. **Permissive Key & Staging Files:** `users/<user>/restic.conf` is written without `0600` clamping, and `/home/<user>/backup` (containing staged `pam/shadow` and SQL dumps) remains on local disk after each snapshot.
+3. **New Accounts Skip Incremental Backups by Default:** Unless `BACKUPS_INCREMENTAL='yes'` is enabled on packages and `user.conf`, newly created users silently skip Restic snapshots.
+4. **Hidden Cloud Version Bloat:** On Backblaze B2 (`Keep all versions` + `hard_delete = false`), daily `restic forget --prune` runs leave hidden pack files behind forever unless a custom B2 Lifecycle Rule expires hidden versions.
+
+`v-restic-manager` closes all four gaps and pairs seamlessly with monthly Object-Locked `.tar` archives:
+
+#### Recommended Two-Layer Hybrid Cloud Architecture (Backblaze B2 Example)
+
+| Layer | Schedule | Bucket & Immutability | Retention & Purpose |
+| :--- | :--- | :--- | :--- |
+| **Layer 1 — Daily Restic (`v-restic-manager --run-daily`)** | `30 2 * * *` (Daily) | Dedicated B2 bucket (`Object Lock: Disabled`, `rclone` `hard_delete = false`, B2 Custom Lifecycle: `daysFromHidingToDeleting = 14`, `unfinishedLargeFiles = 3`) | `7 daily + 4 weekly + 3 monthly` (~90 days block-deduplicated history for ~1.2× single-backup storage + 1-click Web Panel granular restore) |
+| **Layer 2 — Monthly `.tar` (`v-backup-users`)** | `30 3 1 * *` (1st of month) | Dedicated B2 bucket (**`Object Lock: Default 175 Days`**, B2 Custom Lifecycle: `daysFromUploadingToHiding = 180`, `daysFromHidingToDeleting = 1`) | Standalone immutable WORM `.tar` archives immune even to root/API sabotage, auto-expiring after 6 months |
+
+#### Step-by-Step Restic + Master Key Setup
+
+1. **Configure `rclone` (`0600 /root/.config/rclone/rclone.conf`) with soft-delete protection:**
+   ```ini
+   [b2restic]
+   type = b2
+   account = YOUR_SCOPED_B2_KEY_ID
+   key = YOUR_SCOPED_B2_APPLICATION_KEY
+   hard_delete = false
+   ```
+2. **Register the Restic host in HestiaCP (`7 daily, 4 weekly, 3 monthly`):**
+   ```bash
+   v-add-backup-host-restic 'rclone:b2restic:YOUR_RESTIC_BUCKET' -1 7 4 3 -1
+   ```
+3. **Generate & save your offline Master Recovery Key (`0400 /etc/hestiacp-restic-master.key`):**
+   ```bash
+   v-restic-manager --init-master-key --print
+   # Save the printed 48-character key in Bitwarden / 1Password!
+   ```
+4. **Run the initial snapshot & enroll the Master Key across all active users:**
+   ```bash
+   v-restic-manager --run-daily
+   v-restic-manager --status
+   ```
+   > Every future user created in HestiaCP automatically receives `BACKUPS_INCREMENTAL='yes'`, `0600` on `restic.conf`, `/home/<user>/backup` post-snapshot cleanup, and automatic Master Recovery Key enrollment on their very first `02:30` daily run!
+5. **Enable the `02:30` daily cron (automatic with `bash install.sh --setup-crons` once Restic is enabled):**
+   ```cron
+   30 2 * * * root /usr/local/hestia/bin/v-restic-manager --run-daily >> /var/log/hestia/restic-daily.log 2>&1
+   ```
+
+#### Bare-Metal Emergency Restore (Total Server Loss — Using Only the Master Recovery Key)
+
+Even if the original HestiaCP server and all `/usr/local/hestia/data/users/*/restic.conf` files are completely destroyed, any user's Restic repository can be unlocked on a fresh Linux machine using only your offline Master Recovery Key:
+
+```bash
+export RESTIC_REPOSITORY="rclone:b2restic:YOUR_RESTIC_BUCKET/<username>"
+restic --password-file /path/to/master.key snapshots
+restic --password-file /path/to/master.key restore latest --target /restore/<username>
+```
+
 ---
 
 ## Architecture Reference
@@ -132,5 +190,6 @@ The `install.sh` script applies idempotent patches to these files:
 3. **`backup.sh`** -> Updates Hestia's B2 upload (with 3-attempt exponential-backoff retry and temp cleanup on failure), download, delete, and rotation paths.
 4. **`v-delete-user-backup`** -> Makes deletion follow organized backup symlinks safely.
 5. **`v-prune-backups`** -> Adds the dry-run-first retention engine used by the native `v-backup-users` hook.
-6. **`v-verify-backups`** -> Verifies remote (`b2` / `rclone`) and local `.tar` archives against `backup.conf` after batch runs and single-user B2 retries.
-7. **APT Auto-Healer (`/etc/apt/apt.conf.d/99-hestia-custom-backup-hooks`)** -> Automatically re-runs `install.sh` via `DPkg::Post-Invoke` whenever `apt`/`dpkg` updates HestiaCP packages, ensuring custom core patches and fresh `.original` backups are preserved across every HestiaCP release without manual intervention.
+6. **`v-verify-backups`** -> Verifies remote (`b2` / `rclone`) and local `.tar` archives against `backup.conf` plus Restic incremental snapshots (`<= 36h`) after batch runs and single-user B2 retries.
+7. **`v-restic-manager`** -> Manages offline Master Recovery Key generation (`--init-master-key`), dual-key enrollment (`--enroll`), `0600` `restic.conf` hardening, `/home/<user>/backup` cleanup, and failure-only alert daily runs (`--run-daily`).
+8. **APT Auto-Healer (`/etc/apt/apt.conf.d/99hestia-custom-patches`)** -> Automatically re-runs `install.sh` via `DPkg::Post-Invoke` whenever `apt`/`dpkg` updates HestiaCP packages, ensuring custom core patches and fresh `.original` backups are preserved across every HestiaCP release without manual intervention.

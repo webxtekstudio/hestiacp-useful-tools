@@ -45,9 +45,10 @@ install_root_bin "$SCRIPT_DIR/hooks/v-backup-user-notify-hook" "$HESTIA_BIN/v-ba
 install_root_bin "$SCRIPT_DIR/hooks/v-backup-users-notify-hook" "$HESTIA_BIN/v-backup-users-notify-hook"
 echo "  -> Installed HTML notification hooks"
 
-# 2.2 Install optional retention command, archive verifier, and native v-backup-users hook
+# 2.2 Install optional retention command, Restic manager, archive verifier, and native v-backup-users hook
 install_root_bin "$SCRIPT_DIR/bin/v-prune-backups" "$HESTIA_BIN/v-prune-backups"
 install_root_bin "$SCRIPT_DIR/bin/v-verify-backups" "$HESTIA_BIN/v-verify-backups"
+install_root_bin "$SCRIPT_DIR/bin/v-restic-manager" "$HESTIA_BIN/v-restic-manager"
 install_root_bin "$SCRIPT_DIR/hooks/v-backup-users-retention-hook" "$HESTIA_BIN/v-backup-users-retention-hook"
 if [ ! -f "$RETENTION_CONF" ]; then
     install -o root -g root -m 0600 "$SCRIPT_DIR/config/backup-retention.conf.sample" "$RETENTION_CONF"
@@ -59,6 +60,7 @@ else
 fi
 echo "  -> Installed optional native retention hook: v-prune-backups"
 echo "  -> Installed backup integrity verifier: v-verify-backups"
+echo "  -> Installed Restic incremental & Master Key manager: v-restic-manager"
 "$HESTIA_BIN/v-verify-backups" --quiet >/dev/null 2>&1 || true
 
 # 3. Apply core Hestia patches (B2 paths, symlink delete, v-backup-user post-hook)
@@ -137,6 +139,9 @@ else
     echo "      v-add-backup-host b2 BUCKET_NAME KEY_ID APP_KEY"
     echo ""
     echo "  See README.md for detailed setup instructions."
+fi
+if [ -f "$HESTIA/conf/restic.conf" ] && grep -q "^BACKUP_INCREMENTAL='yes'" "$HESTIA_CONF" 2>/dev/null; then
+    echo "  ✅ Restic incremental backups enabled (manage Master Key & daily runs via: v-restic-manager --status)"
 fi
 
 echo ""

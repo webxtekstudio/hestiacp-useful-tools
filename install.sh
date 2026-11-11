@@ -387,6 +387,14 @@ CRONHEADER
         "50 4 * * *" \
         "root /usr/local/hestia/bin/v-harden-server --cron-heal >> /var/log/hestia/server-hardening.log 2>&1"
 
+    if [ -f "$HESTIA/conf/restic.conf" ] && grep -q "^BACKUP_INCREMENTAL='yes'" "$HESTIA_CONF" 2>/dev/null; then
+        if ! grep -qE "v-restic-manager|run-restic-daily\.sh" "$CRON_FILE" 2>/dev/null; then
+            add_cron_entry "restic-daily" \
+                "30 2 * * *" \
+                "root /usr/local/hestia/bin/v-restic-manager --run-daily >> /var/log/hestia/restic-daily.log 2>&1"
+        fi
+    fi
+
     chmod 644 "$CRON_FILE"
 fi
 
