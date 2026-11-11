@@ -1,0 +1,167 @@
+<!-- Begin toolbar -->
+<div class="toolbar">
+	<div class="toolbar-inner">
+		<div class="toolbar-buttons">
+			<a class="button button-secondary button-back js-button-back" href="/list/backup/">
+				<i class="fas fa-arrow-left icon-blue"></i><?= tohtml( _("Back")) ?>
+			</a>
+		<?php if ($read_only !== true) { ?>
+			<a href="/schedule/backup/incremental/?<?= tohtml(http_build_query(["token" => $_SESSION["token"]])) ?>" class="button button-secondary js-button-create">
+				<i class="fas fa-circle-plus icon-green"></i><?= tohtml( _("Create Snapshot")) ?>
+			</a>
+			<a href="/list/backup/exclusions/" class="button button-secondary">
+				<i class="fas fa-folder-minus icon-orange"></i><?= tohtml( _("Backup Exclusions")) ?>
+			</a>
+		<?php } ?>
+		</div>
+		<div class="toolbar-right">
+			<div class="toolbar-sorting">
+				<button class="toolbar-sorting-toggle js-toggle-sorting-menu" type="button" title="<?= tohtml( _("Sort items")) ?>">
+					<?= tohtml( _("Sort by")) ?>:
+					<span class="u-text-bold">
+						<?php if ($_SESSION['userSortOrder'] === 'name') { $label = _('Name'); } else { $label = _('Date'); } ?>
+						<?= tohtml($label) ?> <i class="fas fa-arrow-down-a-z"></i>
+					</span>
+				</button>
+				<ul class="toolbar-sorting-menu js-sorting-menu u-hidden">
+					<li data-entity="sort-date" data-sort-as-int="1">
+						<span class="name <?php if ($_SESSION['userSortOrder'] === 'date') { echo 'active'; } ?>"><?= tohtml( _("Date")) ?> <i class="fas fa-arrow-down-a-z"></i></span><span class="up"><i class="fas fa-arrow-up-a-z"></i></span>
+					</li>
+					<li data-entity="sort-name">
+						<span class="name <?php if ($_SESSION['userSortOrder'] === 'name') { echo 'active'; } ?>"><?= tohtml( _("Name")) ?> <i class="fas fa-arrow-down-a-z"></i></span><span class="up"><i class="fas fa-arrow-up-a-z"></i></span>
+					</li>
+				</ul>
+			</div>
+			<?php if ($read_only !== true) { ?>
+				<form x-data x-bind="BulkEdit" action="/bulk/backup/incremental/" method="post">
+					<input type="hidden" name="token" value="<?= tohtml($_SESSION["token"]) ?>">
+					<select class="form-select" name="action">
+						<option value=""><?= tohtml( _("Apply to selected")) ?></option>
+						<option value="delete"><?= tohtml( _("Delete")) ?></option>
+					</select>
+					<button type="submit" class="toolbar-input-submit" title="<?= tohtml( _("Apply to selected")) ?>">
+						<i class="fas fa-arrow-right"></i>
+					</button>
+				</form>
+			<?php } ?>
+			<div class="toolbar-search">
+				<form action="/list/backup/incremental/" method="get">
+					<input type="hidden" name="token" value="<?= tohtml($_SESSION["token"]) ?>">
+						<input type="search" class="form-control js-search-input" name="q" value="<?= tohtml($_GET['q'] ?? '') ?>" title="<?= tohtml( _("Search")) ?>">
+					<button type="submit" class="toolbar-input-submit" title="<?= tohtml( _("Search")) ?>">
+						<i class="fas fa-magnifying-glass"></i>
+					</button>
+				</form>
+			</div>
+		</div>
+	</div>
+</div>
+<!-- End toolbar -->
+
+<div class="container">
+
+<h1 class="u-text-center u-hide-desktop u-mt20 u-pr30 u-mb20 u-pl30"><?= tohtml( _("Snapshots")) ?></h1>
+
+<div class="units-table js-units-container">
+	<div class="units-table-header">
+		<div class="units-table-cell">
+			<input type="checkbox" class="js-toggle-all-checkbox" title="<?= tohtml( _("Select all")) ?>" <?= tohtml($display_mode) ?>>
+		</div>
+		<div class="units-table-cell"><?= tohtml( _("Snapshot")) ?></div>
+		<div class="units-table-cell"></div>
+		<div class="units-table-cell u-text-center"><?= tohtml( _("Date")) ?></div>
+		<div class="units-table-cell u-text-center"><?= tohtml( _("Type")) ?></div>
+		<div class="units-table-cell u-text-center"><?= tohtml( _("Hostname")) ?></div>
+	</div>
+	<!-- Begin user backup list item loop -->
+	<?php
+		$i = 0;
+		foreach ($data as $key => $value) {
+			$i++;
+	?>
+		<div class="units-table-row js-unit"
+			data-sort-date="<?= tohtml(strtotime($value['time'])) ?>"
+			data-sort-name="<?= tohtml($value['short_id']) ?>">
+			<div class="units-table-cell">
+				<div>
+					<input id="check<?= tohtml($i) ?>" class="js-unit-checkbox" type="checkbox" title="<?= tohtml( _("Select")) ?>" name="backup[]" value="<?= tohtml($value['short_id']) ?>" <?= tohtml($display_mode) ?>>					<span class="u-hide-desktop"><label for="check<?= tohtml($i) ?>" class="u-hide-desktop"><?= tohtml( _("Select")) ?></label></span>
+				</div>
+			</div>
+			<div class="units-table-cell units-table-heading-cell u-text-bold">
+				<b>
+					<?php if ($read_only === true) { ?>
+							<span class="u-hide-desktop"><?= tohtml( _("Snapshot")) ?>:</span>
+							<?= tohtml($value['short_id']) ?>
+					<?php } else { ?>
+						<span class="u-hide-desktop"><?= tohtml( _("Snapshot")) ?>:</span>
+						<a href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>" title="<?= tohtml( _("Restore")) ?>"><?= tohtml($value['short_id']) ?></a>
+					<?php } ?>
+				</b>
+			</div>
+			<div class="units-table-cell">
+				<?php if (!$read_only) { ?>
+					<ul class="units-table-row-actions">
+						<li class="units-table-row-action shortcut-b" data-key-action="href">
+							<a
+								class="units-table-row-action-link"
+								href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "browse" => 'yes', "token" => $_SESSION["token"]])) ?>"
+								title="<?= tohtml( _("Browse")) ?>"
+							>
+								<i class="fas fa-folder-open icon-lightblue"></i>
+								<span class="u-hide-desktop"><?= tohtml( _("Browse")) ?></span>
+							</a>
+						</li>
+						<li class="units-table-row-action shortcut-d" data-key-action="href">
+							<a
+								class="units-table-row-action-link"
+								href="/download/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>"
+								title="<?= tohtml( _("Download")) ?>"
+							>
+								<i class="fas fa-file-arrow-down icon-lightblue"></i>
+								<span class="u-hide-desktop"><?= tohtml( _("Download")) ?></span>
+							</a>
+						</li>
+						<li class="units-table-row-action shortcut-enter" data-key-action="href">
+							<a
+								class="units-table-row-action-link data-controls"
+								href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>"
+								title="<?= tohtml( _("Restore")) ?>"
+							>
+								<i class="fas fa-arrow-rotate-left icon-green"></i>
+								<span class="u-hide-desktop"><?= tohtml( _("Restore")) ?></span>
+							</a>
+						</li>
+					</ul>
+				<?php } ?>
+			</div>
+			<div class="units-table-cell">
+				<span class="u-hide-desktop u-text-bold"><?= tohtml( _("Date")) ?>:</span>
+				<span class="u-text-bold">
+					<?= tohtml(convert_datetime($value['time'])) ?>
+				</span>
+			</div>
+			<div class="units-table-cell">
+				<span class="u-hide-desktop u-text-bold"><?= tohtml( _("Type")) ?>:</span>
+				<span class="u-text-bold">
+					Restic
+				</span>
+			</div>
+				<div class="units-table-cell">
+					<span class="u-hide-desktop u-text-bold"><?= tohtml( _("Hostname")) ?>:</span>
+					<span class="u-text-bold">
+						<?= tohtml($value['hostname']) ?>
+					</span>
+				</div>
+		</div>
+	<?php
+	}
+	 ?>
+</div>
+
+<footer class="app-footer">
+	<div class="container app-footer-inner">
+		<p>
+			<?php printf(ngettext("%d snapshot", "%d snapshots", $i), $i); ?>
+		</p>
+	</div>
+</footer>
