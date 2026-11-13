@@ -573,7 +573,9 @@ PHP_EOF
     chmod 0644 "$dl_index" 2>/dev/null || true
 
     if [ -f "$tpl" ]; then
-        [ ! -f "${tpl}.original" ] && cp -f "$tpl" "${tpl}.original" 2>/dev/null || true
+        if ! grep -q '/download/backup/incremental/' "$tpl" 2>/dev/null || [ ! -f "${tpl}.original" ]; then
+            cp -f "$tpl" "${tpl}.original" 2>/dev/null || true
+        fi
         cat > "$tpl" << 'TPL_INC_EOF'
 <!-- Begin toolbar -->
 <div class="toolbar">
@@ -750,7 +752,7 @@ TPL_INC_EOF
     # Sorting & in-page search on list_backup.php
     local tpl_bk="$HESTIA/web/templates/pages/list_backup.php"
     if [ -f "$tpl_bk" ] && ! grep -q "toolbar-sorting" "$tpl_bk" 2>/dev/null; then
-        [ ! -f "${tpl_bk}.original" ] && cp -f "$tpl_bk" "${tpl_bk}.original" 2>/dev/null || true
+        cp -f "$tpl_bk" "${tpl_bk}.original" 2>/dev/null || true
         local temp_bk
         temp_bk=$(mktemp /run/patch-bk-sort.XXXXXX) || return 1
         awk '
@@ -809,7 +811,7 @@ TPL_INC_EOF
     # Sorting & in-page search on list_files_incremental.php
     local tpl_files="$HESTIA/web/templates/pages/list_files_incremental.php"
     if [ -f "$tpl_files" ] && ! grep -q "toolbar-sorting" "$tpl_files" 2>/dev/null; then
-        [ ! -f "${tpl_files}.original" ] && cp -f "$tpl_files" "${tpl_files}.original" 2>/dev/null || true
+        cp -f "$tpl_files" "${tpl_files}.original" 2>/dev/null || true
         local temp_fl
         temp_fl=$(mktemp /run/patch-fl-sort.XXXXXX) || return 1
         awk '
@@ -874,7 +876,7 @@ TPL_INC_EOF
     # Search filtering in web/list/backup/index.php
     local bk_ctrl="$HESTIA/web/list/backup/index.php"
     if [ -f "$bk_ctrl" ] && ! grep -q 'ARRAY_FILTER_USE_BOTH' "$bk_ctrl" 2>/dev/null; then
-        [ ! -f "${bk_ctrl}.original" ] && cp -f "$bk_ctrl" "${bk_ctrl}.original" 2>/dev/null || true
+        cp -f "$bk_ctrl" "${bk_ctrl}.original" 2>/dev/null || true
         sed -i '/unset(\$output);/i \
 \tif (!empty($_GET["q"])) {\
 \t\t$q = $_GET["q"];\
@@ -901,7 +903,7 @@ TPL_INC_EOF
     # Search filtering & fixes in web/list/backup/incremental/index.php
     local inc_ctrl="$HESTIA/web/list/backup/incremental/index.php"
     if [ -f "$inc_ctrl" ] && ! grep -q 'U_BACKUPS_INCREMENTAL' "$inc_ctrl" 2>/dev/null; then
-        [ ! -f "${inc_ctrl}.original" ] && cp -f "$inc_ctrl" "${inc_ctrl}.original" 2>/dev/null || true
+        cp -f "$inc_ctrl" "${inc_ctrl}.original" 2>/dev/null || true
         cat > "$inc_ctrl" << 'INC_CTRL_EOF'
 <?php
 use function Hestiacp\quoteshellarg\quoteshellarg;
@@ -998,7 +1000,7 @@ INC_CTRL_EOF
     # Top menu 2nd line ('Snapshots: X') in panel.php + U_BACKUPS_INCREMENTAL in v-list-user & syshealth.sh
     local panel_tpl="$HESTIA/web/templates/includes/panel.php"
     if [ -f "$panel_tpl" ] && ! grep -q "U_BACKUPS_INCREMENTAL" "$panel_tpl" 2>/dev/null; then
-        [ ! -f "${panel_tpl}.original" ] && cp -f "$panel_tpl" "${panel_tpl}.original" 2>/dev/null || true
+        cp -f "$panel_tpl" "${panel_tpl}.original" 2>/dev/null || true
         local temp_pnl
         temp_pnl=$(mktemp /run/patch-panel.XXXXXX) || return 1
         awk '
@@ -1065,6 +1067,9 @@ apply_hestia_patches() {
 patch_restic_snapshot_counter() {
     local cli="$HESTIA/bin/v-list-user-backups-restic"
     [ -f "$cli" ] || return 0
+    if ! grep -q "hestia-restic-counter-v2" "$cli" 2>/dev/null || [ ! -f "${cli}.original" ]; then
+        cp -f "$cli" "${cli}.original" 2>/dev/null || true
+    fi
     local work patched
     work=$(umask 077 && mktemp -d /run/hestia-restic-cli.XXXXXX) || return 1
     patched=$(umask 077 && mktemp "${cli}.patch.XXXXXX") || { rm -rf -- "$work"; return 1; }

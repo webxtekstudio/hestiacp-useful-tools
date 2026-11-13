@@ -873,6 +873,7 @@ actionstop = /usr/bin/flock -w 30 /run/hestia-firewall.lock /usr/local/hestia/bi
 actioncheck = /usr/sbin/iptables -n -L INPUT | grep -q 'fail2ban-<name>[ \t]'
 actionban = /usr/bin/flock -w 30 /run/hestia-firewall.lock /bin/sh -c 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"; /usr/local/hestia/bin/v-add-firewall-ban <ip> <name>; if grep -q "IP=\x27<ip>\x27 CHAIN=\x27<name>\x27" /usr/local/hestia/data/firewall/banlist.conf 2>/dev/null && ! iptables -C fail2ban-<name> -s <ip> -j DROP 2>/dev/null; then iptables -I fail2ban-<name> 1 -s <ip> -j DROP 2>/dev/null || true; fi'
 actionunban = /usr/bin/flock -w 30 /run/hestia-firewall.lock /usr/bin/env HESTIA_F2B_CALLER=1 /usr/local/hestia/bin/v-delete-firewall-ban <ip> <name>
+actionflush =
 EOF
             then
                 f2b_files_changed=true
