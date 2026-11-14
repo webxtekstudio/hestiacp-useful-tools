@@ -124,23 +124,182 @@ if bash "$cli" --web-download bob abcd1234 >/dev/null 2>&1; then exit 1; fi
 echo 'PASS: invalid snapshot timestamps are rejected before output path construction'
 
 HESTIA="$sand/patch-fixture"
-mkdir -p "$HESTIA/bin"
+mkdir -p "$HESTIA/bin" "$HESTIA/conf" "$HESTIA/data/users/bob" "$HESTIA/data/queue" "$HESTIA/backup"
+mkdir -p "$HESTIA/web/templates/pages" "$HESTIA/web/list/backup/incremental" "$HESTIA/web/templates/includes"
+touch "$HESTIA/data/queue/backup.pipe"
+printf "REPO='local:fixture'\n" > "$HESTIA/conf/restic.conf"
+printf "U_BACKUPS_INCREMENTAL='3'\nU_BACKUPS='0'\n" > "$HESTIA/data/users/bob/user.conf"
+printf "fixture-password\n" > "$HESTIA/data/users/bob/restic.conf"
+
 cat > "$HESTIA/bin/v-list-user-backups-restic" <<'CLI'
 #!/bin/bash
 # Keep this upstream header.
 function json_list() {
-    restic snapshots
+    restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json snapshots
 }
+function plain_list() {
+    restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" snapshots
+}
+case ${format:-json} in
+	json) json_list ;;
+	plain) plain_list ;;
+esac
 # Keep this upstream trailer.
 CLI
+
+cat > "$HESTIA/bin/v-list-user-backup-restic" <<'CLI'
+#!/bin/bash
+tmpdir=$(mktemp -p "${BACKUP_TEMP:-$BACKUP}" -d)
+restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json dump "$snapshot" "/home/$user/backup/backup.conf" > "$tmpdir/backup.conf"
+parse_untrusted_conf_file "$tmpdir/backup.conf" \
+	BACKUP TYPE SIZE WEB DNS MAIL DB CRON UDIR RUNTIME TIME DATE || exit $?
+rm -fr "$tmpdir"
+CLI
+
+cat > "$HESTIA/bin/v-list-user-files-restic" <<'CLI'
+#!/bin/bash
+restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json ls "$snapshot" "$folder"
+CLI
+
+cat > "$HESTIA/bin/v-backup-user-restic" <<'CLI'
+#!/bin/bash
+restic --repo "${REPO%/}/$user" --password-file $USER_DATA/restic.conf --json snapshots > /dev/null
+log_event "$OK" "$ARGUMENTS"
+CLI
+
+cat > "$HESTIA/bin/v-delete-user-backup-restic" <<'CLI'
+#!/bin/bash
+user=$1
+snapshot=$2
+REPO='local:fixture'
+BACKUP="$HESTIA/backup"
+USER_DATA="$HESTIA/data/users/$user"
+BIN="$HESTIA/bin"
+E_INVALID=2; E_NOTEXIST=3; E_CONNECT=15; OK=0; ARGUMENTS="$*"
+check_result() { [ "$1" -eq 0 ] && return 0; echo "ERR:$1:$2" >&2; exit "$1"; }
+update_user_value() { sed -i "s|^U_BACKUPS_INCREMENTAL='[^']*'|U_BACKUPS_INCREMENTAL='$3'|" "$USER_DATA/user.conf"; }
+log_event() { :; }
+tmpdir=$(mktemp -p "${BACKUP_TEMP:-$BACKUP}" -d)
+if [ ! -f "$tmpdir/backup.conf" ]; then
+	restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" dump "$snapshot" "/home/$user/backup/backup.conf" > "$tmpdir/backup.conf"
+	if [ "$?" -ne 0 ]; then
+		check_result "$E_NOTEXIST" "Unable to download from snapshot"
+	fi
+fi
+restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" forget "$snapshot"
+sed -i "/v-delete-user-backup-restic '$user' '$snapshot' /d" "$HESTIA/data/queue/backup.pipe"
+$BIN/v-log-action "system" "Info" "Backup" "Restic snapshot successfully deleted (User: $user, Snapshot: $snapshot)."
+log_event "$OK" "$ARGUMENTS"
+CLI
+cat > "$HESTIA/bin/v-log-action" <<'CLI'
+#!/bin/bash
+exit 0
+CLI
+chmod +x "$HESTIA/bin/v-log-action"
+echo 'upstream-template' > "$HESTIA/web/templates/pages/list_backup_incremental.php"
+echo '<?php // upstream' > "$HESTIA/web/list/backup/incremental/index.php"
+
 source "$repo/scripts/backup-core-patches/lib/hestia.sh"
 _log() { :; }
 patch_restic_snapshot_counter
-grep -q 'hestia-restic-counter-v2' "$HESTIA/bin/v-list-user-backups-restic"
+grep -q 'hestia-restic-counter-v3' "$HESTIA/bin/v-list-user-backups-restic"
+grep -q -- 'restic --no-lock --repo' "$HESTIA/bin/v-list-user-backups-restic"
+grep -q 'json_list "\${3-}"' "$HESTIA/bin/v-list-user-backups-restic"
 grep -q 'Keep this upstream header' "$HESTIA/bin/v-list-user-backups-restic"
 grep -q 'Keep this upstream trailer' "$HESTIA/bin/v-list-user-backups-restic"
 patched_hash=$(sha256sum "$HESTIA/bin/v-list-user-backups-restic" | cut -d' ' -f1)
 patch_restic_snapshot_counter
 [ "$(sha256sum "$HESTIA/bin/v-list-user-backups-restic" | cut -d' ' -f1)" = "$patched_hash" ]
 [ -z "$(find "$HESTIA/bin" -name '*.patch.*')" ]
-echo 'PASS: counter installer preserves surrounding upstream code and is idempotent'
+echo 'PASS: counter installer preserves surrounding upstream code, sets --no-lock, and is idempotent'
+
+# Runtime cache verification for json_list()
+if ! command -v jq >/dev/null 2>&1; then
+    cat > "$sand/bin/jq" <<'MOCKJQ'
+#!/usr/bin/env node
+const fs = require('fs');
+const data = JSON.parse(fs.readFileSync(0, 'utf8'));
+if (!Array.isArray(data) || !data.every((x) => x && typeof x === 'object' && typeof x.id === 'string')) {
+  process.exit(1);
+}
+console.log(data.length);
+MOCKJQ
+    chmod +x "$sand/bin/jq"
+fi
+cat > "$sand/bin/restic" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$EXPORT_TEST_STATE/list_calls"
+case " $* " in
+    *" --no-lock "*) ;;
+    *) echo 'missing --no-lock' >&2; exit 9 ;;
+esac
+echo '[{"id":"abcd1234abcd1234","short_id":"abcd1234","time":"2026-11-11T16:30:26Z"}]'
+MOCK
+chmod +x "$sand/bin/restic"
+: > "$EXPORT_TEST_STATE/list_calls"
+export RESTIC_SNAPSHOT_CACHE_DIR="$sand/snap-cache"
+mkdir -p "$RESTIC_SNAPSHOT_CACHE_DIR"
+export user=bob USER_DATA="$HESTIA/data/users/bob" REPO='local:fixture' format=json
+update_user_value() { sed -i "s|^U_BACKUPS_INCREMENTAL='[^']*'|U_BACKUPS_INCREMENTAL='$3'|" "$USER_DATA/user.conf"; }
+source <(sed -n '/^function json_list()/,/^}/p' "$HESTIA/bin/v-list-user-backups-restic")
+out1=$(json_list)
+[ -f "$RESTIC_SNAPSHOT_CACHE_DIR/bob.json" ]
+grep -q "^U_BACKUPS_INCREMENTAL='1'" "$USER_DATA/user.conf"
+[ "$(wc -l < "$EXPORT_TEST_STATE/list_calls")" -eq 1 ]
+out2=$(json_list)
+[ "$out1" = "$out2" ]
+[ "$(wc -l < "$EXPORT_TEST_STATE/list_calls")" -eq 1 ]
+RESTIC_NO_CACHE=1 json_list >/dev/null
+[ "$(wc -l < "$EXPORT_TEST_STATE/list_calls")" -eq 2 ]
+json_list no-cache >/dev/null
+[ "$(wc -l < "$EXPORT_TEST_STATE/list_calls")" -eq 3 ]
+echo 'PASS: json_list uses --no-lock, serves cached results within TTL, and honors no-cache bypasses'
+
+# Read-only & delete hardening patches
+patch_restic_read_and_delete
+grep -q 'hestia-restic-nolock-v1' "$HESTIA/bin/v-list-user-backup-restic"
+grep -q 'hestia-restic-nolock-v1' "$HESTIA/bin/v-list-user-files-restic"
+grep -q 'hestia-restic-cache-inv-v1' "$HESTIA/bin/v-backup-user-restic"
+grep -q 'hestia-restic-delete-v1' "$HESTIA/bin/v-delete-user-backup-restic"
+del_hash=$(sha256sum "$HESTIA/bin/v-delete-user-backup-restic" | cut -d' ' -f1)
+patch_restic_read_and_delete
+[ "$(sha256sum "$HESTIA/bin/v-delete-user-backup-restic" | cut -d' ' -f1)" = "$del_hash" ]
+
+cat > "$sand/bin/restic" <<'MOCKDEL'
+#!/usr/bin/env bash
+for a in "$@"; do last="$a"; done
+if [ "$last" = "deadbeef" ]; then
+    echo 'Ignoring "deadbeef": no matching ID found for prefix "deadbeef"'
+    exit 0
+fi
+echo '[0:00] 100.00%  1 / 1 files deleted'
+MOCKDEL
+chmod +x "$sand/bin/restic"
+if bash "$HESTIA/bin/v-delete-user-backup-restic" bob --prune >/dev/null 2>&1; then
+    echo 'FAIL: accepted option-like snapshot ID' >&2; exit 1
+fi
+if bash "$HESTIA/bin/v-delete-user-backup-restic" bob '../bad' >/dev/null 2>&1; then
+    echo 'FAIL: accepted invalid snapshot ID' >&2; exit 1
+fi
+if bash "$HESTIA/bin/v-delete-user-backup-restic" bob deadbeef >/dev/null 2>&1; then
+    echo 'FAIL: succeeded on unknown snapshot ID' >&2; exit 1
+fi
+printf "U_BACKUPS_INCREMENTAL='3'\n" > "$USER_DATA/user.conf"
+touch "$RESTIC_SNAPSHOT_CACHE_DIR/bob.json"
+bash "$HESTIA/bin/v-delete-user-backup-restic" bob abcd1234 >/dev/null
+[ ! -e "$RESTIC_SNAPSHOT_CACHE_DIR/bob.json" ]
+[ -z "$(find "$HESTIA/backup" -maxdepth 1 -name 'tmp.*')" ]
+grep -q "^U_BACKUPS_INCREMENTAL='2'" "$USER_DATA/user.conf"
+echo 'PASS: hardened v-delete-user-backup-restic validates IDs, skips tmpdir leak, invalidates cache, and decrements counter'
+
+# Web UI download/delete route, trash action, instant search script & incremental controller
+patch_restic_web_download_ui
+[ -f "$HESTIA/web/delete/backup/incremental/index.php" ]
+grep -q 'v-delete-user-backup-restic' "$HESTIA/web/delete/backup/incremental/index.php"
+[ -f "$HESTIA/web/js/custom_scripts/backup-instant-search.js" ]
+[ -f "$HESTIA/web/templates/pages/list_backup_incremental.php.original" ]
+grep -q '/delete/backup/incremental/' "$HESTIA/web/templates/pages/list_backup_incremental.php"
+grep -q 'fa-trash icon-red' "$HESTIA/web/templates/pages/list_backup_incremental.php"
+grep -q 'hestia-restic-inc-ctrl-v2' "$HESTIA/web/list/backup/incremental/index.php"
+grep -q 'no-cache' "$HESTIA/web/list/backup/incremental/index.php"
+echo 'PASS: web UI patch installs delete endpoint, trash action, instant search JS, and refreshed controller'

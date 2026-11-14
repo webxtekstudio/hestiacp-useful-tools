@@ -121,7 +121,7 @@
 								<span class="u-hide-desktop"><?= tohtml( _("Download")) ?></span>
 							</a>
 						</li>
-						<li class="units-table-row-action shortcut-enter" data-key-action="href">
+						<li class="units-table-row-action u-mr10 shortcut-enter" data-key-action="href">
 							<a
 								class="units-table-row-action-link data-controls"
 								href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>"
@@ -129,6 +129,18 @@
 							>
 								<i class="fas fa-arrow-rotate-left icon-green"></i>
 								<span class="u-hide-desktop"><?= tohtml( _("Restore")) ?></span>
+							</a>
+						</li>
+						<li class="units-table-row-action shortcut-delete" data-key-action="js">
+							<a
+								class="units-table-row-action-link data-controls js-confirm-action"
+								href="/delete/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>"
+								title="<?= tohtml( _("Delete")) ?>"
+								data-confirm-title="<?= tohtml( _("Delete")) ?>"
+								data-confirm-message="<?= tohtml(sprintf(_("Are you sure you want to delete backup %s?"), $value['short_id'])) ?>"
+							>
+								<i class="fas fa-trash icon-red"></i>
+								<span class="u-hide-desktop"><?= tohtml( _("Delete")) ?></span>
 							</a>
 						</li>
 					</ul>
@@ -158,10 +170,9 @@
 	 ?>
 </div>
 
-<footer class="app-footer">
-	<div class="container app-footer-inner">
+	<div class="units-table-footer">
 		<p>
 			<?php printf(ngettext("%d snapshot", "%d snapshots", $i), $i); ?>
 		</p>
 	</div>
-</footer>
+</div>

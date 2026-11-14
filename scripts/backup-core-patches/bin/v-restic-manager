@@ -381,6 +381,8 @@ do_run_daily() {
             continue
         fi
 
+        rm -f -- "${RESTIC_SNAPSHOT_CACHE_DIR:-/run/hestia-restic-cache}/${user}.json" "/run/hestia-restic-cache/${user}.json" 2>/dev/null || true
+
         if [ -s "$MASTER_KEY_FILE" ]; then
             enroll_master_key_for_user "$user" 9>&- || fail_users+=("${user}(key_enroll)")
         fi

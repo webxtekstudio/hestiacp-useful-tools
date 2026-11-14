@@ -8,6 +8,7 @@
 # All patches are idempotent (safe to re-run).
 
 export HESTIA="${HESTIA:-/usr/local/hestia}"
+_BCP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ── Patch b2 functions in backup.sh ────────────────────────────────
 patch_b2_functions() {
@@ -511,14 +512,21 @@ patch_cron_rm_silence() {
     return 1
 }
 
-# Phase 5: Install Restic Snapshot .tar Download endpoint & UI button
+# Phase 5: Install Restic Snapshot .tar Download & Delete endpoints, instant search JS, and UI buttons
 patch_restic_web_download_ui() {
     local dl_dir="$HESTIA/web/download/backup/incremental"
     local dl_index="$dl_dir/index.php"
+    local del_dir="$HESTIA/web/delete/backup/incremental"
+    local del_index="$del_dir/index.php"
     local tpl="$HESTIA/web/templates/pages/list_backup_incremental.php"
+    local tpl_src="$_BCP_ROOT/templates/list_backup_incremental.php"
+    local js_src="$_BCP_ROOT/js/backup-instant-search.js"
+    local js_dst_dir="$HESTIA/web/js/custom_scripts"
+    local js_dst="$js_dst_dir/backup-instant-search.js"
     [ -d "$HESTIA/web" ] || return 0
 
-    mkdir -p "$dl_dir"
+    mkdir -p "$dl_dir" "$del_dir"
+    chmod 0755 "$dl_dir" "$del_dir" 2>/dev/null || true
     cat > "$dl_index" << 'PHP_EOF'
 <?php
 use function Hestiacp\quoteshellarg\quoteshellarg;
@@ -569,184 +577,70 @@ $_SESSION["error_msg"] = !empty($output)
 header("Location: /list/backup/incremental/");
 exit();
 PHP_EOF
-    chown root:root "$dl_index" 2>/dev/null || true
+    chown root:root "$dl_dir" "$dl_index" 2>/dev/null || true
     chmod 0644 "$dl_index" 2>/dev/null || true
 
-    if [ -f "$tpl" ]; then
+    cat > "$del_index" << 'DEL_PHP_EOF'
+<?php
+use function Hestiacp\quoteshellarg\quoteshellarg;
+
+ob_start();
+include $_SERVER["DOCUMENT_ROOT"] . "/inc/main.php";
+
+if ($_SESSION["userContext"] === "admin" && !empty($_GET["user"])) {
+	$user = quoteshellarg($_GET["user"]);
+}
+
+// Check token
+verify_csrf($_GET);
+
+if ($read_only === true) {
+	header("Location: /list/backup/incremental/");
+	exit();
+}
+
+if (!empty($_GET["snapshot"])) {
+	$v_snapshot = quoteshellarg($_GET["snapshot"]);
+	exec(
+		HESTIA_CMD . "v-delete-user-backup-restic " . $user . " " . $v_snapshot,
+		$output,
+		$return_var,
+	);
+	check_return_code($return_var, $output);
+	unset($output);
+}
+
+header("Location: /list/backup/incremental/");
+exit();
+DEL_PHP_EOF
+    chown root:root "$del_dir" "$del_index" 2>/dev/null || true
+    chmod 0644 "$del_index" 2>/dev/null || true
+
+    if [ -f "$js_src" ]; then
+        mkdir -p "$js_dst_dir"
+        chmod 0755 "$js_dst_dir" 2>/dev/null || true
+        if ! cmp -s "$js_src" "$js_dst" 2>/dev/null; then
+            if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+                install -o root -g root -m 0644 "$js_src" "$js_dst"
+            else
+                cp -f "$js_src" "$js_dst" && chmod 0644 "$js_dst"
+            fi
+            _log "[$(date)] : Installed custom script backup-instant-search.js (instant search & pagination)"
+        fi
+    fi
+
+    if [ -f "$tpl" ] && [ -f "$tpl_src" ]; then
         if ! grep -q '/download/backup/incremental/' "$tpl" 2>/dev/null || [ ! -f "${tpl}.original" ]; then
             cp -f "$tpl" "${tpl}.original" 2>/dev/null || true
         fi
-        cat > "$tpl" << 'TPL_INC_EOF'
-<!-- Begin toolbar -->
-<div class="toolbar">
-	<div class="toolbar-inner">
-		<div class="toolbar-buttons">
-			<a class="button button-secondary button-back js-button-back" href="/list/backup/">
-				<i class="fas fa-arrow-left icon-blue"></i><?= tohtml( _("Back")) ?>
-			</a>
-		<?php if ($read_only !== true) { ?>
-			<a href="/schedule/backup/incremental/?<?= tohtml(http_build_query(["token" => $_SESSION["token"]])) ?>" class="button button-secondary js-button-create">
-				<i class="fas fa-circle-plus icon-green"></i><?= tohtml( _("Create Snapshot")) ?>
-			</a>
-			<a href="/list/backup/exclusions/" class="button button-secondary">
-				<i class="fas fa-folder-minus icon-orange"></i><?= tohtml( _("Backup Exclusions")) ?>
-			</a>
-		<?php } ?>
-		</div>
-		<div class="toolbar-right">
-			<div class="toolbar-sorting">
-				<button class="toolbar-sorting-toggle js-toggle-sorting-menu" type="button" title="<?= tohtml( _("Sort items")) ?>">
-					<?= tohtml( _("Sort by")) ?>:
-					<span class="u-text-bold">
-						<?php if ($_SESSION['userSortOrder'] === 'name') { $label = _('Name'); } else { $label = _('Date'); } ?>
-						<?= tohtml($label) ?> <i class="fas fa-arrow-down-a-z"></i>
-					</span>
-				</button>
-				<ul class="toolbar-sorting-menu js-sorting-menu u-hidden">
-					<li data-entity="sort-date" data-sort-as-int="1">
-						<span class="name <?php if ($_SESSION['userSortOrder'] === 'date') { echo 'active'; } ?>"><?= tohtml( _("Date")) ?> <i class="fas fa-arrow-down-a-z"></i></span><span class="up"><i class="fas fa-arrow-up-a-z"></i></span>
-					</li>
-					<li data-entity="sort-name">
-						<span class="name <?php if ($_SESSION['userSortOrder'] === 'name') { echo 'active'; } ?>"><?= tohtml( _("Name")) ?> <i class="fas fa-arrow-down-a-z"></i></span><span class="up"><i class="fas fa-arrow-up-a-z"></i></span>
-					</li>
-				</ul>
-			</div>
-			<?php if ($read_only !== true) { ?>
-				<form x-data x-bind="BulkEdit" action="/bulk/backup/incremental/" method="post">
-					<input type="hidden" name="token" value="<?= tohtml($_SESSION["token"]) ?>">
-					<select class="form-select" name="action">
-						<option value=""><?= tohtml( _("Apply to selected")) ?></option>
-						<option value="delete"><?= tohtml( _("Delete")) ?></option>
-					</select>
-					<button type="submit" class="toolbar-input-submit" title="<?= tohtml( _("Apply to selected")) ?>">
-						<i class="fas fa-arrow-right"></i>
-					</button>
-				</form>
-			<?php } ?>
-			<div class="toolbar-search">
-				<form action="/list/backup/incremental/" method="get">
-					<input type="hidden" name="token" value="<?= tohtml($_SESSION["token"]) ?>">
-						<input type="search" class="form-control js-search-input" name="q" value="<?= tohtml($_GET['q'] ?? '') ?>" title="<?= tohtml( _("Search")) ?>">
-					<button type="submit" class="toolbar-input-submit" title="<?= tohtml( _("Search")) ?>">
-						<i class="fas fa-magnifying-glass"></i>
-					</button>
-				</form>
-			</div>
-		</div>
-	</div>
-</div>
-<!-- End toolbar -->
-
-<div class="container">
-
-<h1 class="u-text-center u-hide-desktop u-mt20 u-pr30 u-mb20 u-pl30"><?= tohtml( _("Snapshots")) ?></h1>
-
-<div class="units-table js-units-container">
-	<div class="units-table-header">
-		<div class="units-table-cell">
-			<input type="checkbox" class="js-toggle-all-checkbox" title="<?= tohtml( _("Select all")) ?>" <?= tohtml($display_mode) ?>>
-		</div>
-		<div class="units-table-cell"><?= tohtml( _("Snapshot")) ?></div>
-		<div class="units-table-cell"></div>
-		<div class="units-table-cell u-text-center"><?= tohtml( _("Date")) ?></div>
-		<div class="units-table-cell u-text-center"><?= tohtml( _("Type")) ?></div>
-		<div class="units-table-cell u-text-center"><?= tohtml( _("Hostname")) ?></div>
-	</div>
-	<!-- Begin user backup list item loop -->
-	<?php
-		$i = 0;
-		foreach ($data as $key => $value) {
-			$i++;
-	?>
-		<div class="units-table-row js-unit"
-			data-sort-date="<?= tohtml(strtotime($value['time'])) ?>"
-			data-sort-name="<?= tohtml($value['short_id']) ?>">
-			<div class="units-table-cell">
-				<div>
-					<input id="check<?= tohtml($i) ?>" class="js-unit-checkbox" type="checkbox" title="<?= tohtml( _("Select")) ?>" name="backup[]" value="<?= tohtml($value['short_id']) ?>" <?= tohtml($display_mode) ?>>					<span class="u-hide-desktop"><label for="check<?= tohtml($i) ?>" class="u-hide-desktop"><?= tohtml( _("Select")) ?></label></span>
-				</div>
-			</div>
-			<div class="units-table-cell units-table-heading-cell u-text-bold">
-				<b>
-					<?php if ($read_only === true) { ?>
-							<span class="u-hide-desktop"><?= tohtml( _("Snapshot")) ?>:</span>
-							<?= tohtml($value['short_id']) ?>
-					<?php } else { ?>
-						<span class="u-hide-desktop"><?= tohtml( _("Snapshot")) ?>:</span>
-						<a href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>" title="<?= tohtml( _("Restore")) ?>"><?= tohtml($value['short_id']) ?></a>
-					<?php } ?>
-				</b>
-			</div>
-			<div class="units-table-cell">
-				<?php if (!$read_only) { ?>
-					<ul class="units-table-row-actions">
-						<li class="units-table-row-action u-mr10 shortcut-b" data-key-action="href">
-							<a
-								class="units-table-row-action-link"
-								href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "browse" => 'yes', "token" => $_SESSION["token"]])) ?>"
-								title="<?= tohtml( _("Browse")) ?>"
-							>
-								<i class="fas fa-folder-open icon-lightblue"></i>
-								<span class="u-hide-desktop"><?= tohtml( _("Browse")) ?></span>
-							</a>
-						</li>
-						<li class="units-table-row-action u-mr10 shortcut-d" data-key-action="href">
-							<a
-								class="units-table-row-action-link"
-								href="/download/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>"
-								title="<?= tohtml( _("Download")) ?>"
-							>
-								<i class="fas fa-file-arrow-down icon-lightblue"></i>
-								<span class="u-hide-desktop"><?= tohtml( _("Download")) ?></span>
-							</a>
-						</li>
-						<li class="units-table-row-action shortcut-enter" data-key-action="href">
-							<a
-								class="units-table-row-action-link data-controls"
-								href="/list/backup/incremental/?<?= tohtml(http_build_query(["snapshot" => $value['short_id'], "token" => $_SESSION["token"]])) ?>"
-								title="<?= tohtml( _("Restore")) ?>"
-							>
-								<i class="fas fa-arrow-rotate-left icon-green"></i>
-								<span class="u-hide-desktop"><?= tohtml( _("Restore")) ?></span>
-							</a>
-						</li>
-					</ul>
-				<?php } ?>
-			</div>
-			<div class="units-table-cell">
-				<span class="u-hide-desktop u-text-bold"><?= tohtml( _("Date")) ?>:</span>
-				<span class="u-text-bold">
-					<?= tohtml(convert_datetime($value['time'])) ?>
-				</span>
-			</div>
-			<div class="units-table-cell">
-				<span class="u-hide-desktop u-text-bold"><?= tohtml( _("Type")) ?>:</span>
-				<span class="u-text-bold">
-					Restic
-				</span>
-			</div>
-				<div class="units-table-cell">
-					<span class="u-hide-desktop u-text-bold"><?= tohtml( _("Hostname")) ?>:</span>
-					<span class="u-text-bold">
-						<?= tohtml($value['hostname']) ?>
-					</span>
-				</div>
-		</div>
-	<?php
-	}
-	 ?>
-</div>
-
-<footer class="app-footer">
-	<div class="container app-footer-inner">
-		<p>
-			<?php printf(ngettext("%d snapshot", "%d snapshots", $i), $i); ?>
-		</p>
-	</div>
-</footer>
-TPL_INC_EOF
-        chmod 0644 "$tpl"
-        _log "[$(date)] : Patched list_backup_incremental.php (Browse -> Download -> Restore aligned)"
+        if ! cmp -s "$tpl_src" "$tpl" 2>/dev/null; then
+            if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+                install -o root -g root -m 0644 "$tpl_src" "$tpl"
+            else
+                cp -f "$tpl_src" "$tpl" && chmod 0644 "$tpl"
+            fi
+            _log "[$(date)] : Patched list_backup_incremental.php (Browse -> Download -> Restore -> Delete aligned)"
+        fi
     fi
 
     # Sorting & in-page search on list_backup.php
@@ -900,12 +794,15 @@ TPL_INC_EOF
 \t}' "$bk_ctrl"
     fi
 
-    # Search filtering & fixes in web/list/backup/incremental/index.php
+    # Search filtering, cache refresh toggle & back URL in web/list/backup/incremental/index.php
     local inc_ctrl="$HESTIA/web/list/backup/incremental/index.php"
-    if [ -f "$inc_ctrl" ] && ! grep -q 'U_BACKUPS_INCREMENTAL' "$inc_ctrl" 2>/dev/null; then
-        cp -f "$inc_ctrl" "${inc_ctrl}.original" 2>/dev/null || true
+    if [ -f "$inc_ctrl" ] && ! grep -q 'hestia-restic-inc-ctrl-v2' "$inc_ctrl" 2>/dev/null; then
+        if ! grep -qE 'U_BACKUPS_INCREMENTAL|hestia-restic-inc-ctrl-v' "$inc_ctrl" 2>/dev/null || [ ! -f "${inc_ctrl}.original" ]; then
+            cp -f "$inc_ctrl" "${inc_ctrl}.original" 2>/dev/null || true
+        fi
         cat > "$inc_ctrl" << 'INC_CTRL_EOF'
 <?php
+// hestia-restic-inc-ctrl-v2
 use function Hestiacp\quoteshellarg\quoteshellarg;
 $TAB = "BACKUP";
 
@@ -927,7 +824,8 @@ function getTransByType($type) {
 
 // Data & Render page
 if (empty($_GET["snapshot"])) {
-	exec(HESTIA_CMD . "v-list-user-backups-restic $user json", $output, $return_var);
+	$refresh_arg = !empty($_GET["refresh"]) ? " no-cache" : "";
+	exec(HESTIA_CMD . "v-list-user-backups-restic $user json" . $refresh_arg, $output, $return_var);
 	$data = json_decode(implode("", $output), true);
 	if (is_array($data)) {
 		$panel[$user]["U_BACKUPS_INCREMENTAL"] = count($data);
@@ -992,9 +890,12 @@ if (empty($_GET["snapshot"])) {
 		render_page($user, $TAB, "list_files_incremental");
 	}
 }
+
+// Back uri
+$_SESSION["back"] = $_SERVER["REQUEST_URI"];
 INC_CTRL_EOF
         chmod 0644 "$inc_ctrl" 2>/dev/null || true
-        _log "[$(date)] : Patched web/list/backup/incremental/index.php (search filtering + empty array guard)"
+        _log "[$(date)] : Patched web/list/backup/incremental/index.php (search filtering + refresh bypass + empty array guard)"
     fi
 
     # Top menu 2nd line ('Snapshots: X') in panel.php + U_BACKUPS_INCREMENTAL in v-list-user & syshealth.sh
@@ -1060,29 +961,93 @@ apply_hestia_patches() {
     patch_v_backup_users_retention || true
     patch_cron_rm_silence || true
     patch_restic_web_download_ui || true
+    patch_restic_read_and_delete || true
     return 0
 }
 
-# Update only the known JSON-list function; preserve the rest of the upstream CLI.
+# Update only the known JSON-list function (plus --no-lock / no-cache pass-through); preserve the rest of the upstream CLI.
 patch_restic_snapshot_counter() {
     local cli="$HESTIA/bin/v-list-user-backups-restic"
     [ -f "$cli" ] || return 0
-    if ! grep -q "hestia-restic-counter-v2" "$cli" 2>/dev/null || [ ! -f "${cli}.original" ]; then
+    grep -q "hestia-restic-counter-v3" "$cli" 2>/dev/null && return 0
+
+    if grep -q "hestia-restic-counter-v" "$cli" 2>/dev/null; then
+        [ -f "${cli}.original" ] && cp -f "${cli}.original" "$cli" 2>/dev/null || true
+    else
         cp -f "$cli" "${cli}.original" 2>/dev/null || true
     fi
+
+    local patch_tmp_root="/run"
+    [ -d "$patch_tmp_root" ] && [ -w "$patch_tmp_root" ] || patch_tmp_root="${TMPDIR:-/tmp}"
+
     local work patched
-    work=$(umask 077 && mktemp -d /run/hestia-restic-cli.XXXXXX) || return 1
+    work=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-cli.XXXXXX") || return 1
     patched=$(umask 077 && mktemp "${cli}.patch.XXXXXX") || { rm -rf -- "$work"; return 1; }
     cat > "$work/function" << 'COUNTER_EOF'
 function json_list() {
-	# hestia-restic-counter-v2: preserve errors and validate JSON before updating
-	local snapshots_json u_snapshots
-	snapshots_json=$(restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json snapshots) || return $?
+	# hestia-restic-counter-v3: --no-lock read-only listing, short-TTL root-owned JSON cache, and counter validation
+	local cache_opt="${1:-}"
+	local cache_dir="${RESTIC_SNAPSHOT_CACHE_DIR:-/run/hestia-restic-cache}"
+	local cache_ttl="${RESTIC_SNAPSHOT_CACHE_TTL:-120}"
+	local cache_file="" snapshots_json="" u_snapshots="" cur_snapshots="" now_ts=0 file_ts=0 tmp_cache=""
+
+	if [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+		cache_file="$cache_dir/${user}.json"
+	fi
+
+	if [ -n "$cache_file" ] &&
+		[ "${RESTIC_NO_CACHE:-0}" != "1" ] &&
+		[ "$cache_opt" != "no-cache" ] && [ "$cache_opt" != "--no-cache" ] &&
+		[[ "$cache_ttl" =~ ^[0-9]+$ ]] && [ "$cache_ttl" -gt 0 ] &&
+		[ -d "$cache_dir" ] && [ ! -L "$cache_dir" ] && [ -O "$cache_dir" ] &&
+		[ -f "$cache_file" ] && [ ! -L "$cache_file" ] && [ -O "$cache_file" ] &&
+		! [ "$HESTIA/conf/restic.conf" -nt "$cache_file" ] &&
+		! [ "$USER_DATA/restic.conf" -nt "$cache_file" ]; then
+		now_ts=$(date +%s 2>/dev/null || echo 0)
+		file_ts=$(stat -c %Y "$cache_file" 2>/dev/null || echo 0)
+		if [ "$((now_ts - file_ts))" -ge 0 ] && [ "$((now_ts - file_ts))" -lt "$cache_ttl" ]; then
+			snapshots_json=$(cat "$cache_file" 2>/dev/null || true)
+			if u_snapshots=$(printf '%s' "$snapshots_json" | jq -er 'if type == "array" and all(.[]; type == "object" and (.id | type == "string")) then length else error("Invalid Restic snapshot list") end' 2>/dev/null); then
+				if [ -f "$USER_DATA/user.conf" ]; then
+					if grep -q "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf"; then
+						cur_snapshots=$(grep "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf" | head -n1 | cut -d"'" -f2)
+						if [ "$cur_snapshots" != "$u_snapshots" ]; then
+							update_user_value "$user" '$U_BACKUPS_INCREMENTAL' "$u_snapshots"
+						fi
+					else
+						sed -i "s/^U_BACKUPS=/U_BACKUPS_INCREMENTAL='$u_snapshots'\nU_BACKUPS=/" "$USER_DATA/user.conf"
+					fi
+				fi
+				printf '%s\n' "$snapshots_json"
+				return 0
+			fi
+		fi
+	fi
+
+	snapshots_json=$(restic --no-lock --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json snapshots) || return $?
 	u_snapshots=$(printf '%s' "$snapshots_json" | jq -er 'if type == "array" and all(.[]; type == "object" and (.id | type == "string")) then length else error("Invalid Restic snapshot list") end') || return $?
-	if grep -q "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf"; then
-		update_user_value "$user" '$U_BACKUPS_INCREMENTAL' "$u_snapshots"
-	else
-		sed -i "s/^U_BACKUPS=/U_BACKUPS_INCREMENTAL='$u_snapshots'\nU_BACKUPS=/" "$USER_DATA/user.conf"
+
+	if [ -n "$cache_file" ]; then
+		if (umask 077 && mkdir -p "$cache_dir") 2>/dev/null && [ -d "$cache_dir" ] && [ ! -L "$cache_dir" ] && [ -O "$cache_dir" ]; then
+			chmod 0700 "$cache_dir" 2>/dev/null || true
+			tmp_cache=$(umask 077 && mktemp "$cache_dir/.${user}.XXXXXX" 2>/dev/null || true)
+			if [ -n "$tmp_cache" ]; then
+				if printf '%s\n' "$snapshots_json" > "$tmp_cache"; then
+					chmod 0600 "$tmp_cache" 2>/dev/null || true
+					mv -f -- "$tmp_cache" "$cache_file" 2>/dev/null || rm -f -- "$tmp_cache"
+				else
+					rm -f -- "$tmp_cache"
+				fi
+			fi
+		fi
+	fi
+
+	if [ -f "$USER_DATA/user.conf" ]; then
+		if grep -q "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf"; then
+			update_user_value "$user" '$U_BACKUPS_INCREMENTAL' "$u_snapshots"
+		else
+			sed -i "s/^U_BACKUPS=/U_BACKUPS_INCREMENTAL='$u_snapshots'\nU_BACKUPS=/" "$USER_DATA/user.conf"
+		fi
 	fi
 	printf '%s\n' "$snapshots_json"
 }
@@ -1096,13 +1061,21 @@ COUNTER_EOF
             next
         }
         replacing && /^}/ { replacing = 0; next }
-        !replacing { print }
+        !replacing {
+            if ($0 ~ /restic --repo / && $0 !~ /--no-lock/) {
+                sub(/restic --repo/, "restic --no-lock --repo")
+            }
+            if ($0 ~ /json\) json_list ;;/) {
+                sub(/json\) json_list ;;/, "json) json_list \"${3-}\" ;;")
+            }
+            print
+        }
         END { if (!found) exit 1 }
     ' "$cli" > "$patched" && bash -n "$patched"; then
         if ! cmp -s "$cli" "$patched"; then
             chmod 0755 "$patched"
             mv -f -- "$patched" "$cli"
-            _log "Patched Restic JSON counter error handling"
+            _log "Patched Restic JSON counter (--no-lock + 120s cache)"
         fi
     else
         _log "[WARN] Unsupported Restic JSON-list function; left CLI unchanged"
@@ -1112,4 +1085,176 @@ COUNTER_EOF
     fi
     rm -f -- "$patched"
     rm -rf -- "$work"
+}
+
+# Harden read-only Restic commands (--no-lock + tmpdir cleanup), cache invalidation on backup, and v-delete-user-backup-restic.
+patch_restic_read_and_delete() {
+    local patch_tmp_root="/run"
+    [ -d "$patch_tmp_root" ] && [ -w "$patch_tmp_root" ] || patch_tmp_root="${TMPDIR:-/tmp}"
+
+    # 1. v-list-user-backup-restic (--no-lock + tmpdir cleanup on failure)
+    local cli_detail="$HESTIA/bin/v-list-user-backup-restic"
+    if [ -f "$cli_detail" ] && ! grep -q "hestia-restic-nolock-v1" "$cli_detail" 2>/dev/null; then
+        if ! grep -q "hestia-restic-" "$cli_detail" 2>/dev/null || [ ! -f "${cli_detail}.original" ]; then
+            cp -f "$cli_detail" "${cli_detail}.original" 2>/dev/null || true
+        fi
+        if grep -q '^tmpdir=' "$cli_detail" && grep -q '^rm -fr "\$tmpdir"$' "$cli_detail"; then
+            local work_det patched_det
+            work_det=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-det.XXXXXX") || return 1
+            patched_det=$(umask 077 && mktemp "${cli_detail}.patch.XXXXXX") || { rm -rf -- "$work_det"; return 1; }
+            cat > "$work_det/block" << 'DETAIL_EOF'
+# hestia-restic-nolock-v1: read-only dump without remote B2 lock and clean up tmpdir on all failure paths
+tmpdir=$(mktemp -p "${BACKUP_TEMP:-$BACKUP}" -d)
+if ! restic --no-lock --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json dump "$snapshot" "/home/$user/backup/backup.conf" > "$tmpdir/backup.conf"; then
+	rm -rf -- "$tmpdir"
+	check_result "$E_NOTEXIST" "Unable to read snapshot metadata"
+fi
+
+if ! parse_untrusted_conf_file "$tmpdir/backup.conf" \
+	BACKUP TYPE SIZE WEB DNS MAIL DB CRON UDIR RUNTIME TIME DATE; then
+	_parse_rc=$?
+	rm -rf -- "$tmpdir"
+	exit "$_parse_rc"
+fi
+
+rm -rf -- "$tmpdir"
+DETAIL_EOF
+            if awk -v repl="$work_det/block" '
+                /^tmpdir=\$\(mktemp/ {
+                    while ((getline line < repl) > 0) print line
+                    close(repl)
+                    in_skip = 1
+                    found = 1
+                    next
+                }
+                in_skip && /^rm -fr "\$tmpdir"$/ { in_skip = 0; next }
+                !in_skip { print }
+                END { if (!found) exit 1 }
+            ' "$cli_detail" > "$patched_det" && grep -q "hestia-restic-nolock-v1" "$patched_det" && bash -n "$patched_det"; then
+                chmod 0755 "$patched_det"
+                mv -f -- "$patched_det" "$cli_detail"
+                _log "[$(date)] : Patched v-list-user-backup-restic (--no-lock + tmpdir cleanup)"
+            else
+                rm -f -- "$patched_det"
+            fi
+            rm -rf -- "$work_det"
+        fi
+    fi
+
+    # 2. v-list-user-files-restic (--no-lock)
+    local cli_files="$HESTIA/bin/v-list-user-files-restic"
+    if [ -f "$cli_files" ] && ! grep -q "hestia-restic-nolock-v1" "$cli_files" 2>/dev/null; then
+        if ! grep -q "hestia-restic-" "$cli_files" 2>/dev/null || [ ! -f "${cli_files}.original" ]; then
+            cp -f "$cli_files" "${cli_files}.original" 2>/dev/null || true
+        fi
+        if grep -q '^restic --repo .* --json ls ' "$cli_files"; then
+            local patched_fl
+            patched_fl=$(umask 077 && mktemp "${cli_files}.patch.XXXXXX") || return 1
+            awk '
+                /^restic --repo .* --json ls / {
+                    print "# hestia-restic-nolock-v1: read-only file listing without remote B2 lock"
+                    sub(/^restic --repo/, "restic --no-lock --repo")
+                    print
+                    found = 1
+                    next
+                }
+                { print }
+                END { if (!found) exit 1 }
+            ' "$cli_files" > "$patched_fl" && grep -q "hestia-restic-nolock-v1" "$patched_fl" && bash -n "$patched_fl" && {
+                chmod 0755 "$patched_fl"
+                mv -f -- "$patched_fl" "$cli_files"
+                _log "[$(date)] : Patched v-list-user-files-restic (--no-lock)"
+            } || rm -f -- "$patched_fl"
+        fi
+    fi
+
+    # 3. v-backup-user-restic (--no-lock pre-check + cache invalidation/refresh after backup)
+    local cli_bkp="$HESTIA/bin/v-backup-user-restic"
+    if [ -f "$cli_bkp" ] && ! grep -q "hestia-restic-cache-inv-v1" "$cli_bkp" 2>/dev/null; then
+        if ! grep -q "hestia-restic-" "$cli_bkp" 2>/dev/null || [ ! -f "${cli_bkp}.original" ]; then
+            cp -f "$cli_bkp" "${cli_bkp}.original" 2>/dev/null || true
+        fi
+        if grep -q 'log_event "\$OK" "\$ARGUMENTS"' "$cli_bkp"; then
+            local patched_bkp
+            patched_bkp=$(umask 077 && mktemp "${cli_bkp}.patch.XXXXXX") || return 1
+            awk '
+                /restic --repo "\$\{REPO%\/\}\/\$user" --password-file \$USER_DATA\/restic\.conf --json snapshots/ && $0 !~ /--no-lock/ {
+                    sub(/restic --repo/, "restic --no-lock --repo")
+                }
+                /log_event "\$OK" "\$ARGUMENTS"/ {
+                    print "# hestia-restic-cache-inv-v1: invalidate and refresh snapshot list cache after creating/pruning snapshots"
+                    print "rm -f -- \"${RESTIC_SNAPSHOT_CACHE_DIR:-/run/hestia-restic-cache}/${user}.json\" \"/run/hestia-restic-cache/${user}.json\" 2>/dev/null || true"
+                    print "\"$BIN/v-list-user-backups-restic\" \"$user\" json >/dev/null 2>&1 || true"
+                    found = 1
+                }
+                { print }
+                END { if (!found) exit 1 }
+            ' "$cli_bkp" > "$patched_bkp" && grep -q "hestia-restic-cache-inv-v1" "$patched_bkp" && bash -n "$patched_bkp" && {
+                chmod 0755 "$patched_bkp"
+                mv -f -- "$patched_bkp" "$cli_bkp"
+                _log "[$(date)] : Patched v-backup-user-restic (--no-lock pre-check + cache invalidation)"
+            } || rm -f -- "$patched_bkp"
+        fi
+    fi
+
+    # 4. v-delete-user-backup-restic (validate snapshot, skip redundant dump/tmpdir leak, check forget result, sync cache & counter)
+    local cli_del="$HESTIA/bin/v-delete-user-backup-restic"
+    if [ -f "$cli_del" ] && ! grep -q "hestia-restic-delete-v1" "$cli_del" 2>/dev/null; then
+        if grep -q "hestia-restic-delete-v" "$cli_del" 2>/dev/null; then
+            [ -f "${cli_del}.original" ] && cp -f "${cli_del}.original" "$cli_del" 2>/dev/null || true
+        else
+            cp -f "$cli_del" "${cli_del}.original" 2>/dev/null || true
+        fi
+        if grep -q '^tmpdir=' "$cli_del" && grep -q 'forget "\$snapshot"$' "$cli_del"; then
+            local work_del patched_del
+            work_del=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-del.XXXXXX") || return 1
+            patched_del=$(umask 077 && mktemp "${cli_del}.patch.XXXXXX") || { rm -rf -- "$work_del"; return 1; }
+            cat > "$work_del/block" << 'DEL_EOF'
+# hestia-restic-delete-v1: validate snapshot ID, skip redundant dump/tmpdir leak, verify forget result, and sync cache/counter
+if [[ ! "$snapshot" =~ ^[a-fA-F0-9]{8,64}$ ]]; then
+	check_result "$E_INVALID" "Invalid snapshot ID format"
+fi
+if [ ! -f "$USER_DATA/restic.conf" ]; then
+	check_result "$E_NOTEXIST" "Restic configuration for user $user does not exist"
+fi
+
+forget_out=$(restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" forget -- "$snapshot" 2>&1)
+forget_rc=$?
+if [ "$forget_rc" -ne 0 ]; then
+	check_result "$E_CONNECT" "Unable to delete Restic snapshot $snapshot"
+fi
+if printf '%s\n' "$forget_out" | grep -qi 'no matching ID found'; then
+	check_result "$E_NOTEXIST" "Snapshot $snapshot does not exist"
+fi
+
+rm -f -- "${RESTIC_SNAPSHOT_CACHE_DIR:-/run/hestia-restic-cache}/${user}.json" "/run/hestia-restic-cache/${user}.json" 2>/dev/null || true
+if [ -f "$USER_DATA/user.conf" ] && grep -q "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf" 2>/dev/null; then
+	_cur_inc=$(grep "^U_BACKUPS_INCREMENTAL=" "$USER_DATA/user.conf" | head -n1 | cut -d"'" -f2)
+	if [[ "$_cur_inc" =~ ^[0-9]+$ ]] && [ "$_cur_inc" -gt 0 ]; then
+		update_user_value "$user" '$U_BACKUPS_INCREMENTAL' "$((_cur_inc - 1))"
+	fi
+fi
+DEL_EOF
+            if awk -v repl="$work_del/block" '
+                /^tmpdir=\$\(mktemp/ {
+                    while ((getline line < repl) > 0) print line
+                    close(repl)
+                    in_skip = 1
+                    found = 1
+                    next
+                }
+                in_skip && /forget "\$snapshot"$/ { in_skip = 0; next }
+                !in_skip { print }
+                END { if (!found) exit 1 }
+            ' "$cli_del" > "$patched_del" && grep -q "hestia-restic-delete-v1" "$patched_del" && bash -n "$patched_del"; then
+                chmod 0755 "$patched_del"
+                mv -f -- "$patched_del" "$cli_del"
+                _log "[$(date)] : Patched v-delete-user-backup-restic (hardened validation, cleanup & cache/counter sync)"
+            else
+                rm -f -- "$patched_del"
+            fi
+            rm -rf -- "$work_del"
+        fi
+    fi
+    return 0
 }

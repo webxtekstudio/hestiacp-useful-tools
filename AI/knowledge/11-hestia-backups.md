@@ -51,6 +51,7 @@ When installed, the patch layer keeps the native Hestia workflow but extends it:
 - retention can be applied per backend without replacing the native backup batch
 - remote paths may be organized by year and month
 - `/etc/apt/apt.conf.d/99hestia-custom-patches` (`DPkg::Post-Invoke`) automatically re-applies core patches if an APT upgrade of the `hestia` package overwrites `/usr/local/hestia/bin/v-backup-user` or `/usr/local/hestia/func/backup.sh`
+- Restic read-only listing (`v-list-user-backups-restic`, `v-list-user-backup-restic`, `v-list-user-files-restic`) passes `--no-lock`, caches JSON snapshot lists briefly under `/run/hestia-restic-cache/<user>.json` (120s TTL, invalidated on snapshot creation/deletion, bypassed with `?refresh=1` or `RESTIC_NO_CACHE=1`), `/list/backup/*` views filter instantaneously via `/usr/local/hestia/web/js/custom_scripts/backup-instant-search.js` with `25 / 50 / 100 / All` client-side pagination when >25 items, and single-row snapshot deletion routes through `/delete/backup/incremental/` -> hardened `v-delete-user-backup-restic` (avoiding upstream `/backup/tmp.*` leaks and verifying `restic forget` output).
 
 Implication:
 - a valid remote upload log plus `status=B2_VERIFIED_OK` (or `LOCAL_VERIFIED_OK`) in `/var/log/hestia/backup-verify.status` confirms archive existence, byte size, and freshness
