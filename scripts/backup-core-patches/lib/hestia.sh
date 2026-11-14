@@ -796,13 +796,13 @@ DEL_PHP_EOF
 
     # Search filtering, cache refresh toggle & back URL in web/list/backup/incremental/index.php
     local inc_ctrl="$HESTIA/web/list/backup/incremental/index.php"
-    if [ -f "$inc_ctrl" ] && ! grep -q 'hestia-restic-inc-ctrl-v2' "$inc_ctrl" 2>/dev/null; then
+    if [ -f "$inc_ctrl" ] && ! grep -q 'hestia-restic-inc-ctrl-v3' "$inc_ctrl" 2>/dev/null; then
         if ! grep -qE 'U_BACKUPS_INCREMENTAL|hestia-restic-inc-ctrl-v' "$inc_ctrl" 2>/dev/null || [ ! -f "${inc_ctrl}.original" ]; then
             cp -f "$inc_ctrl" "${inc_ctrl}.original" 2>/dev/null || true
         fi
         cat > "$inc_ctrl" << 'INC_CTRL_EOF'
 <?php
-// hestia-restic-inc-ctrl-v2
+// hestia-restic-inc-ctrl-v3
 use function Hestiacp\quoteshellarg\quoteshellarg;
 $TAB = "BACKUP";
 
@@ -828,7 +828,7 @@ if (empty($_GET["snapshot"])) {
 	exec(HESTIA_CMD . "v-list-user-backups-restic $user json" . $refresh_arg, $output, $return_var);
 	$data = json_decode(implode("", $output), true);
 	if (is_array($data)) {
-		$panel[$user]["U_BACKUPS_INCREMENTAL"] = count($data);
+		$panel[$user_plain]["U_BACKUPS_INCREMENTAL"] = count($data);
 		if ($_SESSION["userSortOrder"] == "name") {
 			usort($data, function ($a, $b) {
 				return strcmp($a["short_id"] ?? "", $b["short_id"] ?? "");
@@ -1205,7 +1205,7 @@ DETAIL_EOF
 
     # 4. v-delete-user-backup-restic (validate snapshot, skip redundant dump/tmpdir leak, check forget result, sync cache & counter)
     local cli_del="$HESTIA/bin/v-delete-user-backup-restic"
-    if [ -f "$cli_del" ] && ! grep -q "hestia-restic-delete-v2" "$cli_del" 2>/dev/null; then
+    if [ -f "$cli_del" ] && ! grep -q "hestia-restic-delete-v3" "$cli_del" 2>/dev/null; then
         if grep -q "hestia-restic-delete-v" "$cli_del" 2>/dev/null; then
             [ -f "${cli_del}.original" ] && cp -f "${cli_del}.original" "$cli_del" 2>/dev/null || true
         else
@@ -1216,7 +1216,7 @@ DETAIL_EOF
             work_del=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-del.XXXXXX") || return 1
             patched_del=$(umask 077 && mktemp "${cli_del}.patch.XXXXXX") || { rm -rf -- "$work_del"; return 1; }
             cat > "$work_del/block" << 'DEL_EOF'
-# hestia-restic-delete-v2: validate snapshot ID, skip redundant dump/tmpdir leak, verify forget result, and sync cache/counter
+# hestia-restic-delete-v3: validate snapshot ID, skip redundant dump/tmpdir leak, verify forget result, and sync cache/counter
 if [[ ! "$snapshot" =~ ^[a-fA-F0-9]{8,64}$ ]]; then
 	check_result "$E_INVALID" "Invalid snapshot ID format"
 fi
@@ -1224,10 +1224,12 @@ if [ ! -f "$USER_DATA/restic.conf" ]; then
 	check_result "$E_NOTEXIST" "Restic configuration for user $user does not exist"
 fi
 
-if ! forget_out=$(restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" forget -- "$snapshot" 2>&1); then
-	if printf '%s\n' "$forget_out" | grep -qi 'no matching ID found'; then
-		check_result "$E_NOTEXIST" "Snapshot $snapshot does not exist"
-	fi
+forget_out=$(restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" forget -- "$snapshot" 2>&1)
+forget_rc=$?
+if printf '%s\n' "$forget_out" | grep -qi 'no matching ID found'; then
+	check_result "$E_NOTEXIST" "Snapshot $snapshot does not exist"
+fi
+if [ "$forget_rc" -ne 0 ]; then
 	check_result "$E_CONNECT" "Unable to delete Restic snapshot $snapshot"
 fi
 
@@ -1250,10 +1252,10 @@ DEL_EOF
                 in_skip && /forget (-- )?"\$snapshot"$/ { in_skip = 0; next }
                 !in_skip { print }
                 END { if (!found) exit 1 }
-            ' "$cli_del" > "$patched_del" && grep -q "hestia-restic-delete-v2" "$patched_del" && bash -n "$patched_del"; then
+            ' "$cli_del" > "$patched_del" && grep -q "hestia-restic-delete-v3" "$patched_del" && bash -n "$patched_del"; then
                 chmod 0755 "$patched_del"
                 mv -f -- "$patched_del" "$cli_del"
-                _log "[$(date)] : Patched v-delete-user-backup-restic (hardened validation, cleanup & cache/counter sync v2)"
+                _log "[$(date)] : Patched v-delete-user-backup-restic (hardened validation, cleanup & cache/counter sync v3)"
             else
                 rm -f -- "$patched_del"
             fi
@@ -1263,18 +1265,20 @@ DEL_EOF
             work_del=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-del.XXXXXX") || return 1
             patched_del=$(umask 077 && mktemp "${cli_del}.patch.XXXXXX") || { rm -rf -- "$work_del"; return 1; }
             cat > "$work_del/block" << 'DEL_MOD_EOF'
-# hestia-restic-delete-v2: verify forget result and purge cache
-if ! forget_out=$(restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" forget -- "$snapshot" 2>&1); then
-	if printf '%s\n' "$forget_out" | grep -qi "no matching ID found"; then
-		check_result "$E_NOTEXIST" "Snapshot $snapshot does not exist"
-	fi
+# hestia-restic-delete-v3: verify forget result and purge cache
+forget_out=$(restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" forget -- "$snapshot" 2>&1)
+forget_rc=$?
+if printf '%s\n' "$forget_out" | grep -qi "no matching ID found"; then
+	check_result "$E_NOTEXIST" "Snapshot $snapshot does not exist"
+fi
+if [ "$forget_rc" -ne 0 ]; then
 	check_result "$E_CONNECT" "Unable to delete Restic snapshot"
 fi
 
 rm -f -- "${RESTIC_SNAPSHOT_CACHE_DIR:-/run/hestia-restic-cache}/${user}.json" "/run/hestia-restic-cache/${user}.json" 2>/dev/null || true
 DEL_MOD_EOF
             if awk -v repl="$work_del/block" '
-                /^if ! forget_out=\$\(restic/ {
+                /^(if ! )?forget_out=\$\(restic/ {
                     while ((getline line < repl) > 0) print line
                     close(repl)
                     in_skip = 1
@@ -1288,10 +1292,10 @@ DEL_MOD_EOF
                 }
                 !in_skip { print }
                 END { if (!found) exit 1 }
-            ' "$cli_del" > "$patched_del" && grep -q "hestia-restic-delete-v2" "$patched_del" && bash -n "$patched_del"; then
+            ' "$cli_del" > "$patched_del" && grep -q "hestia-restic-delete-v3" "$patched_del" && bash -n "$patched_del"; then
                 chmod 0755 "$patched_del"
                 mv -f -- "$patched_del" "$cli_del"
-                _log "[$(date)] : Patched modernized v-delete-user-backup-restic (error handling & cache purge v2)"
+                _log "[$(date)] : Patched modernized v-delete-user-backup-restic (error handling & cache purge v3)"
             else
                 rm -f -- "$patched_del"
             fi

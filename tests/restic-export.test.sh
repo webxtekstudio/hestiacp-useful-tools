@@ -286,10 +286,10 @@ echo 'PASS: json_list uses --no-lock, serves cached results within TTL, and hono
 
 # Read-only & delete hardening patches
 patch_restic_read_and_delete
-grep -q 'hestia-restic-nolock-v2' "$HESTIA/bin/v-list-user-backup-restic"
+grep -q 'hestia-restic-nolock-v3' "$HESTIA/bin/v-list-user-backup-restic"
 grep -q 'hestia-restic-nolock-v1' "$HESTIA/bin/v-list-user-files-restic"
 grep -q 'hestia-restic-cache-inv-v1' "$HESTIA/bin/v-backup-user-restic"
-grep -q 'hestia-restic-delete-v1' "$HESTIA/bin/v-delete-user-backup-restic"
+grep -q 'hestia-restic-delete-v3' "$HESTIA/bin/v-delete-user-backup-restic"
 del_hash=$(sha256sum "$HESTIA/bin/v-delete-user-backup-restic" | cut -d' ' -f1)
 patch_restic_read_and_delete
 [ "$(sha256sum "$HESTIA/bin/v-delete-user-backup-restic" | cut -d' ' -f1)" = "$del_hash" ]
@@ -300,6 +300,10 @@ for a in "$@"; do last="$a"; done
 if [ "$last" = "deadbeef" ]; then
     echo 'Ignoring "deadbeef": no matching ID found for prefix "deadbeef"'
     exit 0
+fi
+if [ "$last" = "deadbee2" ]; then
+    echo 'Ignoring "deadbee2": no matching ID found for prefix "deadbee2"'
+    exit 1
 fi
 echo '[0:00] 100.00%  1 / 1 files deleted'
 MOCKDEL
@@ -312,6 +316,9 @@ if bash "$HESTIA/bin/v-delete-user-backup-restic" bob '../bad' >/dev/null 2>&1; 
 fi
 if bash "$HESTIA/bin/v-delete-user-backup-restic" bob deadbeef >/dev/null 2>&1; then
     echo 'FAIL: succeeded on unknown snapshot ID' >&2; exit 1
+fi
+if bash "$HESTIA/bin/v-delete-user-backup-restic" bob deadbee2 >/dev/null 2>&1; then
+    echo 'FAIL: succeeded on non-zero unknown snapshot ID' >&2; exit 1
 fi
 printf "U_BACKUPS_INCREMENTAL='3'\n" > "$USER_DATA/user.conf"
 touch "$RESTIC_SNAPSHOT_CACHE_DIR/bob.json"
@@ -329,7 +336,8 @@ grep -q 'v-delete-user-backup-restic' "$HESTIA/web/delete/backup/incremental/ind
 [ -f "$HESTIA/web/templates/pages/list_backup_incremental.php.original" ]
 grep -q '/delete/backup/incremental/' "$HESTIA/web/templates/pages/list_backup_incremental.php"
 grep -q 'fa-trash icon-red' "$HESTIA/web/templates/pages/list_backup_incremental.php"
-grep -q 'hestia-restic-inc-ctrl-v2' "$HESTIA/web/list/backup/incremental/index.php"
+grep -q 'hestia-restic-inc-ctrl-v3' "$HESTIA/web/list/backup/incremental/index.php"
+grep -q '\$panel\[\$user_plain\]' "$HESTIA/web/list/backup/incremental/index.php"
 grep -q 'no-cache' "$HESTIA/web/list/backup/incremental/index.php"
 echo 'PASS: web UI patch installs delete endpoint, trash action, instant search JS, and refreshed controller'
 
@@ -490,7 +498,7 @@ rm -fr "$tmpdir"
 CLI
     chmod 0755 "$det_sand/bin/v-list-user-backup-restic"
     HESTIA="$det_sand" patch_restic_read_and_delete
-    grep -q 'hestia-restic-nolock-v2' "$det_sand/bin/v-list-user-backup-restic"
+    grep -q 'hestia-restic-nolock-v3' "$det_sand/bin/v-list-user-backup-restic"
 
     cat > "$det_sand/func/main.sh" <<'MAIN'
 BACKUP="$HESTIA/backup"
