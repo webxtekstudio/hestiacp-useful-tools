@@ -13,7 +13,7 @@ export RESTIC_MASTER_KEY_FILE="$sand/master.key" FIXTURE_DATA="$sand/fixture"
 export EXPORT_TEST_STATE="$sand/state"
 mkdir -p "$HESTIA/conf" "$HESTIA/data/users/bob" "$sand/bin" "$sand/backup" "$EXPORT_TEST_STATE"
 mkdir -p "$FIXTURE_DATA/backup/hestia" "$FIXTURE_DATA/backup/web/example.com/hestia" "$FIXTURE_DATA/web/example.com/public_html"
-printf "BACKUP='%s/backup'\nBACKUP_MODE='gzip'\nBACKUP_GZIP='1'\n" "$sand" > "$HESTIA/conf/hestia.conf"
+printf "VERSION='1.10.7'\nBACKUP='%s/backup'\nBACKUP_MODE='gzip'\nBACKUP_GZIP='1'\n" "$sand" > "$HESTIA/conf/hestia.conf"
 printf "REPO='local:fixture'\n" > "$HESTIA/conf/restic.conf"
 printf "U_BACKUPS='0'\nU_DISK='1'\n" > "$HESTIA/data/users/bob/user.conf"
 printf 'fixture-password\n' > "$HESTIA/data/users/bob/restic.conf"
@@ -125,11 +125,14 @@ echo 'PASS: invalid snapshot timestamps are rejected before output path construc
 
 HESTIA="$sand/patch-fixture"
 mkdir -p "$HESTIA/bin" "$HESTIA/conf" "$HESTIA/data/users/bob" "$HESTIA/data/queue" "$HESTIA/backup"
-mkdir -p "$HESTIA/web/templates/pages" "$HESTIA/web/list/backup/incremental" "$HESTIA/web/templates/includes"
+mkdir -p "$HESTIA/web/templates/pages" "$HESTIA/web/list/backup/incremental" "$HESTIA/web/bulk/restore/incremental" "$HESTIA/web/templates/includes"
 touch "$HESTIA/data/queue/backup.pipe"
+printf "VERSION='1.10.7'\nBACKUP='%s/backup'\n" "$HESTIA" > "$HESTIA/conf/hestia.conf"
 printf "REPO='local:fixture'\n" > "$HESTIA/conf/restic.conf"
 printf "U_BACKUPS_INCREMENTAL='3'\nU_BACKUPS='0'\n" > "$HESTIA/data/users/bob/user.conf"
 printf "fixture-password\n" > "$HESTIA/data/users/bob/restic.conf"
+: > "$HESTIA/backup/bob.log"
+chmod 0644 "$HESTIA/backup/bob.log"
 
 cat > "$HESTIA/bin/v-list-user-backups-restic" <<'CLI'
 #!/bin/bash
@@ -163,9 +166,35 @@ CLI
 
 cat > "$HESTIA/bin/v-backup-user-restic" <<'CLI'
 #!/bin/bash
+$BIN/v-backup-user-config $user
 restic --repo "${REPO%/}/$user" --password-file $USER_DATA/restic.conf --json snapshots > /dev/null
+ionice -c 2 -n 7 nice -n 19 restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" backup /home/$user
 log_event "$OK" "$ARGUMENTS"
 CLI
+
+cat > "$HESTIA/bin/v-backup-user-config" <<'CLI'
+#!/bin/bash
+tmpdir="/home/$user/backup/"
+rm -fr "$tmpdir"
+mkdir -p "$tmpdir"
+echo "$backup_str" > $tmpdir/backup.conf
+CLI
+
+cat > "$HESTIA/bin/v-add-backup-host-restic" <<'CLI'
+#!/bin/bash
+KEEP_YEARLY='$yearly'
+CLI
+
+cat > "$HESTIA/web/bulk/restore/incremental/index.php" <<'PHP'
+<?php
+foreach ($snapshot_list as $snapshot) {
+	exec(
+		HESTIA_CMD . "v-schedule-user-restore-restic " . $user . " " . $snapshot . " " . "cron",
+		$output,
+		$return_var
+	);
+}
+PHP
 
 cat > "$HESTIA/bin/v-delete-user-backup-restic" <<'CLI'
 #!/bin/bash
@@ -257,7 +286,7 @@ echo 'PASS: json_list uses --no-lock, serves cached results within TTL, and hono
 
 # Read-only & delete hardening patches
 patch_restic_read_and_delete
-grep -q 'hestia-restic-nolock-v1' "$HESTIA/bin/v-list-user-backup-restic"
+grep -q 'hestia-restic-nolock-v2' "$HESTIA/bin/v-list-user-backup-restic"
 grep -q 'hestia-restic-nolock-v1' "$HESTIA/bin/v-list-user-files-restic"
 grep -q 'hestia-restic-cache-inv-v1' "$HESTIA/bin/v-backup-user-restic"
 grep -q 'hestia-restic-delete-v1' "$HESTIA/bin/v-delete-user-backup-restic"
@@ -303,3 +332,181 @@ grep -q 'fa-trash icon-red' "$HESTIA/web/templates/pages/list_backup_incremental
 grep -q 'hestia-restic-inc-ctrl-v2' "$HESTIA/web/list/backup/incremental/index.php"
 grep -q 'no-cache' "$HESTIA/web/list/backup/incremental/index.php"
 echo 'PASS: web UI patch installs delete endpoint, trash action, instant search JS, and refreshed controller'
+
+# Version gate tests (1.10.7 pin, manual reject, apt-hook safe hold + alert dedupe, override, auto-clear)
+vg_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+(
+    set -euo pipefail
+    vg_sand="$sand/vg-fixture"
+    mkdir -p "$vg_sand/conf" "$vg_sand/state"
+    cat > "$vg_sand/alert.sh" <<'ALERT'
+#!/bin/bash
+printf '%s:%s\n' "$1" "$2" >> "$VG_ALERT_LOG"
+ALERT
+    chmod 0755 "$vg_sand/alert.sh"
+
+    export HESTIA="$vg_sand"
+    export HESTIA_TOOLS_CONF="$vg_sand/none.conf"
+    export HESTIA_TOOLS_STATE_DIR="$vg_sand/state"
+    export HESTIA_TOOLS_HOLD_FILE="$vg_sand/state/hold.state"
+    export HESTIA_TOOLS_VERSION_LOG="$vg_sand/state/version.log"
+    export HESTIA_TOOLS_ALERT_HOOK="$vg_sand/alert.sh"
+    export VG_ALERT_LOG="$vg_sand/state/alerts.log"
+    export ALLOW_UNTESTED_HESTIA=0
+
+    source "$vg_repo_root/scripts/lib/version-gate.sh"
+
+    printf "VERSION='1.10.7'\n" > "$vg_sand/conf/hestia.conf"
+    rc=0
+    check_hestia_core_patch_compatibility "manual" || rc=$?
+    [ "$rc" -eq 0 ]
+
+    printf "VERSION='1.10.8'\n" > "$vg_sand/conf/hestia.conf"
+    rc=0
+    check_hestia_core_patch_compatibility "manual" 2>/dev/null || rc=$?
+    [ "$rc" -eq 1 ]
+
+    rc=0
+    check_hestia_core_patch_compatibility "apt-hook" 2>/dev/null || rc=$?
+    [ "$rc" -eq 2 ]
+    grep -qx 'held_version=1.10.8' "$HESTIA_TOOLS_HOLD_FILE"
+    [ "$(wc -l < "$VG_ALERT_LOG" | tr -d '[:space:]')" -eq 1 ]
+    grep -qx '1.10.8:1.10.7' "$VG_ALERT_LOG"
+
+    rc=0
+    check_hestia_core_patch_compatibility "apt-hook" 2>/dev/null || rc=$?
+    [ "$rc" -eq 2 ]
+    [ "$(wc -l < "$VG_ALERT_LOG" | tr -d '[:space:]')" -eq 1 ]
+
+    ALLOW_UNTESTED_HESTIA=1
+    rc=0
+    check_hestia_core_patch_compatibility "manual" 2>/dev/null || rc=$?
+    [ "$rc" -eq 0 ]
+
+    ALLOW_UNTESTED_HESTIA=0
+    printf "VERSION='1.10.7'\n" > "$vg_sand/conf/hestia.conf"
+    rc=0
+    check_hestia_core_patch_compatibility "apt-hook" || rc=$?
+    [ "$rc" -eq 0 ]
+    [ ! -e "$HESTIA_TOOLS_HOLD_FILE" ]
+)
+echo 'PASS: version-gate enforces 1.10.7 pin, apt-hook hold + deduped alert, and override'
+
+# Restic staging perms, conf perms, and existing backup log hardening
+patch_restic_staging_perms
+grep -q 'hestia-restic-staging-v1' "$HESTIA/bin/v-backup-user-config"
+grep -q 'tmpdir="/home/\$user/backup"$' "$HESTIA/bin/v-backup-user-config"
+grep -q 'install -d -m 0700 -o root -g root "\$tmpdir"' "$HESTIA/bin/v-backup-user-config"
+grep -q 'chmod 660 "\$BACKUP/\$user.log"' "$HESTIA/bin/v-backup-user-config"
+grep -q 'hestia-restic-conf-perms-v1' "$HESTIA/bin/v-add-backup-host-restic"
+grep -q 'chmod 660 "\${HESTIA:-/usr/local/hestia}/conf/restic.conf"' "$HESTIA/bin/v-add-backup-host-restic"
+[ "$(stat -c '%a' "$HESTIA/backup/bob.log")" = "660" ]
+echo 'PASS: staging dir, restic.conf, and backup log permissions hardened'
+
+# Bulk cron restore 'yes' argument fix
+patch_restic_bulk_cron_restore
+grep -q 'hestia-restic-bulk-restore-v1' "$HESTIA/web/bulk/restore/incremental/index.php"
+grep -q "'yes'" "$HESTIA/web/bulk/restore/incremental/index.php"
+if command -v php >/dev/null 2>&1; then
+    php -l "$HESTIA/web/bulk/restore/incremental/index.php" >/dev/null
+fi
+echo 'PASS: bulk incremental cron restore passes yes argument'
+
+# Backup exclusions patch & runtime argument expansion check
+patch_restic_backup_exclusions
+grep -q 'hestia-restic-excludes-v1' "$HESTIA/bin/v-backup-user-restic"
+grep -q 'backup "\${restic_excludes\[@\]}" /home/\$user' "$HESTIA/bin/v-backup-user-restic"
+(
+    set -euo pipefail
+    exc_sand="$sand/exc-run"
+    mkdir -p "$exc_sand/bin" "$exc_sand/conf" "$exc_sand/data/users/bob" "$exc_sand/func" "$exc_sand/backup"
+    cat > "$exc_sand/bin/v-backup-user-restic" <<'CLI'
+#!/bin/bash
+source "${HESTIA}/func/main.sh"
+$BIN/v-backup-user-config $user
+restic --repo "${REPO%/}/$user" --password-file $USER_DATA/restic.conf --json snapshots > /dev/null
+ionice -c 2 -n 7 nice -n 19 restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" backup /home/$user
+log_event "$OK" "$ARGUMENTS"
+CLI
+    cat > "$exc_sand/bin/v-backup-user-config" <<'STUB'
+#!/bin/bash
+exit 0
+STUB
+    chmod 0755 "$exc_sand/bin/v-backup-user-restic" "$exc_sand/bin/v-backup-user-config"
+    HESTIA="$exc_sand" patch_restic_backup_exclusions
+
+    cat > "$exc_sand/func/main.sh" <<'MAIN'
+BIN="$HESTIA/bin"
+user="bob"
+USER_DATA="$HESTIA/data/users/bob"
+REPO="local:fixture"
+OK="0"
+ARGUMENTS="bob"
+source_conf() { source "$1"; }
+format_domain_idn() { :; }
+log_event() { :; }
+ionice() { shift 4; "$@"; }
+nice() { shift 2; "$@"; }
+restic() {
+    if [[ " $* " == *" backup "* ]]; then
+        printf '%s\n' "$@" > "$HESTIA/restic.args"
+    fi
+}
+MAIN
+
+    cat > "$exc_sand/data/users/bob/backup-excludes.conf" <<'CONF'
+WEB='example.com:public_html/cache,blog.example.com'
+MAIL='example.com:info'
+USER='tmp_downloads,cache/'
+CONF
+    HESTIA="$exc_sand" bash "$exc_sand/bin/v-backup-user-restic"
+    grep -Fxq -- '--exclude' "$exc_sand/restic.args"
+    grep -Fxq '/home/bob/web/example.com/public_html/cache' "$exc_sand/restic.args"
+    grep -Fxq '/home/bob/web/blog.example.com' "$exc_sand/restic.args"
+    grep -Fxq '/home/bob/mail/example.com/info' "$exc_sand/restic.args"
+    grep -Fxq '/home/bob/tmp_downloads' "$exc_sand/restic.args"
+    grep -Fxq '/home/bob/cache' "$exc_sand/restic.args"
+
+    rm -f "$exc_sand/data/users/bob/backup-excludes.conf" "$exc_sand/restic.args"
+    HESTIA="$exc_sand" bash "$exc_sand/bin/v-backup-user-restic"
+    ! grep -Fxq -- '--exclude' "$exc_sand/restic.args"
+    ! grep -Fxq '' "$exc_sand/restic.args"
+    grep -Fxq '/home/bob' "$exc_sand/restic.args"
+)
+echo 'PASS: Restic backup honors backup-excludes.conf without empty-arg expansion'
+
+# hestia-restic-nolock-v2 preserves parse failure exit code & removes tmpdir
+(
+    set -euo pipefail
+    det_sand="$sand/nolock-v2-fixture"
+    mkdir -p "$det_sand/bin" "$det_sand/func" "$det_sand/backup" "$det_sand/data/users/bob"
+    cat > "$det_sand/bin/v-list-user-backup-restic" <<'CLI'
+#!/bin/bash
+source "${HESTIA}/func/main.sh"
+tmpdir=$(mktemp -p "${BACKUP_TEMP:-$BACKUP}" -d)
+restic --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json dump "$snapshot" "/home/$user/backup/backup.conf" > "$tmpdir/backup.conf"
+parse_untrusted_conf_file "$tmpdir/backup.conf" BACKUP TYPE SIZE WEB DNS MAIL DB CRON UDIR RUNTIME TIME DATE
+rm -fr "$tmpdir"
+CLI
+    chmod 0755 "$det_sand/bin/v-list-user-backup-restic"
+    HESTIA="$det_sand" patch_restic_read_and_delete
+    grep -q 'hestia-restic-nolock-v2' "$det_sand/bin/v-list-user-backup-restic"
+
+    cat > "$det_sand/func/main.sh" <<'MAIN'
+BACKUP="$HESTIA/backup"
+USER_DATA="$HESTIA/data/users/bob"
+REPO="local:fixture"
+user="bob"
+snapshot="abc12345"
+E_NOTEXIST="3"
+check_result() { exit "$1"; }
+restic() { printf "BACKUP='x'\n"; }
+parse_untrusted_conf_file() { return 42; }
+MAIN
+
+    rc=0
+    HESTIA="$det_sand" bash "$det_sand/bin/v-list-user-backup-restic" || rc=$?
+    [ "$rc" -eq 42 ]
+    [ -z "$(ls -A "$det_sand/backup")" ]
+)
+echo 'PASS: v-list-user-backup-restic preserves parse failure exit code and cleans tmpdir'

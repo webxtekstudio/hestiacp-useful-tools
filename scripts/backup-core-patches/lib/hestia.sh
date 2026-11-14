@@ -962,6 +962,9 @@ apply_hestia_patches() {
     patch_cron_rm_silence || true
     patch_restic_web_download_ui || true
     patch_restic_read_and_delete || true
+    patch_restic_staging_perms || true
+    patch_restic_bulk_cron_restore || true
+    patch_restic_backup_exclusions || true
     return 0
 }
 
@@ -1094,8 +1097,10 @@ patch_restic_read_and_delete() {
 
     # 1. v-list-user-backup-restic (--no-lock + tmpdir cleanup on failure)
     local cli_detail="$HESTIA/bin/v-list-user-backup-restic"
-    if [ -f "$cli_detail" ] && ! grep -q "hestia-restic-nolock-v1" "$cli_detail" 2>/dev/null; then
-        if ! grep -q "hestia-restic-" "$cli_detail" 2>/dev/null || [ ! -f "${cli_detail}.original" ]; then
+    if [ -f "$cli_detail" ] && ! grep -q "hestia-restic-nolock-v2" "$cli_detail" 2>/dev/null; then
+        if grep -q "hestia-restic-nolock-v" "$cli_detail" 2>/dev/null; then
+            [ -f "${cli_detail}.original" ] && cp -f "${cli_detail}.original" "$cli_detail" 2>/dev/null || true
+        elif ! grep -q "hestia-restic-" "$cli_detail" 2>/dev/null || [ ! -f "${cli_detail}.original" ]; then
             cp -f "$cli_detail" "${cli_detail}.original" 2>/dev/null || true
         fi
         if grep -q '^tmpdir=' "$cli_detail" && grep -q '^rm -fr "\$tmpdir"$' "$cli_detail"; then
@@ -1103,19 +1108,19 @@ patch_restic_read_and_delete() {
             work_det=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-det.XXXXXX") || return 1
             patched_det=$(umask 077 && mktemp "${cli_detail}.patch.XXXXXX") || { rm -rf -- "$work_det"; return 1; }
             cat > "$work_det/block" << 'DETAIL_EOF'
-# hestia-restic-nolock-v1: read-only dump without remote B2 lock and clean up tmpdir on all failure paths
+# hestia-restic-nolock-v2: read-only dump without remote B2 lock and clean up tmpdir on all failure paths
 tmpdir=$(mktemp -p "${BACKUP_TEMP:-$BACKUP}" -d)
 if ! restic --no-lock --repo "${REPO%/}/$user" --password-file "$USER_DATA/restic.conf" --json dump "$snapshot" "/home/$user/backup/backup.conf" > "$tmpdir/backup.conf"; then
 	rm -rf -- "$tmpdir"
 	check_result "$E_NOTEXIST" "Unable to read snapshot metadata"
 fi
 
-if ! parse_untrusted_conf_file "$tmpdir/backup.conf" \
-	BACKUP TYPE SIZE WEB DNS MAIL DB CRON UDIR RUNTIME TIME DATE; then
+parse_untrusted_conf_file "$tmpdir/backup.conf" \
+	BACKUP TYPE SIZE WEB DNS MAIL DB CRON UDIR RUNTIME TIME DATE || {
 	_parse_rc=$?
 	rm -rf -- "$tmpdir"
 	exit "$_parse_rc"
-fi
+}
 
 rm -rf -- "$tmpdir"
 DETAIL_EOF
@@ -1130,10 +1135,10 @@ DETAIL_EOF
                 in_skip && /^rm -fr "\$tmpdir"$/ { in_skip = 0; next }
                 !in_skip { print }
                 END { if (!found) exit 1 }
-            ' "$cli_detail" > "$patched_det" && grep -q "hestia-restic-nolock-v1" "$patched_det" && bash -n "$patched_det"; then
+            ' "$cli_detail" > "$patched_det" && grep -q "hestia-restic-nolock-v2" "$patched_det" && bash -n "$patched_det"; then
                 chmod 0755 "$patched_det"
                 mv -f -- "$patched_det" "$cli_detail"
-                _log "[$(date)] : Patched v-list-user-backup-restic (--no-lock + tmpdir cleanup)"
+                _log "[$(date)] : Patched v-list-user-backup-restic (--no-lock + tmpdir cleanup v2)"
             else
                 rm -f -- "$patched_det"
             fi
@@ -1256,5 +1261,275 @@ DEL_EOF
             rm -rf -- "$work_del"
         fi
     fi
+    return 0
+}
+
+# Harden Restic staging directory permissions, restic.conf creation permissions, and /backup/*.log modes.
+patch_restic_staging_perms() {
+    local patch_tmp_root="/run"
+    [ -d "$patch_tmp_root" ] && [ -w "$patch_tmp_root" ] || patch_tmp_root="${TMPDIR:-/tmp}"
+
+    # 1. v-backup-user-config (0700 root:root staging dir + no trailing slash unlink + 0660 $BACKUP/$user.log)
+    local cli_cfg="$HESTIA/bin/v-backup-user-config"
+    if [ -f "$cli_cfg" ] && ! grep -q "hestia-restic-staging-v1" "$cli_cfg" 2>/dev/null; then
+        if ! grep -q "hestia-restic-" "$cli_cfg" 2>/dev/null || [ ! -f "${cli_cfg}.original" ]; then
+            cp -f "$cli_cfg" "${cli_cfg}.original" 2>/dev/null || true
+        fi
+        if grep -q '^tmpdir="/home/\$user/backup/"$' "$cli_cfg" && grep -q '^mkdir -p "\$tmpdir"$' "$cli_cfg" && grep -q '^echo "\$backup_str" > \$tmpdir/backup\.conf$' "$cli_cfg"; then
+            local work_cfg patched_cfg
+            work_cfg=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-cfg.XXXXXX") || return 1
+            patched_cfg=$(umask 077 && mktemp "${cli_cfg}.patch.XXXXXX") || { rm -rf -- "$work_cfg"; return 1; }
+            cat > "$work_cfg/block" << 'CFG_EOF'
+# hestia-restic-staging-v1: unlink without trailing slash and create 0700 root:root staging dir
+tmpdir="/home/$user/backup"
+
+# We delete the backup dir first to make sure all old database dumps have been cleared
+rm -fr "$tmpdir"
+umask 077
+install -d -m 0700 -o root -g root "$tmpdir"
+if declare -F enter_user_dir >/dev/null 2>&1; then
+	(enter_user_dir "$user" "backup" root) || exit $?
+fi
+CFG_EOF
+            if awk -v repl="$work_cfg/block" '
+                /^tmpdir="\/home\/\$user\/backup\/"$/ {
+                    while ((getline line < repl) > 0) print line
+                    close(repl)
+                    in_skip = 1
+                    found_top = 1
+                    next
+                }
+                in_skip && /^mkdir -p "\$tmpdir"$/ { in_skip = 0; next }
+                in_skip { next }
+                /^echo "\$backup_str" > \$tmpdir\/backup\.conf$/ {
+                    print
+                    print "chmod 660 \"$BACKUP/$user.log\" 2>/dev/null || true"
+                    found_bot = 1
+                    next
+                }
+                { print }
+                END { if (!found_top || !found_bot) exit 1 }
+            ' "$cli_cfg" > "$patched_cfg" && grep -q "hestia-restic-staging-v1" "$patched_cfg" && bash -n "$patched_cfg"; then
+                chmod 0755 "$patched_cfg"
+                mv -f -- "$patched_cfg" "$cli_cfg"
+                _log "[$(date)] : Patched v-backup-user-config (0700 root:root staging dir + 0660 backup log)"
+            else
+                rm -f -- "$patched_cfg"
+            fi
+            rm -rf -- "$work_cfg"
+        fi
+    fi
+
+    # 2. v-add-backup-host-restic (chmod 660 conf/restic.conf)
+    local cli_host="$HESTIA/bin/v-add-backup-host-restic"
+    if [ -f "$cli_host" ] && ! grep -q "hestia-restic-conf-perms-v1" "$cli_host" 2>/dev/null; then
+        if ! grep -q "hestia-restic-" "$cli_host" 2>/dev/null || [ ! -f "${cli_host}.original" ]; then
+            cp -f "$cli_host" "${cli_host}.original" 2>/dev/null || true
+        fi
+        if grep -q "KEEP_YEARLY='\$yearly'" "$cli_host" && ! grep -q "chmod 660 .*conf/restic\.conf" "$cli_host"; then
+            local patched_host
+            patched_host=$(umask 077 && mktemp "${cli_host}.patch.XXXXXX") || return 1
+            if awk '
+                /KEEP_YEARLY=/ {
+                    print
+                    print "# hestia-restic-conf-perms-v1: keep restic credentials private"
+                    print "chmod 660 \"${HESTIA:-/usr/local/hestia}/conf/restic.conf\""
+                    found = 1
+                    next
+                }
+                { print }
+                END { if (!found) exit 1 }
+            ' "$cli_host" > "$patched_host" && grep -q "hestia-restic-conf-perms-v1" "$patched_host" && bash -n "$patched_host"; then
+                chmod 0755 "$patched_host"
+                mv -f -- "$patched_host" "$cli_host"
+                _log "[$(date)] : Patched v-add-backup-host-restic (chmod 660 restic.conf)"
+            else
+                rm -f -- "$patched_host"
+            fi
+        fi
+    fi
+
+    # 3. Tighten existing /backup/*.log files (0644 -> 0660)
+    local bkp_dir=""
+    if [ -f "$HESTIA/conf/hestia.conf" ]; then
+        bkp_dir="$(sed -n "s/^BACKUP=['\"]\?\([^'\"]*\)['\"]\?/\1/p" "$HESTIA/conf/hestia.conf" 2>/dev/null | head -n1)"
+    fi
+    bkp_dir="${bkp_dir:-/backup}"
+    if [ -d "$bkp_dir" ] && [ ! -L "$bkp_dir" ]; then
+        local log_f="" log_mode="" fixed_logs=0
+        for log_f in "$bkp_dir"/*.log; do
+            [ -f "$log_f" ] && [ ! -L "$log_f" ] || continue
+            log_mode="$(stat -c '%a' "$log_f" 2>/dev/null || true)"
+            if [ -n "$log_mode" ] && [ "$log_mode" != "660" ] && [ "$log_mode" != "600" ] && [ "$log_mode" != "640" ]; then
+                chmod 0660 "$log_f" 2>/dev/null && fixed_logs=$((fixed_logs + 1)) || true
+            fi
+        done
+        if [ "$fixed_logs" -gt 0 ]; then
+            _log "[$(date)] : Restricted $fixed_logs existing backup log file(s) in $bkp_dir to 0660"
+        fi
+    fi
+    return 0
+}
+
+# Fix bulk Cron restore route to pass the required 'yes' argument (PR #5968).
+patch_restic_bulk_cron_restore() {
+    local bulk_ctrl="$HESTIA/web/bulk/restore/incremental/index.php"
+    [ -f "$bulk_ctrl" ] || return 0
+    if grep -q "hestia-restic-bulk-restore-v1" "$bulk_ctrl" 2>/dev/null || \
+       grep -q '"v-schedule-user-restore-restic " \. \$user \. " " \. \$snapshot \. " " \. "cron" \. " " \. "\x27yes\x27"' "$bulk_ctrl" 2>/dev/null; then
+        return 0
+    fi
+    if ! grep -q '"v-schedule-user-restore-restic " \. \$user \. " " \. \$snapshot \. " " \. "cron",' "$bulk_ctrl" 2>/dev/null; then
+        return 0
+    fi
+
+    if [ ! -f "${bulk_ctrl}.original" ]; then
+        cp -f "$bulk_ctrl" "${bulk_ctrl}.original" 2>/dev/null || true
+    fi
+
+    local patched_bulk
+    patched_bulk=$(umask 077 && mktemp "${bulk_ctrl}.patch.XXXXXX") || return 1
+    if awk -v sq="'" '
+        /"v-schedule-user-restore-restic " \. \$user \. " " \. \$snapshot \. " " \. "cron",/ {
+            print "\t\t\t// hestia-restic-bulk-restore-v1: pass required yes argument matching standard bulk restore"
+            sub(/"cron",/, "\"cron\" . \" \" . \"" sq "yes" sq "\",")
+            print
+            found = 1
+            next
+        }
+        { print }
+        END { if (!found) exit 1 }
+    ' "$bulk_ctrl" > "$patched_bulk" && grep -q "hestia-restic-bulk-restore-v1" "$patched_bulk"; then
+        if command -v php >/dev/null 2>&1 && ! php -l "$patched_bulk" >/dev/null 2>&1; then
+            rm -f -- "$patched_bulk"
+            return 1
+        fi
+        chmod 0644 "$patched_bulk"
+        mv -f -- "$patched_bulk" "$bulk_ctrl"
+        _log "[$(date)] : Patched web/bulk/restore/incremental/index.php (fixed bulk cron restore yes arg)"
+    else
+        rm -f -- "$patched_bulk"
+    fi
+    return 0
+}
+
+# Apply user backup exclusions from backup-excludes.conf in v-backup-user-restic (PR #5924).
+patch_restic_backup_exclusions() {
+    local cli_bkp="$HESTIA/bin/v-backup-user-restic"
+    [ -f "$cli_bkp" ] || return 0
+    grep -q "hestia-restic-excludes-v1" "$cli_bkp" 2>/dev/null && return 0
+
+    if ! grep -q "hestia-restic-" "$cli_bkp" 2>/dev/null || [ ! -f "${cli_bkp}.original" ]; then
+        cp -f "$cli_bkp" "${cli_bkp}.original" 2>/dev/null || true
+    fi
+
+    if ! grep -q '\$BIN/v-backup-user-config \$user' "$cli_bkp" 2>/dev/null || \
+       ! grep -q 'restic --repo .*backup /home/\$user$' "$cli_bkp" 2>/dev/null; then
+        return 0
+    fi
+
+    local patch_tmp_root="/run"
+    [ -d "$patch_tmp_root" ] && [ -w "$patch_tmp_root" ] || patch_tmp_root="${TMPDIR:-/tmp}"
+
+    local work_exc patched_exc
+    work_exc=$(umask 077 && mktemp -d "$patch_tmp_root/hestia-restic-exc.XXXXXX") || return 1
+    patched_exc=$(umask 077 && mktemp "${cli_bkp}.patch.XXXXXX") || { rm -rf -- "$work_exc"; return 1; }
+
+    cat > "$work_exc/block" << 'EXC_EOF'
+# hestia-restic-excludes-v1: honor user backup-excludes.conf rules during Restic snapshots
+restic_excludes=()
+if [ -e "$USER_DATA/backup-excludes.conf" ]; then
+	WEB=""
+	MAIL=""
+	USER=""
+	source_conf "$USER_DATA/backup-excludes.conf"
+
+	if [ "$WEB" = '*' ]; then
+		restic_excludes+=(--exclude "/home/$user/web/*")
+	elif [ -n "$WEB" ]; then
+		IFS=',' read -ra web_entries <<< "$WEB"
+		for entry in "${web_entries[@]}"; do
+			[ -z "$entry" ] && continue
+			IFS=':' read -ra parts <<< "$entry"
+			domain_part="${parts[0]}"
+			[ -z "$domain_part" ] && continue
+			if [ "${#parts[@]}" -eq 1 ]; then
+				restic_excludes+=(--exclude "/home/$user/web/$domain_part")
+			else
+				for ((i = 1; i < ${#parts[@]}; i++)); do
+					seg="${parts[$i]#/}"
+					seg="${seg%/}"
+					[ -n "$seg" ] && restic_excludes+=(--exclude "/home/$user/web/$domain_part/$seg")
+				done
+			fi
+		done
+	fi
+
+	if [ "$MAIL" = '*' ]; then
+		restic_excludes+=(--exclude "/home/$user/mail/*")
+	elif [ -n "$MAIL" ]; then
+		IFS=',' read -ra mail_entries <<< "$MAIL"
+		for entry in "${mail_entries[@]}"; do
+			[ -z "$entry" ] && continue
+			IFS=':' read -ra parts <<< "$entry"
+			domain_part="${parts[0]}"
+			[ -z "$domain_part" ] && continue
+			if [ "$domain_part" != '*' ] && declare -F format_domain_idn >/dev/null 2>&1; then
+				domain_idn="$domain_part"
+				format_domain_idn
+				domain_part="$domain_idn"
+			fi
+			if [ "${#parts[@]}" -eq 1 ]; then
+				restic_excludes+=(--exclude "/home/$user/mail/$domain_part")
+			else
+				for ((i = 1; i < ${#parts[@]}; i++)); do
+					seg="${parts[$i]#/}"
+					seg="${seg%/}"
+					[ -n "$seg" ] && restic_excludes+=(--exclude "/home/$user/mail/$domain_part/$seg")
+				done
+			fi
+		done
+	fi
+
+	if [ "$USER" = '*' ]; then
+		while IFS= read -r udir; do
+			[ -z "$udir" ] && continue
+			restic_excludes+=(--exclude "/home/$user/$udir")
+		done < <(ls -A "/home/$user" | grep -Ev '^(backup|conf|web|dns|tmp|mail)$')
+	elif [ -n "$USER" ]; then
+		IFS=',' read -ra user_entries <<< "$USER"
+		for xpath in "${user_entries[@]}"; do
+			xpath="${xpath#/}"
+			xpath="${xpath%/}"
+			[ -n "$xpath" ] && restic_excludes+=(--exclude "/home/$user/$xpath")
+		done
+	fi
+fi
+EXC_EOF
+
+    if awk -v repl="$work_exc/block" '
+        /\$BIN\/v-backup-user-config \$user/ {
+            print
+            while ((getline line < repl) > 0) print line
+            close(repl)
+            found_cfg = 1
+            next
+        }
+        /restic --repo .*backup \/home\/\$user$/ {
+            sub(/backup \/home\/\$user$/, "backup \"${restic_excludes[@]}\" /home/$user")
+            print
+            found_cmd = 1
+            next
+        }
+        { print }
+        END { if (!found_cfg || !found_cmd) exit 1 }
+    ' "$cli_bkp" > "$patched_exc" && grep -q "hestia-restic-excludes-v1" "$patched_exc" && bash -n "$patched_exc"; then
+        chmod 0755 "$patched_exc"
+        mv -f -- "$patched_exc" "$cli_bkp"
+        _log "[$(date)] : Patched v-backup-user-restic (honor backup-excludes.conf)"
+    else
+        rm -f -- "$patched_exc"
+    fi
+    rm -rf -- "$work_exc"
     return 0
 }

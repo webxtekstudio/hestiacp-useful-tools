@@ -16,6 +16,25 @@ HESTIA_BIN="$HESTIA/bin"
 HESTIA_CONF="$HESTIA/conf/hestia.conf"
 RETENTION_CONF="/etc/hestiacp-backup-retention.conf"
 
+for arg in "$@"; do
+    case "$arg" in
+        --allow-untested-hestia) export ALLOW_UNTESTED_HESTIA=1 ;;
+        --apt-hook)              export HESTIA_APT_HOOK=1 ;;
+    esac
+done
+
+VERSION_GATE_LIB="$SCRIPT_DIR/../lib/version-gate.sh"
+CORE_PATCH_GATE_RC=0
+if [ -f "$VERSION_GATE_LIB" ]; then
+    # shellcheck source=../lib/version-gate.sh
+    source "$VERSION_GATE_LIB"
+    if [ "${HESTIA_APT_HOOK:-0}" = "1" ]; then
+        check_hestia_core_patch_compatibility "apt-hook" || CORE_PATCH_GATE_RC=$?
+    else
+        check_hestia_core_patch_compatibility "manual" || exit 1
+    fi
+fi
+
 echo "--- Installing Backup Core Patches ---"
 
 # 1. Cleanup old wrapper system (Migration from v1 architecture)
@@ -82,10 +101,12 @@ fi
 "$HESTIA_BIN/v-verify-backups" --quiet >/dev/null 2>&1 || true
 
 # 3. Apply core Hestia patches (B2 paths, symlink delete, v-backup-user post-hook)
-if [ -f "$LIB_DIR/hestia.sh" ]; then
+if [ "$CORE_PATCH_GATE_RC" -eq 0 ] && [ -f "$LIB_DIR/hestia.sh" ]; then
     _log() { echo "  -> $1"; }
     source "$LIB_DIR/hestia.sh"
     apply_hestia_patches
+elif [ "$CORE_PATCH_GATE_RC" -ne 0 ]; then
+    echo "  -> [INFO] Skipped core Hestia file mutations (version gate held); standalone Restic/backup helpers updated."
 fi
 
 # 3.1 Ensure APT DPkg::Post-Invoke hook re-applies patches automatically after HestiaCP updates
@@ -121,7 +142,7 @@ if [ -d "/etc/apt/apt.conf.d" ]; then
         cat > "$tmp_apt_hook" << APT_EOF
 // Managed by hestiacp-useful-tools (backup-core-patches)
 // Automatically re-applies HestiaCP custom patches after apt/dpkg package updates
-DPkg::Post-Invoke { "if [ -d '$REPO_ROOT' ] && [ ! -L '$REPO_ROOT' ] && [ -f '$REPO_ROOT/install.sh' ] && [ ! -L '$REPO_ROOT/install.sh' ] && [ -O '$REPO_ROOT' ] && [ -O '$REPO_ROOT/install.sh' ] && /bin/bash -c 'cur=$REPO_ROOT; while true; do [ ! -L \$cur ] && [ -O \$cur ] || exit 1; p=\$(stat -c %a \$cur 2>/dev/null || echo 777); [[ ! \$p =~ [2367].\$ && ! \$p =~ [2367]\$ ]] || exit 1; [ \$cur = / ] && break; cur=\$(dirname \$cur); done' && ! find -P '$REPO_ROOT' \( ! -user 0 -o -type l -o -perm /022 \) -print -quit 2>/dev/null | grep -q .; then /bin/bash '$REPO_ROOT/install.sh' </dev/null >/dev/null 2>&1 || true; fi"; };
+DPkg::Post-Invoke { "if [ -d '$REPO_ROOT' ] && [ ! -L '$REPO_ROOT' ] && [ -f '$REPO_ROOT/install.sh' ] && [ ! -L '$REPO_ROOT/install.sh' ] && [ -O '$REPO_ROOT' ] && [ -O '$REPO_ROOT/install.sh' ] && /bin/bash -c 'cur=$REPO_ROOT; while true; do [ ! -L \$cur ] && [ -O \$cur ] || exit 1; p=\$(stat -c %a \$cur 2>/dev/null || echo 777); [[ ! \$p =~ [2367].\$ && ! \$p =~ [2367]\$ ]] || exit 1; [ \$cur = / ] && break; cur=\$(dirname \$cur); done' && ! find -P '$REPO_ROOT' \( ! -user 0 -o -type l -o -perm /022 \) -print -quit 2>/dev/null | grep -q .; then /bin/bash '$REPO_ROOT/install.sh' --apt-hook </dev/null >/dev/null 2>&1 || true; fi"; };
 APT_EOF
         chown root:root "$tmp_apt_hook"
         chmod 0644 "$tmp_apt_hook"

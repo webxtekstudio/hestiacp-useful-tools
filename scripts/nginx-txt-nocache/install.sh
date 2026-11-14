@@ -16,6 +16,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HESTIA_BIN="$HESTIA/bin"
 BAK_DIR="/var/backups/hestiacp-useful-tools"
 
+for arg in "$@"; do
+    case "$arg" in
+        --allow-untested-hestia) export ALLOW_UNTESTED_HESTIA=1 ;;
+        --apt-hook)              export HESTIA_APT_HOOK=1 ;;
+    esac
+done
+
+VERSION_GATE_LIB="$SCRIPT_DIR/../lib/version-gate.sh"
+CORE_PATCH_GATE_RC=0
+if [ -f "$VERSION_GATE_LIB" ]; then
+    # shellcheck source=../lib/version-gate.sh
+    source "$VERSION_GATE_LIB"
+    if [ "${HESTIA_APT_HOOK:-0}" = "1" ]; then
+        check_hestia_core_patch_compatibility "apt-hook" || CORE_PATCH_GATE_RC=$?
+    else
+        check_hestia_core_patch_compatibility "manual" || exit 1
+    fi
+fi
+
 echo "--- Installing Nginx .txt Cache Hardener (v-patch-nginx-txt-nocache) ---"
 
 target_bin="$HESTIA_BIN/v-patch-nginx-txt-nocache"
@@ -28,5 +47,9 @@ rm -f "$target_bin"
 install -o root -g root -m 0755 "$SCRIPT_DIR/v-patch-nginx-txt-nocache" "$target_bin"
 echo "  -> [OK] Installed CLI script: $target_bin"
 
-"$target_bin"
-echo "  -> [OK] Applied Nginx .txt cache hardening across templates & domains"
+if [ "$CORE_PATCH_GATE_RC" -eq 0 ]; then
+    "$target_bin"
+    echo "  -> [OK] Applied Nginx .txt cache hardening across templates & domains"
+else
+    echo "  -> [INFO] Skipped applying core Nginx template mutations (version gate held)"
+fi

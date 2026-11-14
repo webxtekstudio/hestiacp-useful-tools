@@ -43,6 +43,8 @@ print_usage() {
     echo "  --setup-crons             Create/update /etc/cron.d/hestiacp-custom schedules"
     echo "  --setup-crons --crowdsec  Install all modules + crons + CrowdSec IPS (Pillar 6)"
     echo "  --all                     Install everything: all modules + crons + CrowdSec IPS"
+    echo "  --allow-untested-hestia   Allow core patches to run on a HestiaCP version other than the pinned release"
+    echo "  --apt-hook                Internal APT post-invoke mode (holds core patches cleanly on version mismatch)"
     echo ""
     echo "Standalone single-module shortcuts:"
     echo "  --fail2ban                Install and apply only the Fail2Ban email optimizer"
@@ -57,11 +59,13 @@ print_usage() {
 # ---------------------------------------------------------------------------
 for arg in "$@"; do
     case "$arg" in
-        --setup-crons) SETUP_CRONS=true ;;
-        --crowdsec)    SETUP_CROWDSEC=true ;;
-        --all)         FULL_INSTALL_ALL=true; SETUP_CRONS=true; SETUP_CROWDSEC=true ;;
-        --fail2ban)    WANT_FAIL2BAN_ONLY=true ;;
-        --harden)      WANT_HARDEN_ONLY=true ;;
+        --setup-crons)             SETUP_CRONS=true ;;
+        --crowdsec)                SETUP_CROWDSEC=true ;;
+        --all)                     FULL_INSTALL_ALL=true; SETUP_CRONS=true; SETUP_CROWDSEC=true ;;
+        --fail2ban)                WANT_FAIL2BAN_ONLY=true ;;
+        --harden)                  WANT_HARDEN_ONLY=true ;;
+        --allow-untested-hestia)   export ALLOW_UNTESTED_HESTIA=1 ;;
+        --apt-hook)                export HESTIA_APT_HOOK=1 ;;
         --help|-h)
             print_usage
             exit 0
@@ -125,8 +129,26 @@ if command -v flock >/dev/null 2>&1; then
     fi
 fi
 
+# Legacy APT DPkg::Post-Invoke calls install.sh with 0 arguments, </dev/null, and no SSH/sudo session
+if [ "$ORIG_ARGC" -eq 0 ] && [ ! -t 0 ] && [ -z "${HESTIA_APT_HOOK:-}" ] && [ -z "${SSH_CONNECTION:-}" ] && [ -z "${SUDO_USER:-}" ]; then
+    export HESTIA_APT_HOOK=1
+fi
+
 # ---------------------------------------------------------------------------
-# 4. Single-module shortcuts
+# 4. HestiaCP version gate for core file patches
+# ---------------------------------------------------------------------------
+if [ -z "$RUN_ONLY_MODULE" ] && [ -f "$SRC_DIR/scripts/lib/version-gate.sh" ]; then
+    # shellcheck source=scripts/lib/version-gate.sh
+    source "$SRC_DIR/scripts/lib/version-gate.sh"
+    if [ "${HESTIA_APT_HOOK:-0}" = "1" ]; then
+        check_hestia_core_patch_compatibility "apt-hook" || true
+    else
+        check_hestia_core_patch_compatibility "manual" || exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Single-module shortcuts
 # ---------------------------------------------------------------------------
 if [ -n "$RUN_ONLY_MODULE" ]; then
     module_install="$SRC_DIR/scripts/$RUN_ONLY_MODULE/install.sh"
@@ -462,7 +484,7 @@ fi
 echo ""
 echo "========================================"
 
-if [ "$INSTALL_ERRORS" -gt 0 ] && { [ "$ORIG_ARGC" -gt 0 ] || [ -t 0 ]; }; then
+if [ "$INSTALL_ERRORS" -gt 0 ] && [ "${HESTIA_APT_HOOK:-0}" != "1" ] && { [ "$ORIG_ARGC" -gt 0 ] || [ -t 0 ]; }; then
     exit 1
 fi
 exit 0
