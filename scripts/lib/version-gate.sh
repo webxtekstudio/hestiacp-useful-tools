@@ -51,8 +51,8 @@ check_hestia_core_patch_compatibility() {
         echo "  -> $warn_msg" >&2
 
         if (umask 077 && mkdir -p "$state_dir") 2>/dev/null && [ -w "$state_dir" ]; then
-            chmod 0700 "$state_dir" 2>/dev/null || true
             printf '%s %s\n' "$(date '+%F %T' 2>/dev/null || echo 'now')" "$warn_msg" >> "$log_file" 2>/dev/null || true
+            chmod 0600 "$log_file" 2>/dev/null || true
 
             local prev_held=""
             [ -f "$state_file" ] && prev_held="$(sed -n 's/^held_version=//p' "$state_file" 2>/dev/null | head -n1)"
