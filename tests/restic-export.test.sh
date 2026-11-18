@@ -13,7 +13,7 @@ export RESTIC_MASTER_KEY_FILE="$sand/master.key" FIXTURE_DATA="$sand/fixture"
 export EXPORT_TEST_STATE="$sand/state"
 mkdir -p "$HESTIA/conf" "$HESTIA/data/users/bob" "$sand/bin" "$sand/backup" "$EXPORT_TEST_STATE"
 mkdir -p "$FIXTURE_DATA/backup/hestia" "$FIXTURE_DATA/backup/web/example.com/hestia" "$FIXTURE_DATA/web/example.com/public_html"
-printf "VERSION='1.10.7'\nBACKUP='%s/backup'\nBACKUP_MODE='gzip'\nBACKUP_GZIP='1'\n" "$sand" > "$HESTIA/conf/hestia.conf"
+printf "VERSION='1.10.8'\nBACKUP='%s/backup'\nBACKUP_MODE='gzip'\nBACKUP_GZIP='1'\n" "$sand" > "$HESTIA/conf/hestia.conf"
 printf "REPO='local:fixture'\n" > "$HESTIA/conf/restic.conf"
 printf "U_BACKUPS='0'\nU_DISK='1'\n" > "$HESTIA/data/users/bob/user.conf"
 printf 'fixture-password\n' > "$HESTIA/data/users/bob/restic.conf"
@@ -127,7 +127,7 @@ HESTIA="$sand/patch-fixture"
 mkdir -p "$HESTIA/bin" "$HESTIA/conf" "$HESTIA/data/users/bob" "$HESTIA/data/queue" "$HESTIA/backup"
 mkdir -p "$HESTIA/web/templates/pages" "$HESTIA/web/list/backup/incremental" "$HESTIA/web/bulk/restore/incremental" "$HESTIA/web/templates/includes"
 touch "$HESTIA/data/queue/backup.pipe"
-printf "VERSION='1.10.7'\nBACKUP='%s/backup'\n" "$HESTIA" > "$HESTIA/conf/hestia.conf"
+printf "VERSION='1.10.8'\nBACKUP='%s/backup'\n" "$HESTIA" > "$HESTIA/conf/hestia.conf"
 printf "REPO='local:fixture'\n" > "$HESTIA/conf/restic.conf"
 printf "U_BACKUPS_INCREMENTAL='3'\nU_BACKUPS='0'\n" > "$HESTIA/data/users/bob/user.conf"
 printf "fixture-password\n" > "$HESTIA/data/users/bob/restic.conf"
@@ -330,6 +330,8 @@ echo 'PASS: hardened v-delete-user-backup-restic validates IDs, skips tmpdir lea
 
 # Web UI download/delete route, trash action, instant search script & incremental controller
 patch_restic_web_download_ui
+[ -f "$HESTIA/web/download/backup/incremental/index.php" ]
+grep -q 'preg_quote' "$HESTIA/web/download/backup/incremental/index.php"
 [ -f "$HESTIA/web/delete/backup/incremental/index.php" ]
 grep -q 'v-delete-user-backup-restic' "$HESTIA/web/delete/backup/incremental/index.php"
 [ -f "$HESTIA/web/js/custom_scripts/backup-instant-search.js" ]
@@ -339,9 +341,9 @@ grep -q 'fa-trash icon-red' "$HESTIA/web/templates/pages/list_backup_incremental
 grep -q 'hestia-restic-inc-ctrl-v3' "$HESTIA/web/list/backup/incremental/index.php"
 grep -q '\$panel\[\$user_plain\]' "$HESTIA/web/list/backup/incremental/index.php"
 grep -q 'no-cache' "$HESTIA/web/list/backup/incremental/index.php"
-echo 'PASS: web UI patch installs delete endpoint, trash action, instant search JS, and refreshed controller'
+echo 'PASS: web UI patch installs hardened download/delete endpoints, trash action, instant search JS, and refreshed controller'
 
-# Version gate tests (1.10.7 pin, manual reject, apt-hook safe hold + alert dedupe, override, auto-clear)
+# Version gate tests (1.10.8 pin, manual reject, apt-hook safe hold + alert dedupe, override, auto-clear)
 vg_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 (
     set -euo pipefail
@@ -364,12 +366,12 @@ ALERT
 
     source "$vg_repo_root/scripts/lib/version-gate.sh"
 
-    printf "VERSION='1.10.7'\n" > "$vg_sand/conf/hestia.conf"
+    printf "VERSION='1.10.8'\n" > "$vg_sand/conf/hestia.conf"
     rc=0
     check_hestia_core_patch_compatibility "manual" || rc=$?
     [ "$rc" -eq 0 ]
 
-    printf "VERSION='1.10.8'\n" > "$vg_sand/conf/hestia.conf"
+    printf "VERSION='1.10.9'\n" > "$vg_sand/conf/hestia.conf"
     rc=0
     check_hestia_core_patch_compatibility "manual" 2>/dev/null || rc=$?
     [ "$rc" -eq 1 ]
@@ -377,9 +379,9 @@ ALERT
     rc=0
     check_hestia_core_patch_compatibility "apt-hook" 2>/dev/null || rc=$?
     [ "$rc" -eq 2 ]
-    grep -qx 'held_version=1.10.8' "$HESTIA_TOOLS_HOLD_FILE"
+    grep -qx 'held_version=1.10.9' "$HESTIA_TOOLS_HOLD_FILE"
     [ "$(wc -l < "$VG_ALERT_LOG" | tr -d '[:space:]')" -eq 1 ]
-    grep -qx '1.10.8:1.10.7' "$VG_ALERT_LOG"
+    grep -qx '1.10.9:1.10.8' "$VG_ALERT_LOG"
 
     rc=0
     check_hestia_core_patch_compatibility "apt-hook" 2>/dev/null || rc=$?
@@ -392,13 +394,13 @@ ALERT
     [ "$rc" -eq 0 ]
 
     ALLOW_UNTESTED_HESTIA=0
-    printf "VERSION='1.10.7'\n" > "$vg_sand/conf/hestia.conf"
+    printf "VERSION='1.10.8'\n" > "$vg_sand/conf/hestia.conf"
     rc=0
     check_hestia_core_patch_compatibility "apt-hook" || rc=$?
     [ "$rc" -eq 0 ]
     [ ! -e "$HESTIA_TOOLS_HOLD_FILE" ]
 )
-echo 'PASS: version-gate enforces 1.10.7 pin, apt-hook hold + deduped alert, and override'
+echo 'PASS: version-gate enforces 1.10.8 pin, apt-hook hold + deduped alert, and override'
 
 # Restic staging perms, conf perms, and existing backup log hardening
 patch_restic_staging_perms

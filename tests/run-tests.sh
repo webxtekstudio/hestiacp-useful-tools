@@ -501,6 +501,54 @@ else
     fail "S38/S59 in mail.sh does not skip inactive ACCOUNTS='0' mail domains"
 fi
 
+# Regression check for S18 check_f2b_iptables_sync (shared chain MAIL with dovecot + exim)
+S18_TEST_OUT=""
+S18_SCRIPT="$SAND_DIR/s18_test.sh"
+cat > "$S18_SCRIPT" << 'EOF'
+fail_msgs=""
+warn_msgs=""
+pass_msgs=""
+section() { :; }
+result_fail() { fail_msgs="${fail_msgs}$1:$2;"; }
+result_warn() { warn_msgs="${warn_msgs}$1:$2;"; }
+result_pass() { pass_msgs="${pass_msgs}$1:$2;"; }
+EOF
+sed -n '/^check_f2b_iptables_sync()/,/^}/p' "$REPO_ROOT/scripts/security-audit/lib/system/firewall.sh" >> "$S18_SCRIPT"
+
+cat > "$SAND_DIR/bin/fail2ban-client" << 'EOF'
+#!/bin/bash
+case "${2:-}" in
+    dovecot-iptables) echo "   |- Currently banned: 2"; exit 0 ;;
+    exim-iptables) echo "   |- Currently banned: 8"; exit 0 ;;
+    wordpress-xmlrpc|ssh-iptables) echo "   |- Currently banned: 0"; exit 0 ;;
+esac
+exit 1
+EOF
+chmod +x "$SAND_DIR/bin/fail2ban-client"
+
+cat > "$SAND_DIR/bin/iptables" << 'EOF'
+#!/bin/bash
+if [ "$1" = "-L" ] && [ "${2:-}" = "fail2ban-MAIL" ]; then
+    for i in $(seq 1 "${MOCK_MAIL_RULES:-10}"); do
+        echo "DROP all -- 198.51.100.$i 0.0.0.0/0"
+    done
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "$SAND_DIR/bin/iptables"
+
+s18_shared=$(PATH="$SAND_DIR/bin:$PATH" MOCK_MAIL_RULES=10 bash -c "source '$S18_SCRIPT'; check_f2b_iptables_sync; printf 'PASS=%s WARN=%s FAIL=%s' \"\$pass_msgs\" \"\$warn_msgs\" \"\$fail_msgs\"")
+s18_zero=$(PATH="$SAND_DIR/bin:$PATH" MOCK_MAIL_RULES=0 bash -c "source '$S18_SCRIPT'; check_f2b_iptables_sync; printf 'PASS=%s WARN=%s FAIL=%s' \"\$pass_msgs\" \"\$warn_msgs\" \"\$fail_msgs\"")
+
+if printf '%s' "$s18_shared" | grep -q 'PASS=S18:' && \
+   printf '%s' "$s18_shared" | grep -q 'WARN= FAIL=$' && \
+   printf '%s' "$s18_zero" | grep -q 'FAIL=S18:DESYNC'; then
+    pass "S18 check_f2b_iptables_sync accepts shared-chain rules (ipt >= f2b) and flags 0-rule desync"
+else
+    fail "S18 check_f2b_iptables_sync regression (shared='$s18_shared', zero='$s18_zero')"
+fi
+
 # -----------------------------------------------------------------------------
 # 6. Public Repo Privacy Check (RFC 5737 / RFC 1918 IPv4 allowlist)
 # -----------------------------------------------------------------------------

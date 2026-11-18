@@ -75,6 +75,6 @@ To prevent an IP from EVER being banned:
 
 ## Configuration precedence and mail fetchers
 
-Custom jail changes belong in .local files. Jail loading order is jail.conf, jail.d/*.conf, jail.local, then jail.d/*.local (alphabetical within each group); later definitions override earlier values. Review effective configuration before applying changes. [Debian Fail2Ban manual](https://manpages.debian.org/bookworm/fail2ban/jail.conf.5.en.html), reviewed 2026-10-23.
+Custom jail changes belong in .local files. Jail loading order is jail.conf, jail.d/*.conf, jail.local, then jail.d/*.local (alphabetical within each group); later definitions override earlier values. Note that HestiaCP 1.10.8+ uses `filter = dovecot-hestia` (`/etc/fail2ban/filter.d/dovecot-hestia.conf`) for `dovecot-iptables`, so custom `.local` overrides in `/etc/fail2ban/jail.d/` should adjust `maxretry`, `findtime`, or `bantime` without resetting `filter = dovecot`. Review effective configuration before applying changes. [Debian Fail2Ban manual](https://manpages.debian.org/bookworm/fail2ban/jail.conf.5.en.html), reviewed 2026-10-23.
 
 A mail fetcher timeout can be caused by a banned source address, but also DNS, firewall or service faults. Correlate the exact address and time with Dovecot/Fail2Ban logs. Do not infer a ban from the provider name or whitelist an entire provider range. Correct invalid credentials and evaluate an exact-address unban only within the requested remediation scope.

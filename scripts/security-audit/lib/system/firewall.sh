@@ -113,15 +113,15 @@ check_f2b_iptables_sync() {
         local ipt_count
         ipt_count=$(iptables -L "$chain" -n 2>/dev/null | grep -cE 'REJECT|DROP')
 
-        # Allow small variance (shared chains like MAIL serve multiple jails)
-        local diff=$(( f2b_count - ipt_count ))
-        if [ $diff -lt 0 ]; then diff=$(( -diff )); fi
+        # Shared chains (MAIL for exim + dovecot, WEB for wordpress + roundcube)
+        # hold the union of bans across jails, so ipt_count >= f2b_count is healthy.
+        local missing=$(( f2b_count - ipt_count ))
 
         if [ "$f2b_count" -gt 0 ] && [ "$ipt_count" -eq 0 ]; then
             result_fail "S18" "DESYNC: ${jail} has ${f2b_count} bans but ${chain} has 0 iptables rules — bans are NOT blocking traffic"
             total_desync=$((total_desync + 1))
-        elif [ "$diff" -gt $(( f2b_count / 5 + 1 )) ]; then
-            result_warn "S18" "DRIFT: ${jail} has ${f2b_count} bans vs ${ipt_count} iptables rules in ${chain} (>20% difference)"
+        elif [ "$f2b_count" -gt 0 ] && [ "$missing" -gt $(( f2b_count / 5 + 1 )) ]; then
+            result_warn "S18" "DRIFT: ${jail} has ${f2b_count} bans vs ${ipt_count} iptables rules in ${chain} (>20% missing)"
             total_desync=$((total_desync + 1))
         fi
     done

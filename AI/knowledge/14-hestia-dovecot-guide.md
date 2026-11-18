@@ -65,6 +65,7 @@ This is the #1 Dovecot issue. The user can't log in to their email client.
     ```bash
     sudo -n fail2ban-client status dovecot-iptables 2>/dev/null || echo "No Dovecot jail found"
     ```
+    *Note (HestiaCP 1.10.8+):* `dovecot-iptables` uses `filter = dovecot-hestia` (`/etc/fail2ban/filter.d/dovecot-hestia.conf`) to match Hestia's Dovecot/Exim SASL auth logs; keep any `.local` overrides in `/etc/fail2ban/jail.d/` scoped to `maxretry`/`findtime`/`bantime` without resetting `filter = dovecot`.
 
 3.  **Check Firewall:**
     ```bash

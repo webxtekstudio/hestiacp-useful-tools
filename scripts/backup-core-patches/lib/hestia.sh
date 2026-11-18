@@ -553,8 +553,14 @@ $last_line = !empty($output) ? trim(end($output)) : "";
 if ($return_var === 0 && strpos($last_line, "READY|") === 0) {
 	$archive = substr($last_line, 6);
 	if (
-		$_SESSION["userContext"] === "admin" ||
-		(!empty($_SESSION["user"]) && strpos($archive, $_SESSION["user"] . ".") === 0)
+		($_SESSION["userContext"] === "admin" &&
+			preg_match('/^[A-Za-z0-9._-]+\.\d{4}-[0-9_-]+\.tar$/', $archive) === 1) ||
+		(!empty($_SESSION["user"]) &&
+			$_SESSION["userContext"] !== "admin" &&
+			preg_match(
+				"/^" . preg_quote($_SESSION["user"], "/") . '\.\d{4}-[0-9_-]+\.tar$/',
+				$archive,
+			) === 1)
 	) {
 		header("Content-type: application/x-tar");
 		header('Content-Disposition: attachment; filename="' . $archive . '";');
@@ -1424,7 +1430,7 @@ patch_restic_bulk_cron_restore() {
         return 0
     fi
 
-    if [ ! -f "${bulk_ctrl}.original" ]; then
+    if ! grep -q "hestia-restic-bulk-restore-" "$bulk_ctrl" 2>/dev/null || [ ! -f "${bulk_ctrl}.original" ]; then
         cp -f "$bulk_ctrl" "${bulk_ctrl}.original" 2>/dev/null || true
     fi
 
