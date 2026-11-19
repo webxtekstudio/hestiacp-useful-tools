@@ -58,6 +58,10 @@ Debian rotates Exim logs daily. `mainlog` is today, `mainlog.1` is usually yeste
 *   Check if Exim is listening: `sudo -n netstat -plnt | grep :25`
 *   Check Firewall: `v-list-firewall`
 
+### Per-Domain SMTP Relay & Null Envelope Senders (`MAIL FROM:<>`)
+*   On **HestiaCP `1.10.10+`** (`hestiacp/hestiacp#5913`), Exim templates resolve `RELAY_SENDER_DOMAIN` by falling back to the domain part of `$authenticated_id` when `$sender_address_domain` is empty, so authenticated vacation auto-replies and MDN read receipts (`MAIL FROM:<>`) look up `/etc/exim4/domains/<domain>/smtp_relay.conf` instead of bypassing the per-domain relay.
+*   **Operational caveat:** Most third-party transactional SMTP relays (e.g. Amazon SES, SendGrid, Mailgun, Brevo) still reject null envelope senders (`MAIL FROM:<>`) on authenticated submission with `550`/`553`/`501` errors. If auto-replies or read receipts fail at the upstream relay (`**` in `/var/log/exim4/mainlog` paired with `<= <>`), configure an explicit `:from` address in the Sieve vacation rule or use an SMTP relay provider that permits null-sender bounces.
+
 ## 4. Advanced Diagnostics (Rejections & Blocks)
 
 ### Why was an email rejected?
