@@ -131,7 +131,7 @@ Automation and maintenance scripts to enhance HestiaCP's default capabilities.
 
 ### Prerequisites
 
-- A server running **HestiaCP** (core file patches are verified & pinned to **1.10.8**; standalone scripts work across recent versions)
+- A server running **HestiaCP** (core file patches are verified & pinned to **1.10.9**; standalone scripts work across recent versions)
 - **Root access** via SSH
 - `git` installed (`apt install git` if needed)
 
@@ -154,7 +154,7 @@ bash install.sh --setup-crons            # Configure recommended cron schedules 
 bash install.sh --harden                 # Run only the 5-pillar Server Hardening module
 bash install.sh --crowdsec               # Run Server Hardening + CrowdSec Collaborative IPS (6 pillars)
 bash install.sh --fail2ban               # Run only the Fail2Ban Email Optimizer
-bash install.sh --allow-untested-hestia  # Override the HestiaCP 1.10.8 core-patch version pin (manual runs)
+bash install.sh --allow-untested-hestia  # Override the HestiaCP 1.10.9 core-patch version pin (manual runs)
 ```
 
 This installs the selected tools to `/usr/local/hestia/bin/` and creates default configs in `/etc/` (existing configs are never overwritten on re-runs).

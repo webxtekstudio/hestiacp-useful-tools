@@ -4,7 +4,7 @@
 # Standalone tools continue running even when core patches are placed on hold
 # during an unattended HestiaCP upgrade.
 
-SUPPORTED_HESTIA_VERSION="${SUPPORTED_HESTIA_VERSION:-1.10.8}"
+SUPPORTED_HESTIA_VERSION="${SUPPORTED_HESTIA_VERSION:-1.10.9}"
 
 hestia_detected_version() {
     local hestia_root="${HESTIA:-/usr/local/hestia}"
